@@ -85,6 +85,41 @@ accumulate the results into nested ``OrderedDict``\\ s suitable for
 .. literalinclude:: ../pyx12/examples/834_x12_json.py
    :language: python
 
+Building an 835 per-payer responsibility table
+----------------------------------------------
+
+:download:`835_payer_responsibility.py <../pyx12/examples/835_payer_responsibility.py>`
+parses an 835 Claim Payment/Advice and flattens each ``2100`` claim into a
+per-payer responsibility table. An 835 is sent by a single payer, so the
+sender (header ``N1*PR``) is the primary payer unless the claim carries a
+Corrected Priority Payer (``NM1*PR``); the Crossover Carrier (``NM1*TT``)
+is the secondary payer. That is an explicit responsibility order, never the
+order segments happen to appear in the file.
+
+The module applies three rules on top of the raw parse:
+
+* **Amounts follow X221 conventions.** The primary payer's result is the
+  ``CLP04`` / ``SVC03`` payment and the ``CO``/``OA``/``PI`` adjustment
+  groups; the secondary payer's share is the ``PR`` (patient responsibility)
+  group plus prior-payer ``AMT`` qualifiers ``ZK``/``ZL``/``ZM``/``ZN``/``ZO``.
+* **A missing primary result stays missing.** A blank ``CLP04`` is reported
+  with ``paid_present = false`` and a ``None`` amount rather than coerced to
+  zero, so the secondary row is never computed from a fabricated zero.
+* **Contradictory orders are listed separately.** Multiple carriers claiming
+  the same position, or a header/claim primary-payer identity mismatch, mark
+  those candidates ``U`` (unresolved) and surface the claim in
+  ``unresolved_claims`` instead of letting file position pick a winner.
+
+Every row keeps its service-line association (the ``2110`` loop) and the raw
+source segment text with line numbers, so each figure is traceable back to the
+original 835. Run it as a script with ``python -m
+pyx12.examples.835_payer_responsibility FILE...`` or call
+:func:`pyx12.examples.835_payer_responsibility.build_responsibility_table`
+on an open file object.
+
+.. literalinclude:: ../pyx12/examples/835_payer_responsibility.py
+   :language: python
+
 Generating a field reference from a sample file
 -----------------------------------------------
 
