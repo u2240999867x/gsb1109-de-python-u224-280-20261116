@@ -46,6 +46,10 @@ class SMB2Message:
         self.status = 0
         self.flags = 0
 
+        # SMB2 credit fields (see [MS-SMB2] 2.2.1.1 and 2.2.1.2)
+        self.credit_charge = 0
+        self.credit_re = 0
+
         self.next_command_offset = 0
         self.mid = 0
         self.session_id = 0
@@ -79,7 +83,7 @@ class SMB2Message:
         self.payload.prepare(self)
 
         headers_data = struct.pack(self.HEADER_STRUCT_FORMAT,
-                                   b'\xFESMB', self.HEADER_SIZE, 0, self.status, self.command, 0, self.flags) + \
+                                   b'\xFESMB', self.HEADER_SIZE, self.credit_charge, self.status, self.command, self.credit_re, self.flags) + \
                        struct.pack(self.SYNC_HEADER_STRUCT_FORMAT, self.next_command_offset, self.mid, self.pid, self.tid, self.session_id, self.signature)
         return headers_data + self.data
 

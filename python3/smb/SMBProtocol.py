@@ -29,6 +29,7 @@ class SMBProtocol(Protocol, SMB):
     def connectionLost(self, reason):
         if self.factory.instance == self:
             self.instance = None
+        self.credit_ledger.disconnect(reason=str(reason))
 
     def dataReceived(self, data):
         self.feedData(data)
@@ -65,6 +66,8 @@ class SMBProtocol(Protocol, SMB):
                     try:
                         r.errback(SMBTimeout())
                     except Exception: pass
+                    self.credit_ledger.cancel(mid=mid, release=True,
+                                              reason='timeout')
                     to_remove.append(mid)
 
             for mid in to_remove:

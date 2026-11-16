@@ -7,6 +7,7 @@ from .smb_constants import *
 from .smb2_constants import *
 from .smb_structs import *
 from .smb2_structs import *
+from .smb2_credit import CreditLedger, calculate_credit_charge, smb2_message_payload_size
 from .security_descriptors import SecurityDescriptor
 from nmb.base import NMBSession
 from .utils import convertFILETIMEtoEpoch, convertEpochToFILETIME
@@ -66,6 +67,11 @@ class SMB(NMBSession):
         self.is_using_smb2 = False   #: Are we communicating using SMB2 protocol? self.smb_message will be a SMB2Message instance if this flag is True
         self.async_requests = { }    #: AsyncID mapped to _PendingRequest instance
         self.pending_requests = { }  #: MID mapped to _PendingRequest instance
+        # Live pysmb operations do not currently block on credits.  The ledger
+        # therefore records in-flight charges and request completion without
+        # treating the advertised budget as a hard limit; offline replay uses a
+        # non-track-only ledger to compute dispatch times.
+        self.credit_ledger = CreditLedger(track_only=True, history_limit=256)  #: SMB2 credit accounting for outgoing and completed requests
         self.connected_trees = { }   #: Share name mapped to TID
         self.next_rpc_call_id = 1    #: Next RPC callID value. Not used directly in SMB message. Usually encapsulated in sub-commands under SMB_COM_TRANSACTION or SMB_COM_TRANSACTION2 messages
 
@@ -233,6 +239,22 @@ class SMB(NMBSession):
         if smb_message.command != SMB2_COM_NEGOTIATE:
             smb_message.session_id = self.session_id
 
+        # [MS-SMB2] 3.2.4.1.5: every request consumes at least one credit;
+        # READ/WRITE consume ceil(length / 65536).  The ledger records the
+        # charge and in-flight amount for the connection; pysmb's operation
+        # layer does not currently throttle on credits, so submit with
+        # force=True rather than blocking an existing call path.
+        if not smb_message.isReply:
+            smb_message.credit_charge = calculate_credit_charge(smb_message)
+            smb_message.credit_re = 0
+            self.credit_ledger.submit(
+                smb_message.mid,
+                size=smb2_message_payload_size(smb_message),
+                command=smb_message.command,
+                charge=smb_message.credit_charge,
+                force=True,
+            )
+
         if self.is_signing_active:
             smb_message.flags |= SMB2_FLAGS_SIGNED
             raw_data = smb_message.encode()
@@ -332,19 +354,35 @@ class SMB(NMBSession):
 
             if message.isAsync:
                 if message.status == 0x00000103:  # STATUS_PENDING
+                    self.credit_ledger.pending(message.mid, message.async_id,
+                                               credit_response=message.credit_re)
                     req = self.pending_requests.pop(message.mid, None)
                     if req:
                         self.async_requests[message.async_id] = req
                 else: # All other status including SUCCESS
+                    self.credit_ledger.response(message.mid, message.async_id,
+                                                status=message.status,
+                                                credit_response=message.credit_re,
+                                                grant_unmatched=True)
                     req = self.async_requests.pop(message.async_id, None)
                     if req:
                         req.callback(message, **req.kwargs)
                         return True
             else:
-                req = self.pending_requests.pop(message.mid, None)
-                if req:
-                    req.callback(message, **req.kwargs)
-                    return True
+                if message.status == 0x00000103:  # STATUS_PENDING
+                    # An interim response keeps the request pending; only the
+                    # final response completes it.
+                    self.credit_ledger.pending(message.mid,
+                                               credit_response=message.credit_re)
+                else:
+                    self.credit_ledger.response(message.mid,
+                                                status=message.status,
+                                                credit_response=message.credit_re,
+                                                grant_unmatched=True)
+                    req = self.pending_requests.pop(message.mid, None)
+                    if req:
+                        req.callback(message, **req.kwargs)
+                        return True
 
 
     def _updateServerInfo_SMB2(self, payload):
