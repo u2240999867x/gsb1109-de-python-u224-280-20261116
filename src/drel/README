@@ -1,0 +1,5 @@
+This is part of the PyCIFRW Python package for parsing and transforming dREL functions. dREL
+is a language for specification of relationships among items in a
+relationally-specified data framework.
+
+You should have PLY (Python Lex/Yacc) installed as a prerequisite.

@@ -1,0 +1,16 @@
+*.pyc
+*.html
+*~
+
+sync.bat
+
+# generated Python sources
+/src/YappsStarParser_*.py
+/src/TypeContentsParser.py
+
+# build directories
+/PyCifRW.egg-info/
+/build/
+/dist/
+
+/.idea/
