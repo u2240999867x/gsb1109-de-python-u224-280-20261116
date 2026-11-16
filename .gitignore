@@ -1,0 +1,32 @@
+*.py[cod]
+
+# Packages
+*.egg
+*.egg-info
+/.eggs/
+/dist/
+/build/
+/eggs/
+/parts/
+/bin/
+/var/
+/sdist/
+/develop-eggs/
+/lib/
+/lib64/
+/include/
+/local/
+/.installed.cfg
+
+# Installer logs
+/pip-selfcheck.json
+/pip-log.txt
+
+# Unit test / coverage reports
+/.coverage
+/.tox
+/nosetests.xml
+/coverage_html/
+
+# Sphinx docs
+/doc/_build

@@ -1,0 +1,13 @@
+queue_rules:
+  - name: default
+    queue_conditions:
+      - base=master
+      - label~=merge-queue|dependencies
+    merge_conditions: []
+    merge_method: rebase
+
+pull_request_rules:
+  - name: refactored queue action rule
+    conditions: []
+    actions:
+      queue:
