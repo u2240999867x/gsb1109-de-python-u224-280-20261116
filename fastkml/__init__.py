@@ -83,6 +83,19 @@ from fastkml.styles import PolyStyle
 from fastkml.styles import Style
 from fastkml.styles import StyleMap
 from fastkml.styles import StyleUrl
+from fastkml.tile_pyramid import PixelRegion
+from fastkml.tile_pyramid import RegionCoverage
+from fastkml.tile_pyramid import RegionRequest
+from fastkml.tile_pyramid import TileCoordinate
+from fastkml.tile_pyramid import TilePlan
+from fastkml.tile_pyramid import TileRequest
+from fastkml.tile_pyramid import build_tile_plan
+from fastkml.tile_pyramid import level_dimensions
+from fastkml.tile_pyramid import maximum_level
+from fastkml.tile_pyramid import render_tile_href
+from fastkml.tile_pyramid import tile_pixel_region
+from fastkml.tile_pyramid import tile_plan_from_photo_overlay
+from fastkml.tile_pyramid import tiles_for_region
 from fastkml.times import KmlDateTime
 from fastkml.times import TimeSpan
 from fastkml.times import TimeStamp
@@ -133,10 +146,13 @@ __all__ = [
     "OverlayXY",
     "Pair",
     "PhotoOverlay",
+    "PixelRegion",
     "Placemark",
     "Point",
     "PolyStyle",
     "Polygon",
+    "RegionCoverage",
+    "RegionRequest",
     "ResourceMap",
     "RotationXY",
     "Scale",
@@ -151,14 +167,24 @@ __all__ = [
     "Style",
     "StyleMap",
     "StyleUrl",
+    "TileCoordinate",
+    "TilePlan",
+    "TileRequest",
     "TimeSpan",
     "TimeStamp",
     "Update",
     "ViewVolume",
+    "build_tile_plan",
     "create_kml_geometry",
     "find",
     "find_all",
     "get_schema_parser",
+    "level_dimensions",
+    "maximum_level",
+    "render_tile_href",
+    "tile_pixel_region",
+    "tile_plan_from_photo_overlay",
+    "tiles_for_region",
     "validate",
 ]
 

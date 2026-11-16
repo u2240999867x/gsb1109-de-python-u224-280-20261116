@@ -199,6 +199,14 @@ fastkml.times
    :undoc-members:
    :show-inheritance:
 
+fastkml.tile_pyramid
+-----------------------
+
+.. automodule:: fastkml.tile_pyramid
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 fastkml.types
 --------------------
 
