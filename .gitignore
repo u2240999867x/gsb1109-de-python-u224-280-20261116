@@ -1,0 +1,29 @@
+# Python stuff
+*.pyc
+__pycache__
+
+# vim swapfiles
+*.sw?
+
+# python packaging
+MANIFEST
+dist/
+build/
+*.egg-info/
+
+# PyCharm stuff
+.idea/
+
+# Eclipse stuff
+.project
+.pydevproject
+
+# Virtual envs
+venv*
+
+# Tox
+.tox/
+.env
+.coverage
+junit/test-results.xml
+coverage.xml
