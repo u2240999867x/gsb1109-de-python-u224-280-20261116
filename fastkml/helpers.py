@@ -606,13 +606,25 @@ def datetime_subelement_list(
         verbosity=verbosity,
         default=default,
     ):
+        first_value = next((entry for entry in value if entry is not None), None)
         for item in value:
-            ns = get_ns(obj, item)
+            # A missing entry has no value to inspect; reuse the namespace
+            # of the first real value, or the KML namespace when the whole
+            # column is missing.
+            ns = (
+                get_ns(obj, item)
+                if item is not None
+                else get_ns(obj, first_value)
+                if first_value is not None
+                else config.KMLNS
+            )
             subelement = config.etree.SubElement(
                 element,
                 f"{ns}{node_name}",
             )
-            subelement.text = str(item)
+            # A ``None`` entry is a missing sample.  Keep the empty
+            # element so later samples stay at their original index.
+            subelement.text = "" if item is None else str(item)
 
 
 def coords_subelement_list(
@@ -638,7 +650,11 @@ def coords_subelement_list(
                 element,
                 f"{ns}{node_name}",
             )
-            if precision is None:
+            # ``None`` marks a missing sample; emit an empty element so
+            # subsequent values keep their original position.
+            if coord is None:
+                subelement.text = ""
+            elif precision is None:
                 subelement.text = " ".join(str(c) for c in coord)
             else:
                 subelement.text = " ".join(f"{c:.{precision}f}" for c in coord)
@@ -1272,16 +1288,19 @@ def datetime_subelement_list_kwarg(
     kwarg: str,
     classes: tuple[type[object], ...],
     strict: bool,
-) -> dict[str, list["KmlDateTime"]]:
+) -> dict[str, list["KmlDateTime | None"]]:
     """Extract a list of KML datetime values from subelements of an XML element."""
-    args_list: list[KmlDateTime] = []
+    args_list: list[KmlDateTime | None] = []
     cls = cast("type[KmlDateTime]", classes[0])
     if subelements := element.findall(f"{ns}{node_name}"):
         for subelement in subelements:
-            if not subelement.text:
+            text = subelement.text.strip() if subelement.text else ""
+            if not text:
+                # Preserve the position of a missing sample.
+                args_list.append(None)
                 continue
             try:
-                args_list.append(cls.parse(subelement.text))
+                args_list.append(cls.parse(text))
             except ValueError as exc:
                 handle_error(
                     error=exc,
@@ -1290,6 +1309,7 @@ def datetime_subelement_list_kwarg(
                     node=subelement,
                     expected="DateTime",
                 )
+                args_list.append(None)
     return {kwarg: args_list} if args_list else {}
 
 
@@ -1325,11 +1345,32 @@ def coords_subelement_list_kwarg(
     kwarg: str,
     classes: tuple[type[object], ...],
     strict: bool,
-) -> dict[str, list[PointType]]:
+) -> dict[str, list[PointType | None]]:
     """Extract a list of KML coordinate values from subelements of an XML element."""
-    args_list: list[PointType] = []
+    args_list: list[PointType | None] = []
     if subelements := element.findall(f"{ns}{node_name}"):
-        args_list = list(get_coord_args(element, subelements, strict))
+        for subelement in subelements:
+            text = subelement.text.strip() if subelement.text else ""
+            if not text:
+                # Preserve the position of a missing coordinate.
+                args_list.append(None)
+                continue
+            try:
+                args_list.append(
+                    cast(
+                        "PointType",
+                        tuple(float(coord) for coord in text.split()),
+                    ),
+                )
+            except ValueError as exc:
+                handle_error(
+                    error=exc,
+                    strict=strict,
+                    element=element,
+                    node=subelement,
+                    expected="Coordinates",
+                )
+                args_list.append(None)
     return {kwarg: args_list} if args_list else {}
 
 

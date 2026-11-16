@@ -19,6 +19,7 @@
 import logging
 from collections.abc import Iterable
 from dataclasses import dataclass
+from dataclasses import field
 from typing import TYPE_CHECKING
 from typing import Any
 
@@ -51,6 +52,7 @@ __all__ = [
     "MultiTrack",
     "Track",
     "TrackItem",
+    "TrackSample",
     "track_items_to_geometry",
     "tracks_to_geometry",
 ]
@@ -90,14 +92,130 @@ class Angle:
 class TrackItem:
     """A track item describes an objects position and heading at a specific time."""
 
-    when: KmlDateTime
-    coord: geo.Point
+    when: KmlDateTime | None
+    coord: geo.Point | None = None
     angle: Angle | None = None
 
 
-def track_items_to_geometry(track_items: Iterable[TrackItem]) -> geo.LineString:
+@dataclass(frozen=True)
+class TrackSample:
     """
-    Convert a sequence of TrackItems to a LineString geometry.
+    One aligned sample of a track.
+
+    A sample keeps its original position even when one or more columns are
+    missing.  Missing columns are ``None``.
+    """
+
+    segment: int
+    index: int
+    when: KmlDateTime | None = None
+    coord: geo.Point | None = None
+    angle: Angle | None = None
+    measurements: dict[str, str | None] = field(default_factory=dict)
+
+    @property
+    def identity(self) -> tuple[int, int]:
+        """Return the sample identity as ``(segment, index)``."""
+        return (self.segment, self.index)
+
+    @property
+    def sample_id(self) -> tuple[int, int]:
+        """Return the sample identity as ``(segment, index)``."""
+        return self.identity
+
+    @property
+    def missing(self) -> frozenset[str]:
+        """Return the names of the columns missing from this sample."""
+        missing = {
+            name
+            for name, value in (
+                ("when", self.when),
+                ("coord", self.coord),
+                ("angles", self.angle),
+            )
+            if value is None
+        }
+        missing.update(
+            name for name, value in self.measurements.items() if value is None
+        )
+        return frozenset(missing)
+
+    @property
+    def mask(self) -> dict[str, bool]:
+        """Return a per-column missing mask, ``True`` meaning missing."""
+        mask = {
+            "when": self.when is None,
+            "coord": self.coord is None,
+            "angles": self.angle is None,
+        }
+        for name, value in self.measurements.items():
+            mask[name] = value is None
+        return mask
+
+    @property
+    def core_mask(self) -> tuple[bool, bool, bool]:
+        """Return the ``when, coord, angles`` mask as a tuple."""
+        return (self.when is None, self.coord is None, self.angle is None)
+
+    @property
+    def is_complete(self) -> bool:
+        """Return ``True`` when no column is missing for this sample."""
+        return not self.missing
+
+
+def _split_points(track_items: Iterable[TrackItem]) -> list[list[PointType]]:
+    """Split track items at missing coordinates, preserving sample order."""
+    segments: list[list[PointType]] = []
+    current: list[PointType] = []
+    for item in track_items:
+        if item.coord is None or not item.coord.coords:
+            if current:
+                segments.append(current)
+                current = []
+            continue
+        current.append(item.coord.coords[0])  # type: ignore[misc]
+    if current:
+        segments.append(current)
+    return segments
+
+
+def _segments_to_geometry(
+    segments: Iterable[Iterable[PointType]],
+) -> geo.LineString | geo.MultiLineString:
+    """Build a geometry without connecting across missing samples."""
+    lines = [
+        geo.LineString.from_points(*(geo.Point(*point) for point in segment))
+        for segment in segments
+        if segment
+    ]
+    if len(lines) == 1:
+        return lines[0]
+    return geo.MultiLineString.from_linestrings(*lines)
+
+
+def _array_data(
+    extended_data: "ExtendedData | None",
+) -> list[tuple[str, list[str | None]]]:
+    """Collect ``gx:SimpleArrayData`` columns from extended data."""
+    if not extended_data:
+        return []
+    return [
+        (array.name, list(array.data))
+        for element in extended_data.elements
+        if getattr(element, "array_data", None) is not None
+        for array in element.array_data
+        if array.name
+    ]
+
+
+def track_items_to_geometry(
+    track_items: Iterable[TrackItem],
+) -> geo.LineString | geo.MultiLineString:
+    """
+    Convert a sequence of TrackItems to a geometry.
+
+    Missing coordinates split the result into separate line segments instead of
+    shifting later coordinates forward.
 
     Args:
     ----
@@ -106,13 +224,13 @@ def track_items_to_geometry(track_items: Iterable[TrackItem]) -> geo.LineString:
 
     Returns:
     -------
-        geo.LineString
-            A LineString geometry representing the track.
+        Union[geo.LineString, geo.MultiLineString]
+            A geometry representing the track.  A single continuous run of
+            coordinates yields a ``LineString``; a gap yields a
+            ``MultiLineString`` with one line per run.
 
     """
-    return geo.LineString.from_points(
-        *[item.coord for item in track_items if item.coord is not None],
-    )
+    return _segments_to_geometry(_split_points(track_items))
 
 
 class Track(_Geometry):
@@ -144,14 +262,19 @@ class Track(_Geometry):
         target_id: str | None = None,
         altitude_mode: AltitudeMode | None = None,
         track_items: Iterable[TrackItem] | None = None,
-        whens: Iterable[KmlDateTime] | None = None,
-        coords: Iterable[PointType] | None = None,
-        angles: Iterable[PointType] | None = None,
+        whens: Iterable[KmlDateTime | None] | None = None,
+        coords: Iterable[PointType | None] | None = None,
+        angles: Iterable[PointType | None] | None = None,
         extended_data: "ExtendedData | None" = None,
         **kwargs: Any,
     ) -> None:
         """
         Initialize a GX object.
+
+        ``whens``, ``coords``, and ``angles`` are positional columns.  A
+        missing entry (``None``) marks a gap for that position.  Columns are
+        padded at the end only; values are never shifted forward onto a later
+        sample.
 
         Parameters
         ----------
@@ -167,12 +290,14 @@ class Track(_Geometry):
             The altitude mode of the GX object, by default None
         track_items : Optional[Iterable[TrackItem]], optional
             The track items of the GX object, by default None
-        whens : Optional[Iterable[KmlDateTime]], optional
+        whens : Optional[Iterable[Optional[KmlDateTime]]], optional
             The timestamps of the track items, by default None
-        coords : Optional[Iterable[PointType]], optional
+        coords : Optional[Iterable[Optional[PointType]]], optional
             The coordinates of the track items, by default None
-        angles : Optional[Iterable[PointType]], optional
-            The angles of the track items, by default None
+        angles : Optional[Iterable[Optional[PointType]]], optional
+            The angles of the track items, by default None.  When omitted the
+            KML default of zero heading, tilt, and roll applies; when supplied,
+            missing entries stay missing.
         extended_data : Optional[ExtendedData], optional
             The extended data of the GX object, by default None
         **kwargs : Any, optional
@@ -181,24 +306,39 @@ class Track(_Geometry):
         Raises
         ------
         ValueError
-            If both `geometry` and `track_items` are specified.
+            If both `track_items` and `whens`/`coords` are specified.
 
         """
-        angles = list(angles) if angles else []
         if (whens or coords) and track_items:
             msg = "Cannot specify both geometry and track_items"
             raise ValueError(msg)
-        if not track_items and whens and coords:
-            # `whens`/`coords` form mandatory pairs (a track item always
-            # needs a timestamp and a coordinate); `angles` may be shorter
-            # and defaults to Angle()'s all-zero heading/tilt/roll.
+        if not track_items and (whens or coords):
+            # ``whens``, ``coords``, and ``angles`` are independent columns;
+            # a missing entry keeps its position instead of consuming the
+            # next available value.
+            when_list = list(whens) if whens else []
+            coord_list = list(coords) if coords else []
+            angle_list = list(angles) if angles is not None else None
+            count = max(
+                len(when_list),
+                len(coord_list),
+                len(angle_list) if angle_list is not None else 0,
+            )
             track_items = [
                 TrackItem(
-                    when=when,
-                    coord=geo.Point(*coord),
-                    angle=Angle(*angles[i]) if i < len(angles) else Angle(),
+                    when=when_list[i] if i < len(when_list) else None,
+                    coord=geo.Point(*coord_list[i])
+                    if i < len(coord_list) and coord_list[i] is not None
+                    else None,
+                    angle=(
+                        Angle(*angle_list[i])
+                        if i < len(angle_list) and angle_list[i] is not None
+                        else None
+                    )
+                    if angle_list is not None
+                    else Angle(),
                 )
-                for i, (when, coord) in enumerate(zip(whens, coords, strict=True))
+                for i in range(count)
             ]
         self.track_items = list(track_items) if track_items else []
         self.extended_data = extended_data
@@ -235,60 +375,150 @@ class Track(_Geometry):
         )
 
     @property
-    def geometry(self) -> geo.LineString | None:
+    def geometry(self) -> geo.LineString | geo.MultiLineString | None:
         """
         Get the geometry of the track.
 
         Returns
         -------
-        Optional[geo.LineString]
-            The geometry of the track.
+        Optional[Union[geo.LineString, geo.MultiLineString]]
+            The geometry of the track.  Missing coordinates split the track
+            into separate line segments.
 
         """
         return track_items_to_geometry(self.track_items)
 
     @property
-    def whens(self) -> tuple[KmlDateTime, ...]:
+    def whens(self) -> tuple[KmlDateTime | None, ...]:
         """
         Get the timestamps of the track items.
 
         Returns
         -------
-        Tuple[KmlDateTime]
-            The timestamps of the track items.
+        Tuple[Optional[KmlDateTime]]
+            The timestamps of the track items, one entry per sample.
 
         """
         return tuple(item.when for item in self.track_items)
 
     @property
-    def coords(self) -> tuple[PointType, ...]:
+    def coords(self) -> tuple[PointType | None, ...]:
         """
         Get the coordinates of the track items.
 
         Returns
         -------
-        Tuple[PointType]
-            The coordinates of the track items.
+        Tuple[Optional[PointType]]
+            The coordinates of the track items, one entry per sample.
 
         """
         return tuple(
-            item.coord.coords[0]  # type: ignore[misc]
+            item.coord.coords[0] if item.coord and item.coord.coords else None  # type: ignore[misc]
             for item in self.track_items
-            if item.coord and item.coord.coords
         )
 
     @property
-    def angles(self) -> tuple[PointType, ...]:
+    def angles(self) -> tuple[PointType | None, ...]:
         """
         Get the angles of the track items.
 
         Returns
         -------
-        Tuple[Angle]
-            The angles of the track items.
+        Tuple[Optional[PointType]]
+            The angles of the track items, one entry per sample.
 
         """
-        return tuple(item.angle.coords for item in self.track_items if item.angle)
+        return tuple(
+            item.angle.coords if item.angle else None for item in self.track_items
+        )
+
+    @property
+    def samples(self) -> tuple[TrackSample, ...]:
+        """
+        Return the aligned samples of the track.
+
+        Every original position is preserved; a missing column is ``None``.
+        Later samples are never shifted forward to fill a gap.  Extended
+        measurement columns are aligned by the same index.
+        """
+        measurements = self.measurements
+        count = max(
+            [len(self.track_items)] + [len(values) for values in measurements.values()],
+        )
+        return tuple(
+            TrackSample(
+                segment=0,
+                index=index,
+                when=self.track_items[index].when
+                if index < len(self.track_items)
+                else None,
+                coord=self.track_items[index].coord
+                if index < len(self.track_items)
+                else None,
+                angle=self.track_items[index].angle
+                if index < len(self.track_items)
+                else None,
+                measurements={
+                    name: values[index] if index < len(values) else None
+                    for name, values in measurements.items()
+                },
+            )
+            for index in range(count)
+        )
+
+    @property
+    def sample_ids(self) -> tuple[int, ...]:
+        """Return the identity index of each aligned sample."""
+        return tuple(sample.index for sample in self.samples)
+
+    @property
+    def missing_mask(self) -> tuple[dict[str, bool], ...]:
+        """
+        Return the missing mask for each sample.
+
+        The keys include ``when``, ``coord``, ``angles``, and every extended
+        measurement column; ``True`` marks a missing column.
+        """
+        return tuple(sample.mask for sample in self.samples)
+
+    @property
+    def mask(self) -> tuple[dict[str, bool], ...]:
+        """Alias for :attr:`missing_mask`."""
+        return self.missing_mask
+
+    @property
+    def measurements(self) -> dict[str, tuple[str | None, ...]]:
+        """
+        Return the aligned extended measurement columns.
+
+        ``gx:SimpleArrayData`` values are positional, like ``when``/``coord``/
+        ``angles``: a missing value stays at its index instead of pulling the
+        following value forward.  Columns are padded at the end only.
+
+        Returns
+        -------
+        Dict[str, Tuple[Optional[str], ...]]
+            One tuple per measured column, each as long as the longest column.
+
+        """
+        array_data = _array_data(self.extended_data)
+        if not array_data:
+            return {}
+        count = max(
+            [len(self.track_items)] + [len(values) for _name, values in array_data],
+        )
+        return {
+            name: tuple(values[i] if i < len(values) else None for i in range(count))
+            for name, values in array_data
+        }
+
+    @property
+    def measurement_mask(self) -> dict[str, tuple[bool, ...]]:
+        """Return one missing mask per extended measurement column."""
+        return {
+            name: tuple(value is None for value in values)
+            for name, values in self.measurements.items()
+        }
 
     def __bool__(self) -> bool:
         """
@@ -358,6 +588,9 @@ def tracks_to_geometry(tracks: Iterable[Track]) -> geo.MultiLineString:
     """
     Convert a collection of tracks to a MultiLineString geometry.
 
+    Every track keeps its own boundary: tracks are never joined or
+    interpolated across their endpoints, even when their timestamps touch.
+
     Args:
     ----
         tracks : Iterable[Track]
@@ -369,9 +602,16 @@ def tracks_to_geometry(tracks: Iterable[Track]) -> geo.MultiLineString:
             A MultiLineString geometry representing the tracks.
 
     """
-    return geo.MultiLineString.from_linestrings(
-        *[track.geometry for track in tracks if track.geometry],
-    )
+    lines: list[geo.LineString] = []
+    for track in tracks:
+        geometry = track.geometry
+        if not geometry:
+            continue
+        if isinstance(geometry, geo.MultiLineString):
+            lines.extend(geometry.geoms)
+        else:
+            lines.append(geometry)
+    return geo.MultiLineString.from_linestrings(*lines)
 
 
 class MultiTrack(_Geometry):
@@ -459,12 +699,57 @@ class MultiTrack(_Geometry):
         """
         Get the geometry of the gx object.
 
+        Each track is a separate boundary.  Tracks are not merged or
+        interpolated into one continuous run when their timestamps happen to
+        be adjacent.
+
         Returns
         -------
             Optional[geo.MultiLineString]: The geometry of the gx object.
 
         """
         return tracks_to_geometry(self.tracks)
+
+    @property
+    def segments(self) -> tuple[tuple[TrackSample, ...], ...]:
+        """
+        Return the aligned samples, grouped by track segment.
+
+        Each track keeps its own boundary; neighbouring tracks are never
+        combined into one interpolatable run.
+        """
+        return tuple(track.samples for track in self.tracks)
+
+    @property
+    def samples(self) -> tuple[TrackSample, ...]:
+        """Return all aligned samples, flattened across track segments."""
+        return tuple(
+            TrackSample(
+                segment=segment_index,
+                index=sample.index,
+                when=sample.when,
+                coord=sample.coord,
+                angle=sample.angle,
+                measurements=dict(sample.measurements),
+            )
+            for segment_index, segment in enumerate(self.segments)
+            for sample in segment
+        )
+
+    @property
+    def sample_ids(self) -> tuple[tuple[int, int], ...]:
+        """Return the ``(segment, index)`` identity of each aligned sample."""
+        return tuple(sample.identity for sample in self.samples)
+
+    @property
+    def missing_mask(self) -> tuple[dict[str, bool], ...]:
+        """Return the per-sample missing mask across all track segments."""
+        return tuple(sample.mask for sample in self.samples)
+
+    @property
+    def mask(self) -> tuple[dict[str, bool], ...]:
+        """Alias for :attr:`missing_mask`."""
+        return self.missing_mask
 
     def __bool__(self) -> bool:
         """

@@ -41,6 +41,25 @@ adds ``roll`` and ``LookAt`` adds ``range``. ``Region`` is intentionally composi
 than flat: it stores a ``LatLonAltBox`` plus an optional ``Lod``, which matches the KML
 schema exactly.
 
+Track samples and missing values
+--------------------------------
+
+``gx:Track`` stores ``when``, ``coord``, ``angles``, and ``gx:SimpleArrayData`` columns
+positionally. A column may be shorter than the others, or contain an empty element; both
+describe a missing sample at that position rather than a reason to shift later values
+forward. ``Track.coords``, ``Track.angles``, and ``Track.whens`` therefore keep a ``None``
+placeholder in the gap, and ``Track.samples`` exposes aligned :class:`~fastkml.gx.TrackSample`
+objects whose ``identity`` is the sample index.
+
+``Track.missing_mask`` reports one dictionary per sample with ``when``, ``coord``,
+``angles``, and any measurement column. Empty or whitespace-only XML elements are treated as
+missing. Because a missing coordinate breaks the path, ``Track.geometry`` returns a
+``MultiLineString`` with one line per contiguous run instead of joining across the gap.
+
+``MultiTrack`` never treats neighbouring tracks as one interpolatable run just because their
+timestamps touch. Its ``segments`` keep each track's samples separate, and each sample's
+``identity`` is ``(segment_index, sample_index)``.
+
 Basic Usage
 -----------
 

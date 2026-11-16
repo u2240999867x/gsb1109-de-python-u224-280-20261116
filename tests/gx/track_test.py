@@ -301,7 +301,7 @@ class TestTrack(StdLibrary):
                         dt=datetime.datetime(2010, 5, 28, 2, 2, 35, tzinfo=tzutc()),
                     ),
                     coord=geo.Point(-122.205712, 37.373288, 152.0),
-                    angle=Angle(heading=1.0, tilt=2.0, roll=3.0),
+                    angle=None,
                 ),
                 TrackItem(
                     when=KmlDateTime(
@@ -343,7 +343,7 @@ class TestTrack(StdLibrary):
                         dt=datetime.datetime(2010, 5, 28, 2, 2, 57, tzinfo=tzutc()),
                     ),
                     coord=geo.Point(-122.203207, 37.374857, 140.199997),
-                    angle=Angle(heading=0.0, tilt=0.0, roll=0.0),
+                    angle=Angle(heading=1.0, tilt=2.0, roll=3.0),
                 ),
             ],
         )
@@ -377,7 +377,13 @@ class TestTrack(StdLibrary):
 
         track = Track.from_string(doc, strict=False)
 
-        assert track.track_items == []
+        assert track.track_items == [
+            TrackItem(
+                when=None,
+                coord=geo.Point(-122.207881, 37.371915, 156.0),
+                angle=Angle(heading=45.54676, tilt=66.2342, roll=77.0),
+            ),
+        ]
 
     def test_track_from_str_invalid_coord(self) -> None:
         doc = """
@@ -391,7 +397,15 @@ class TestTrack(StdLibrary):
 
         track = Track.from_string(doc, strict=False)
 
-        assert track.track_items == []
+        assert track.track_items == [
+            TrackItem(
+                when=KmlDateTime(
+                    dt=datetime.datetime(2010, 2, 14, 2, 2, 9, tzinfo=tzutc()),
+                ),
+                coord=None,
+                angle=Angle(heading=45.54676, tilt=66.2342, roll=77.0),
+            ),
+        ]
 
     def test_track_from_str_extended_data(self) -> None:
         doc = (
@@ -602,6 +616,223 @@ class TestMultiTrack(StdLibrary):
         assert "coord>" in track.to_string()
         assert "angles>" in track.to_string()
         assert "when>" in track.to_string()
+
+    def test_multitrack_keeps_track_boundaries(self) -> None:
+        first = Track(
+            ns="",
+            track_items=[
+                TrackItem(
+                    when=KmlDateTime(
+                        datetime.datetime(2010, 5, 28, 2, 2, 55, tzinfo=tzutc()),
+                    ),
+                    coord=geo.Point(0, 0),
+                ),
+                TrackItem(
+                    when=KmlDateTime(
+                        datetime.datetime(2010, 5, 28, 2, 2, 56, tzinfo=tzutc()),
+                    ),
+                    coord=geo.Point(1, 1),
+                ),
+            ],
+        )
+        second = Track(
+            ns="",
+            track_items=[
+                TrackItem(
+                    when=KmlDateTime(
+                        datetime.datetime(2010, 5, 28, 2, 2, 57, tzinfo=tzutc()),
+                    ),
+                    coord=geo.Point(2, 2),
+                ),
+                TrackItem(
+                    when=KmlDateTime(
+                        datetime.datetime(2010, 5, 28, 2, 2, 58, tzinfo=tzutc()),
+                    ),
+                    coord=geo.Point(3, 3),
+                ),
+            ],
+        )
+
+        multitrack = MultiTrack(ns="", tracks=[first, second], interpolate=False)
+
+        assert multitrack.geometry == geo.MultiLineString(
+            (((0, 0), (1, 1)), ((2, 2), (3, 3))),
+        )
+        assert [sample.identity for sample in multitrack.samples] == [
+            (0, 0),
+            (0, 1),
+            (1, 0),
+            (1, 1),
+        ]
+
+
+class TestTrackSamples(StdLibrary):
+    """Aligned sample identity and missing masks."""
+
+    def test_missing_entries_keep_their_position(self) -> None:
+        whens = [
+            KmlDateTime(
+                datetime.datetime(2023, 1, 1, hour, tzinfo=datetime.timezone.utc),
+            )
+            for hour in range(3)
+        ]
+        track = Track(
+            ns="",
+            whens=whens,
+            coords=[(0, 0), None, (2, 2)],
+            angles=[(1, 2, 3), None, (7, 8, 9)],
+        )
+
+        assert track.whens == tuple(whens)
+        assert track.coords == ((0, 0), None, (2, 2))
+        assert track.angles == ((1, 2, 3), None, (7, 8, 9))
+        assert track.sample_ids == (0, 1, 2)
+        assert track.missing_mask == (
+            {"when": False, "coord": False, "angles": False},
+            {"when": False, "coord": True, "angles": True},
+            {"when": False, "coord": False, "angles": False},
+        )
+        assert [sample.coord for sample in track.samples] == [
+            geo.Point(0, 0),
+            None,
+            geo.Point(2, 2),
+        ]
+
+    def test_height_mismatch_does_not_shift_coordinates(self) -> None:
+        whens = [
+            KmlDateTime(
+                datetime.datetime(2023, 1, 1, hour, tzinfo=datetime.timezone.utc),
+            )
+            for hour in range(3)
+        ]
+
+        track = Track(ns="", whens=whens, coords=[(0, 0)])
+
+        assert track.coords == ((0, 0), None, None)
+        assert track.missing_mask == (
+            {"when": False, "coord": False, "angles": False},
+            {"when": False, "coord": True, "angles": False},
+            {"when": False, "coord": True, "angles": False},
+        )
+
+    def test_missing_coord_splits_geometry(self) -> None:
+        track = Track(
+            ns="",
+            track_items=[
+                TrackItem(
+                    when=KmlDateTime(
+                        datetime.datetime(2023, 1, 1, 0, tzinfo=datetime.timezone.utc),
+                    ),
+                    coord=geo.Point(0, 0),
+                ),
+                TrackItem(
+                    when=KmlDateTime(
+                        datetime.datetime(2023, 1, 1, 1, tzinfo=datetime.timezone.utc),
+                    ),
+                    coord=None,
+                ),
+                TrackItem(
+                    when=KmlDateTime(
+                        datetime.datetime(2023, 1, 1, 2, tzinfo=datetime.timezone.utc),
+                    ),
+                    coord=geo.Point(2, 2),
+                ),
+            ],
+        )
+
+        assert track.geometry == geo.MultiLineString(
+            (((0, 0),), ((2, 2),)),
+        )
+
+    def test_measurements_align_with_samples(self) -> None:
+        track = Track(
+            ns="",
+            whens=[
+                KmlDateTime(
+                    datetime.datetime(2023, 1, 1, hour, tzinfo=datetime.timezone.utc),
+                )
+                for hour in range(3)
+            ],
+            coords=[(0, 0), (1, 1), (2, 2)],
+            extended_data=ExtendedData(
+                elements=[
+                    SchemaData(
+                        schema_url="#schema",
+                        array_data=[
+                            SimpleArrayData(
+                                name="cadence",
+                                data=["86", None, "108"],
+                            ),
+                        ],
+                    ),
+                ],
+            ),
+        )
+
+        assert track.measurements == {
+            "cadence": ("86", None, "108"),
+        }
+        assert track.measurement_mask == {
+            "cadence": (False, True, False),
+        }
+        assert [sample.measurements for sample in track.samples] == [
+            {"cadence": "86"},
+            {"cadence": None},
+            {"cadence": "108"},
+        ]
+        assert track.missing_mask[1] == {
+            "when": False,
+            "coord": False,
+            "angles": False,
+            "cadence": True,
+        }
+
+    def test_empty_elements_are_missing_samples(self) -> None:
+        doc = """
+            <gx:Track xmlns:gx="http://www.google.com/kml/ext/2.2"
+              xmlns:kml="http://www.opengis.net/kml/2.2">
+            <kml:when>2023-01-01T00:00:00Z</kml:when>
+            <kml:when />
+            <kml:when>2023-01-01T02:00:00Z</kml:when>
+            <gx:coord>0 0</gx:coord>
+            <gx:coord />
+            <gx:coord>2 2</gx:coord>
+            <gx:angles>1 2 3</gx:angles>
+            <gx:angles />
+            <gx:angles>7 8 9</gx:angles>
+            </gx:Track>
+        """
+
+        track = Track.from_string(doc)
+
+        assert track.coords == ((0.0, 0.0), None, (2.0, 2.0))
+        assert track.angles == ((1.0, 2.0, 3.0), None, (7.0, 8.0, 9.0))
+        assert track.missing_mask[1] == {
+            "when": True,
+            "coord": True,
+            "angles": True,
+        }
+
+    def test_aligned_samples_roundtrip(self) -> None:
+        track = Track(
+            ns="",
+            whens=[
+                KmlDateTime(
+                    datetime.datetime(2023, 1, 1, hour, tzinfo=datetime.timezone.utc),
+                )
+                for hour in range(3)
+            ],
+            coords=[(0, 0), None, (2, 2)],
+            angles=[(1, 2, 3), None, (7, 8, 9)],
+        )
+
+        roundtripped = Track.from_string(track.to_string())
+        reparsed = Track.from_string(roundtripped.to_string())
+
+        assert reparsed.to_string() == roundtripped.to_string()
+        assert roundtripped.missing_mask == track.missing_mask
+        assert roundtripped.coords == track.coords
+        assert roundtripped.angles == track.angles
 
 
 class TestLxmlGetGxGeometry(Lxml, TestGetGxGeometry):

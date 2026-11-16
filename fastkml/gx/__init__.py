@@ -84,6 +84,7 @@ from fastkml.gx.track import Angle
 from fastkml.gx.track import MultiTrack
 from fastkml.gx.track import Track
 from fastkml.gx.track import TrackItem
+from fastkml.gx.track import TrackSample
 from fastkml.gx.track import track_items_to_geometry
 from fastkml.gx.track import tracks_to_geometry
 
@@ -94,6 +95,7 @@ __all__ = [
     "SimpleArrayField",
     "Track",
     "TrackItem",
+    "TrackSample",
     "track_items_to_geometry",
     "tracks_to_geometry",
 ]

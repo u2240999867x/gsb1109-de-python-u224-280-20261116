@@ -11,6 +11,10 @@ Changelog
   are now keyword-only across the base and mixin classes; update any
   ``super().__init__()`` calls that passed them positionally.
 - Fix a crash parsing ``gx:Track`` timestamps when a ``<when>`` element is empty.
+- Keep ``gx:Track`` sample positions stable when ``when``, ``coord``, ``angles``, or
+  ``gx:SimpleArrayData`` columns have missing entries; expose aligned ``Track.samples``
+  with sample identities and per-column missing masks, split geometry at missing
+  coordinates, and keep ``MultiTrack`` segment boundaries separate.
 - Fix ``KML`` serializing a parsed ``NetworkLinkControl`` after the document's root
   feature instead of before it, which produced XML that failed its own bundled schema.
 - Fix ``StyleMap``/``Pair`` silently discarding a nested ``StyleMap`` value instead of
