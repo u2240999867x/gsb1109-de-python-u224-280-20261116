@@ -10,6 +10,7 @@ Contents:
    
    basedirectory
    desktopentry
+   desktopaction
    menu
    icontheme
    mime
