@@ -359,13 +359,51 @@ Note that an error will be raised when calling `AddPacket` if the
 packet attributes do not exactly match the item names in the 
 loop.
 
-A packet may be removed using the `RemoveKeyedPacket` method, which 
-chooses the packet to be removed based on the value of the given 
-dataname: 
+A packet may be removed using the `RemoveKeyedPacket` method, which
+chooses the packet to be removed based on the value of the given
+dataname:
 
 ~~~{.python}
     aloop.RemoveKeyedPacket('_item_7','a')
 ~~~
+
+#### Splitting and re-merging loops
+
+A loop may be split into two loops and later merged back.  The split
+records the source row of every resulting row, so merging does not have
+to guess the correspondence from column lengths or from repeated key
+values:
+
+~~~{.python}
+    split = cb.SplitLoop(
+        '_item_5', ['_item_7'], ['_item_6'],
+        first_output_names={'_item_5': '_item_5_a'},
+        second_output_names={'_item_5': '_item_5_b'})
+    split.first_loop     # the first loop's columns
+    split.second_loop    # the second loop's columns
+    split.provenance     # {side: [RowOrigin(...), ...]}
+    merged = cb.MergeLoops(split)
+    merged.reversible    # true only if the original values were restored
+~~~
+
+`SplitLoop` takes the datanames belonging to each loop; key columns are
+included in both.  An explicit `row_map` may be supplied as
+`{source_row: (first_row, second_row)}`, with `None` on a side that does
+not contain that source row.  A CIF block cannot contain the same
+dataname in two loops, so shared key columns need distinct output names
+via `first_output_names` and `second_output_names`; a collision is
+rejected before the block is changed.  When the two loops need different
+datanames for any other reason, use `CifFile.LoopSplit.split_loop` with
+`first_names` and `second_names`.
+
+Merging uses the recorded provenance when it is present.  It falls back
+to key matching only when provenance is unavailable, and then pairs rows
+only when a key occurs exactly once on each side.  Repeated keys are
+returned in `merged.ambiguities` as candidate groups; they are never
+expanded into a Cartesian product.  `merged.reversible` is set only when
+every source row is reconstructed and the reconstructed columns equal the
+loop that was originally split.  `MergeLoops` leaves the block unchanged
+unless the merge is reversible.
 
 ## Writing CIF Files
 

@@ -93,6 +93,7 @@ except:
     from urllib.parse import urlparse,urlunparse
 import re,os
 import textwrap
+from collections import OrderedDict
 
 try:
     from StringIO import StringIO #not cStringIO as we cannot subclass
@@ -570,6 +571,7 @@ class StarBlock(object):
         self.true_case = {} #transform lower case to supplied case
         self.provide_value = False  #prefer string version always
         self.dictionary = None      #DDLm dictionary
+        self._loop_splits = []      #provenance for loops split by SplitLoop
         self.popout = False         #used during load iteration
         self.curitem = -1           #used during iteration
         self.cache_vals = True      #store all calculated values
@@ -2042,6 +2044,122 @@ class StarBlock(object):
     def unassign_dictionary(self):
         """Remove dictionary-dependent behaviour"""
         self.dictionary = None
+
+    # <Split and merge loops>=
+    # A block can hold both halves of a split loop, so the two target loops may
+    # need different output names for the same source dataname.  The Split
+    # column metadata keeps that mapping and the source row provenance.
+    def SplitLoop(self, keyname, first_names, second_names, key_columns=None,
+                  row_map=None, verify=True, first_output_names=None,
+                  second_output_names=None):
+        """Split the loop containing `keyname` into two loops.
+
+        `first_names` and `second_names` are the datanames belonging to the
+        first and second result loops.  Key columns are shared automatically.
+        `row_map` explicitly maps source rows to `(first_row, second_row)`
+        pairs; `None` on one side means the source row is absent from that
+        loop.  The returned `LoopSplit.LoopSplitResult` records the source row
+        of every target row so that `MergeLoops` can restore only associations
+        that are proven.
+
+        A CIF block may not contain the same dataname in two loops, so key
+        columns shared by both loops normally need distinct output names via
+        `first_output_names` and `second_output_names` (mappings of source
+        dataname to output dataname).  If the two loops would repeat a name,
+        `LoopSplitError` is raised before the block is changed.
+        """
+        from . import LoopSplit
+        loop_no = self.FindLoop(keyname)
+        if loop_no < 0:
+            raise KeyError('{} is not in a loop structure'.format(keyname))
+        source_names = list(self.loops[loop_no])
+        source_columns = OrderedDict(
+            (name, list(self.GetItemValue(name))) for name in source_names)
+        if key_columns is None:
+            key_columns = [keyname]
+        key_columns = [name.lower() for name in key_columns]
+        first_names = [name.lower() for name in first_names]
+        second_names = [name.lower() for name in second_names]
+        result = LoopSplit.split_loop(
+            source_columns, first_names, second_names, key_columns,
+            first_names=first_output_names,
+            second_names=second_output_names,
+            row_map=row_map, verify=verify)
+        overlap = set(result.first_loop) & set(result.second_loop)
+        if overlap:
+            raise LoopSplit.LoopSplitError(
+                'Both result loops would contain {}; supply distinct output '
+                'names for one side'.format(repr(sorted(overlap))))
+        self._install_split_loop(loop_no, source_names, result)
+        self._loop_splits.append(result)
+        return result
+
+    def _install_split_loop(self, loop_no, source_names, result):
+        position = self.item_order.index(loop_no)
+        for name in source_names:
+            self.RemoveItem(name)
+        next_loop = (max(self.loops.keys()) + 1) if self.loops else 1
+        for name, values in result.first_loop.items():
+            self.AddItem(name, values)
+        for name, values in result.second_loop.items():
+            self.AddItem(name, values)
+        self.loops[next_loop] = list(result.first_loop.keys())
+        self.loops[next_loop + 1] = list(result.second_loop.keys())
+        self.item_order.insert(position, next_loop)
+        self.item_order.insert(position + 1, next_loop + 1)
+        loop_names = set(result.first_loop) | set(result.second_loop)
+        self.item_order = [a for a in self.item_order
+                           if not (isinstance(a, str) and a in loop_names)]
+        result.loop_numbers = (next_loop, next_loop + 1)
+
+    def MergeLoops(self, loop_split, use_provenance=True, allow_key_match=True):
+        """Merge two loops produced by `SplitLoop` back into one loop.
+
+        Provenance from `loop_split` controls the row association.  Equal
+        column lengths are never considered proof.  When a duplicate key
+        prevents unique correspondence the candidate groups are returned in
+        the result and no cross product is stored.  If the merge is not
+        reversible, the original loops are left untouched.
+        """
+        from . import LoopSplit
+        first_columns = OrderedDict(
+            (name, list(self.GetItemValue(name)))
+            for name in loop_split.first_loop)
+        second_columns = OrderedDict(
+            (name, list(self.GetItemValue(name)))
+            for name in loop_split.second_loop)
+        merged = LoopSplit.merge_split(
+            loop_split, first_columns, second_columns,
+            use_provenance=use_provenance,
+            allow_key_match=allow_key_match)
+        if merged.reversible:
+            self._install_merged_loop(loop_split, merged.columns)
+        return merged
+
+    def _install_merged_loop(self, loop_split, columns):
+        loop_numbers = getattr(loop_split, 'loop_numbers', None)
+        if loop_numbers is None:
+            loop_numbers = (
+                self.FindLoop(next(iter(loop_split.first_loop.keys()))),
+                self.FindLoop(next(iter(loop_split.second_loop.keys()))))
+        position = min(self.item_order.index(loop_no)
+                       for loop_no in loop_numbers)
+        stale_names = set()
+        for loop_no in loop_numbers:
+            stale_names.update(self.loops.get(loop_no, []))
+        for name in stale_names:
+            self.block.pop(name, None)
+            self.true_case.pop(name, None)
+        for loop_no in loop_numbers:
+            if loop_no in self.loops:
+                del self.loops[loop_no]
+            if loop_no in self.item_order:
+                self.item_order.remove(loop_no)
+        next_loop = (max(self.loops.keys()) + 1) if self.loops else 1
+        for name, values in columns.items():
+            self.AddItem(name, list(values))
+        self.loops[next_loop] = list(columns.keys())
+        self.item_order.insert(position, next_loop)
 
 
 

@@ -110,6 +110,7 @@ to be bound by the terms and conditions of this License Agreement.
 import re,sys
 from . import StarFile
 from .StarFile import StarList, StarPacket  # put in global scope for exec statement
+from . import LoopSplit
 from . import CifSyntaxError
 try:
     import numpy                   #put in global scope for exec statement
@@ -585,6 +586,8 @@ class CifDic(StarFile.StarFile):
             raise(ValueError,"Light imports only available for mode 'contents'")
         self.template_cache = {}    #for DDLm imports
         self.ddlm_functions = {}    #for DDLm functions
+        self.last_construct_ambiguities = ()  #repeated keys from last construct
+        self.last_construct_provenance = {}   #source rows for the last construct
         self.switch_numpy(False)    #no Numpy arrays returned
         super(CifDic,self).__init__(datasource=dic,grammar=grammar,blocktype=DicBlock,**kwargs)
         self.verbose_import=verbose_import
@@ -2712,25 +2715,79 @@ class CifDic(StarFile.StarFile):
                 if text_filter is not None:
                     morph_values.append(text_filter)
                 cat_values.append(range(len(morph_values[-1])))
-            # create the mathematical product filtered by equality of dataname values
-            pullback_ids = [(x,y) for x in cat_values[0] for y in cat_values[1] \
-                            if morph_values[0][cat_values[0].index(x)]==morph_values[1][cat_values[1].index(y)]]
+            positions, ambiguities = self._match_pullback_rows(
+                morph_values[0], morph_values[1])
+            self.last_construct_ambiguities = ambiguities
+            if con_type == 'Pullback':
+                self.last_construct_provenance = {
+                    cats[0]: tuple(i for i, j in positions),
+                    cats[1]: tuple(j for i, j in positions),
+                }
+            else:
+                self.last_construct_provenance = {
+                    cats[0]: tuple(i for i, j in positions),
+                }
             # now prepare for return
-            if len(pullback_ids)==0:
+            if len(positions)==0:
                 return {}
             newids = self[category]['_category_construct_local.new_ids']
             fullnewids = [self.cat_obj_lookup_table[(category,n)][0] for n in newids]
             final_results = {}
             if con_type == 'Pullback':
-                final_results = {fullnewids[0]:[x[0] for x in pullback_ids],fullnewids[1]:[x[1] for x in pullback_ids]}
-                final_results.update(self.duplicate_datanames(cifdata,cats[0],category,key_vals = final_results[fullnewids[0]],skip_names=newids))
-                final_results.update(self.duplicate_datanames(cifdata,cats[1],category,key_vals = final_results[fullnewids[1]],skip_names=newids))
+                final_results = {fullnewids[0]:[cat_values[0][i] for i,j in positions],
+                                 fullnewids[1]:[cat_values[1][j] for i,j in positions]}
+                final_results.update(self.duplicate_datanames(cifdata,cats[0],category,key_vals = final_results[fullnewids[0]],skip_names=newids,row_positions=[i for i,j in positions]))
+                final_results.update(self.duplicate_datanames(cifdata,cats[1],category,key_vals = final_results[fullnewids[1]],skip_names=newids,row_positions=[j for i,j in positions]))
             elif con_type == 'Filter':   #simple filter
-                final_results = {fullnewids[0]:[x[0] for x in pullback_ids]}
-                final_results.update(self.duplicate_datanames(cifdata,cats[0],category,key_vals = final_results[fullnewids[0]],skip_names=newids))
+                final_results = {fullnewids[0]:[cat_values[0][i] for i,j in positions]}
+                final_results.update(self.duplicate_datanames(cifdata,cats[0],category,key_vals = final_results[fullnewids[0]],skip_names=newids,row_positions=[i for i,j in positions]))
             if store_value:
                 self.store_new_cat_values(cifdata,final_results,category)
             return final_results
+
+    def _match_pullback_rows(self, left_values, right_values):
+        """Pair indexes whose values are equal, reporting repeated values.
+
+        Only a value occurring once on one side may be projected onto the rows
+        of the other side.  A value repeated on both sides is not expanded:
+        its rows are returned as an ambiguity group so the caller can report
+        candidates instead of silently choosing a row or multiplying rows.
+        """
+        left_groups = {}
+        right_groups = {}
+        for row, value in enumerate(left_values):
+            left_groups.setdefault(_hashable(value), []).append(row)
+        for row, value in enumerate(right_values):
+            right_groups.setdefault(_hashable(value), []).append(row)
+        order = []
+        seen = set()
+        for value in list(left_groups) + list(right_groups):
+            if value not in seen:
+                seen.add(value)
+                order.append(value)
+        positions = []
+        ambiguities = []
+        for value in order:
+            left_rows = left_groups.get(value, [])
+            right_rows = right_groups.get(value, [])
+            if not left_rows or not right_rows:
+                continue
+            if len(left_rows) == 1:
+                positions.extend((left_rows[0], right_row)
+                                 for right_row in right_rows)
+            elif len(right_rows) == 1:
+                positions.extend((left_row, right_rows[0])
+                                 for left_row in left_rows)
+            else:
+                ambiguities.append(LoopSplit.AmbiguityGroup(
+                    (left_values[left_rows[0]],),
+                    [LoopSplit.RowCandidate('left', row,
+                                            (left_values[row],))
+                     for row in left_rows],
+                    [LoopSplit.RowCandidate('right', row,
+                                            (right_values[row],))
+                     for row in right_rows]))
+        return positions, tuple(ambiguities)
 
     # Going the other way. If we have the pulled-back category, we can populate the
     # pulled-from categories with their identifier items using projections from the
@@ -2811,7 +2868,7 @@ class CifDic(StarFile.StarFile):
             self.store_new_cat_values(cifdata,result,target_category)
         return result
 
-    def duplicate_datanames(self, cifdata, from_category, to_category, key_vals=None, skip_names=None):
+    def duplicate_datanames(self, cifdata, from_category, to_category, key_vals=None, skip_names=None, row_positions=None):
         """Copy across datanames for which the from_category key equals [[key_vals]]"""
         if skip_names is None:
             skip_names = []
@@ -2827,19 +2884,30 @@ class CifDic(StarFile.StarFile):
         for project_name in can_project:
             full_from_name = self.cat_obj_lookup_table[(from_category.lower(),project_name.lower())][0]
             full_to_name = self.cat_obj_lookup_table[(to_category.lower(),project_name.lower())][0]
-            if key_vals is None:
+            if row_positions is not None:
+                try:
+                    all_data_vals = list(cifdata[full_from_name])
+                except StarFile.StarDerivationError:
+                    continue
+                result[full_to_name] = [all_data_vals[i] for i in row_positions]
+            elif key_vals is None:
                 try:
                     result[full_to_name] = cifdata[full_from_name]
                 except StarFile.StarDerivationError:
                     pass
             else:
-                all_key_vals = cifdata[source_key]
-                filter_pos = [all_key_vals.index(a) for a in key_vals]
+                all_key_vals = list(cifdata[source_key])
+                filter_pos = []
+                for a in key_vals:
+                    matches = [i for i, value in enumerate(all_key_vals)
+                               if value == a]
+                    filter_pos.append(matches[0] if matches else None)
                 try:
                     all_data_vals = cifdata[full_from_name]
                 except StarFile.StarDerivationError:
-                    pass
-                result[full_to_name] = [all_data_vals[i] for i in filter_pos]
+                    continue
+                result[full_to_name] = [all_data_vals[i] if i is not None else '?'
+                                        for i in filter_pos]
         return result
 
     # Storing category results.  dREL allows 'category methods', which initialise an entire
@@ -4690,6 +4758,14 @@ def listify(item):
 # actually contained in the given data block
 def filter_present(namelist,datablocknames):
     return [a for a in namelist if a in datablocknames]
+
+def _hashable(value):
+    """Return a hashable key for a CIF-style value."""
+    if isinstance(value, (list, StarList)):
+        return tuple(_hashable(a) for a in value)
+    if isinstance(value, dict):
+        return tuple(sorted((k, _hashable(v)) for k, v in value.items()))
+    return value
 
 # Make an item immutable, used if we want a list to be a key
 def make_immutable(values):
