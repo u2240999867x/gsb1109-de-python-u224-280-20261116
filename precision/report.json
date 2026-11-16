@@ -1,0 +1,703 @@
+{
+  "columns": {
+    "_atom_site_U_Fourier_param_cos": {
+      "blockers": [],
+      "candidates": [
+        {
+          "decimals": 0,
+          "ok": false
+        },
+        {
+          "decimals": 1,
+          "ok": false
+        },
+        {
+          "decimals": 2,
+          "ok": false
+        },
+        {
+          "decimals": 3,
+          "ok": false
+        },
+        {
+          "decimals": 4,
+          "ok": false
+        },
+        {
+          "decimals": 5,
+          "ok": false
+        },
+        {
+          "decimals": 6,
+          "ok": true
+        },
+        {
+          "decimals": 7,
+          "ok": true
+        },
+        {
+          "decimals": 8,
+          "ok": true
+        },
+        {
+          "decimals": 9,
+          "ok": true
+        },
+        {
+          "decimals": 10,
+          "ok": true
+        },
+        {
+          "decimals": 11,
+          "ok": true
+        },
+        {
+          "decimals": 12,
+          "ok": true
+        }
+      ],
+      "chosen_decimals": 6
+    },
+    "_atom_site_U_Fourier_param_sin": {
+      "blockers": [],
+      "candidates": [
+        {
+          "decimals": 0,
+          "ok": false
+        },
+        {
+          "decimals": 1,
+          "ok": false
+        },
+        {
+          "decimals": 2,
+          "ok": false
+        },
+        {
+          "decimals": 3,
+          "ok": false
+        },
+        {
+          "decimals": 4,
+          "ok": false
+        },
+        {
+          "decimals": 5,
+          "ok": false
+        },
+        {
+          "decimals": 6,
+          "ok": true
+        },
+        {
+          "decimals": 7,
+          "ok": true
+        },
+        {
+          "decimals": 8,
+          "ok": true
+        },
+        {
+          "decimals": 9,
+          "ok": true
+        },
+        {
+          "decimals": 10,
+          "ok": true
+        },
+        {
+          "decimals": 11,
+          "ok": true
+        },
+        {
+          "decimals": 12,
+          "ok": true
+        }
+      ],
+      "chosen_decimals": 6
+    },
+    "_atom_site_aniso_U_11": {
+      "blockers": [],
+      "candidates": [
+        {
+          "decimals": 0,
+          "ok": false
+        },
+        {
+          "decimals": 1,
+          "ok": false
+        },
+        {
+          "decimals": 2,
+          "ok": false
+        },
+        {
+          "decimals": 3,
+          "ok": false
+        },
+        {
+          "decimals": 4,
+          "ok": false
+        },
+        {
+          "decimals": 5,
+          "ok": true
+        },
+        {
+          "decimals": 6,
+          "ok": true
+        },
+        {
+          "decimals": 7,
+          "ok": true
+        },
+        {
+          "decimals": 8,
+          "ok": true
+        },
+        {
+          "decimals": 9,
+          "ok": true
+        },
+        {
+          "decimals": 10,
+          "ok": true
+        },
+        {
+          "decimals": 11,
+          "ok": true
+        },
+        {
+          "decimals": 12,
+          "ok": true
+        }
+      ],
+      "chosen_decimals": 5
+    },
+    "_atom_site_aniso_U_12": {
+      "blockers": [],
+      "candidates": [
+        {
+          "decimals": 0,
+          "ok": false
+        },
+        {
+          "decimals": 1,
+          "ok": false
+        },
+        {
+          "decimals": 2,
+          "ok": false
+        },
+        {
+          "decimals": 3,
+          "ok": false
+        },
+        {
+          "decimals": 4,
+          "ok": false
+        },
+        {
+          "decimals": 5,
+          "ok": false
+        },
+        {
+          "decimals": 6,
+          "ok": false
+        },
+        {
+          "decimals": 7,
+          "ok": true
+        },
+        {
+          "decimals": 8,
+          "ok": true
+        },
+        {
+          "decimals": 9,
+          "ok": true
+        },
+        {
+          "decimals": 10,
+          "ok": true
+        },
+        {
+          "decimals": 11,
+          "ok": true
+        },
+        {
+          "decimals": 12,
+          "ok": true
+        }
+      ],
+      "chosen_decimals": 7
+    },
+    "_atom_site_aniso_U_13": {
+      "blockers": [],
+      "candidates": [
+        {
+          "decimals": 0,
+          "ok": false
+        },
+        {
+          "decimals": 1,
+          "ok": false
+        },
+        {
+          "decimals": 2,
+          "ok": false
+        },
+        {
+          "decimals": 3,
+          "ok": false
+        },
+        {
+          "decimals": 4,
+          "ok": false
+        },
+        {
+          "decimals": 5,
+          "ok": false
+        },
+        {
+          "decimals": 6,
+          "ok": true
+        },
+        {
+          "decimals": 7,
+          "ok": true
+        },
+        {
+          "decimals": 8,
+          "ok": true
+        },
+        {
+          "decimals": 9,
+          "ok": true
+        },
+        {
+          "decimals": 10,
+          "ok": true
+        },
+        {
+          "decimals": 11,
+          "ok": true
+        },
+        {
+          "decimals": 12,
+          "ok": true
+        }
+      ],
+      "chosen_decimals": 6
+    },
+    "_atom_site_aniso_U_22": {
+      "blockers": [],
+      "candidates": [
+        {
+          "decimals": 0,
+          "ok": false
+        },
+        {
+          "decimals": 1,
+          "ok": false
+        },
+        {
+          "decimals": 2,
+          "ok": false
+        },
+        {
+          "decimals": 3,
+          "ok": false
+        },
+        {
+          "decimals": 4,
+          "ok": false
+        },
+        {
+          "decimals": 5,
+          "ok": true
+        },
+        {
+          "decimals": 6,
+          "ok": true
+        },
+        {
+          "decimals": 7,
+          "ok": true
+        },
+        {
+          "decimals": 8,
+          "ok": true
+        },
+        {
+          "decimals": 9,
+          "ok": true
+        },
+        {
+          "decimals": 10,
+          "ok": true
+        },
+        {
+          "decimals": 11,
+          "ok": true
+        },
+        {
+          "decimals": 12,
+          "ok": true
+        }
+      ],
+      "chosen_decimals": 5
+    },
+    "_atom_site_aniso_U_23": {
+      "blockers": [],
+      "candidates": [
+        {
+          "decimals": 0,
+          "ok": false
+        },
+        {
+          "decimals": 1,
+          "ok": false
+        },
+        {
+          "decimals": 2,
+          "ok": false
+        },
+        {
+          "decimals": 3,
+          "ok": false
+        },
+        {
+          "decimals": 4,
+          "ok": false
+        },
+        {
+          "decimals": 5,
+          "ok": false
+        },
+        {
+          "decimals": 6,
+          "ok": true
+        },
+        {
+          "decimals": 7,
+          "ok": true
+        },
+        {
+          "decimals": 8,
+          "ok": true
+        },
+        {
+          "decimals": 9,
+          "ok": true
+        },
+        {
+          "decimals": 10,
+          "ok": true
+        },
+        {
+          "decimals": 11,
+          "ok": true
+        },
+        {
+          "decimals": 12,
+          "ok": true
+        }
+      ],
+      "chosen_decimals": 6
+    },
+    "_atom_site_aniso_U_33": {
+      "blockers": [],
+      "candidates": [
+        {
+          "decimals": 0,
+          "ok": false
+        },
+        {
+          "decimals": 1,
+          "ok": false
+        },
+        {
+          "decimals": 2,
+          "ok": false
+        },
+        {
+          "decimals": 3,
+          "ok": false
+        },
+        {
+          "decimals": 4,
+          "ok": false
+        },
+        {
+          "decimals": 5,
+          "ok": true
+        },
+        {
+          "decimals": 6,
+          "ok": true
+        },
+        {
+          "decimals": 7,
+          "ok": true
+        },
+        {
+          "decimals": 8,
+          "ok": true
+        },
+        {
+          "decimals": 9,
+          "ok": true
+        },
+        {
+          "decimals": 10,
+          "ok": true
+        },
+        {
+          "decimals": 11,
+          "ok": true
+        },
+        {
+          "decimals": 12,
+          "ok": true
+        }
+      ],
+      "chosen_decimals": 5
+    },
+    "_atom_site_displace_Fourier_param_cos": {
+      "blockers": [],
+      "candidates": [
+        {
+          "decimals": 0,
+          "ok": false
+        },
+        {
+          "decimals": 1,
+          "ok": false
+        },
+        {
+          "decimals": 2,
+          "ok": false
+        },
+        {
+          "decimals": 3,
+          "ok": false
+        },
+        {
+          "decimals": 4,
+          "ok": false
+        },
+        {
+          "decimals": 5,
+          "ok": false
+        },
+        {
+          "decimals": 6,
+          "ok": true
+        },
+        {
+          "decimals": 7,
+          "ok": true
+        },
+        {
+          "decimals": 8,
+          "ok": true
+        },
+        {
+          "decimals": 9,
+          "ok": true
+        },
+        {
+          "decimals": 10,
+          "ok": true
+        },
+        {
+          "decimals": 11,
+          "ok": true
+        },
+        {
+          "decimals": 12,
+          "ok": true
+        }
+      ],
+      "chosen_decimals": 6
+    },
+    "_atom_site_displace_Fourier_param_sin": {
+      "blockers": [],
+      "candidates": [
+        {
+          "decimals": 0,
+          "ok": false
+        },
+        {
+          "decimals": 1,
+          "ok": false
+        },
+        {
+          "decimals": 2,
+          "ok": false
+        },
+        {
+          "decimals": 3,
+          "ok": false
+        },
+        {
+          "decimals": 4,
+          "ok": false
+        },
+        {
+          "decimals": 5,
+          "ok": false
+        },
+        {
+          "decimals": 6,
+          "ok": true
+        },
+        {
+          "decimals": 7,
+          "ok": true
+        },
+        {
+          "decimals": 8,
+          "ok": true
+        },
+        {
+          "decimals": 9,
+          "ok": true
+        },
+        {
+          "decimals": 10,
+          "ok": true
+        },
+        {
+          "decimals": 11,
+          "ok": true
+        },
+        {
+          "decimals": 12,
+          "ok": true
+        }
+      ],
+      "chosen_decimals": 6
+    },
+    "_atom_site_occ_Fourier_param_cos": {
+      "blockers": [],
+      "candidates": [
+        {
+          "decimals": 0,
+          "ok": false
+        },
+        {
+          "decimals": 1,
+          "ok": false
+        },
+        {
+          "decimals": 2,
+          "ok": false
+        },
+        {
+          "decimals": 3,
+          "ok": false
+        },
+        {
+          "decimals": 4,
+          "ok": true
+        },
+        {
+          "decimals": 5,
+          "ok": true
+        },
+        {
+          "decimals": 6,
+          "ok": true
+        },
+        {
+          "decimals": 7,
+          "ok": true
+        },
+        {
+          "decimals": 8,
+          "ok": true
+        },
+        {
+          "decimals": 9,
+          "ok": true
+        },
+        {
+          "decimals": 10,
+          "ok": true
+        },
+        {
+          "decimals": 11,
+          "ok": true
+        },
+        {
+          "decimals": 12,
+          "ok": true
+        }
+      ],
+      "chosen_decimals": 4
+    },
+    "_atom_site_occ_Fourier_param_sin": {
+      "blockers": [],
+      "candidates": [
+        {
+          "decimals": 0,
+          "ok": false
+        },
+        {
+          "decimals": 1,
+          "ok": false
+        },
+        {
+          "decimals": 2,
+          "ok": false
+        },
+        {
+          "decimals": 3,
+          "ok": false
+        },
+        {
+          "decimals": 4,
+          "ok": true
+        },
+        {
+          "decimals": 5,
+          "ok": true
+        },
+        {
+          "decimals": 6,
+          "ok": true
+        },
+        {
+          "decimals": 7,
+          "ok": true
+        },
+        {
+          "decimals": 8,
+          "ok": true
+        },
+        {
+          "decimals": 9,
+          "ok": true
+        },
+        {
+          "decimals": 10,
+          "ok": true
+        },
+        {
+          "decimals": 11,
+          "ok": true
+        },
+        {
+          "decimals": 12,
+          "ok": true
+        }
+      ],
+      "chosen_decimals": 4
+    }
+  },
+  "feasible": true,
+  "rounding": "half-even",
+  "source": "src/Programs/tests/cif_files/cif_1_0/incorrect_cif/0.cif"
+}

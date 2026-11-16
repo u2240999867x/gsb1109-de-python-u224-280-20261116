@@ -1,0 +1,77 @@
+{
+  "rounding": "half-even",
+  "columns": {
+    "_atom_site_U_Fourier_param_cos": {
+      "min_decimals": 0,
+      "max_decimals": 12,
+      "value_tolerance": "0.5ulp_original",
+      "su_tolerance": "0.5ulp_original"
+    },
+    "_atom_site_U_Fourier_param_sin": {
+      "min_decimals": 0,
+      "max_decimals": 12,
+      "value_tolerance": "0.5ulp_original",
+      "su_tolerance": "0.5ulp_original"
+    },
+    "_atom_site_displace_Fourier_param_cos": {
+      "min_decimals": 0,
+      "max_decimals": 12,
+      "value_tolerance": "0.5ulp_original",
+      "su_tolerance": "0.5ulp_original"
+    },
+    "_atom_site_displace_Fourier_param_sin": {
+      "min_decimals": 0,
+      "max_decimals": 12,
+      "value_tolerance": "0.5ulp_original",
+      "su_tolerance": "0.5ulp_original"
+    },
+    "_atom_site_occ_Fourier_param_cos": {
+      "min_decimals": 0,
+      "max_decimals": 12,
+      "value_tolerance": "0.5ulp_original",
+      "su_tolerance": "0.5ulp_original"
+    },
+    "_atom_site_occ_Fourier_param_sin": {
+      "min_decimals": 0,
+      "max_decimals": 12,
+      "value_tolerance": "0.5ulp_original",
+      "su_tolerance": "0.5ulp_original"
+    },
+    "_atom_site_aniso_U_11": {
+      "min_decimals": 0,
+      "max_decimals": 12,
+      "value_tolerance": "0.5ulp_original",
+      "su_tolerance": "0.5ulp_original"
+    },
+    "_atom_site_aniso_U_22": {
+      "min_decimals": 0,
+      "max_decimals": 12,
+      "value_tolerance": "0.5ulp_original",
+      "su_tolerance": "0.5ulp_original"
+    },
+    "_atom_site_aniso_U_33": {
+      "min_decimals": 0,
+      "max_decimals": 12,
+      "value_tolerance": "0.5ulp_original",
+      "su_tolerance": "0.5ulp_original"
+    },
+    "_atom_site_aniso_U_12": {
+      "min_decimals": 0,
+      "max_decimals": 12,
+      "value_tolerance": "0.5ulp_original",
+      "su_tolerance": "0.5ulp_original"
+    },
+    "_atom_site_aniso_U_13": {
+      "min_decimals": 0,
+      "max_decimals": 12,
+      "value_tolerance": "0.5ulp_original",
+      "su_tolerance": "0.5ulp_original"
+    },
+    "_atom_site_aniso_U_23": {
+      "min_decimals": 0,
+      "max_decimals": 12,
+      "value_tolerance": "0.5ulp_original",
+      "su_tolerance": "0.5ulp_original"
+    }
+  }
+}
