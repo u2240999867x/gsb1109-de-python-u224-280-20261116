@@ -1,0 +1,1183 @@
+{
+  "policy": "illustrative-compliance-policy",
+  "device": "acme-router-X1-firmware-4.2",
+  "summary": {
+    "total_objects": 44,
+    "satisfied": 21,
+    "partial": 5,
+    "unsatisfied": 1,
+    "waived": 17
+  },
+  "objects": [
+    {
+      "object": "SNMPv2-MIB::sysDescr",
+      "oid": "1.3.6.1.2.1.1.1",
+      "kind": "scalar",
+      "required_min_access": "read-only",
+      "device_access": "read-only",
+      "verdict": "satisfied",
+      "reasons": [],
+      "evidence": [
+        {
+          "source": "group",
+          "basis": "policy-group:SNMPv2-MIB::systemGroup",
+          "requirement": "mandatory",
+          "min_access": "read-only",
+          "condition": null,
+          "condition_active": null,
+          "group": "SNMPv2-MIB::systemGroup",
+          "verdict": "ok",
+          "detail": ""
+        }
+      ]
+    },
+    {
+      "object": "SNMPv2-MIB::sysObjectID",
+      "oid": "1.3.6.1.2.1.1.2",
+      "kind": "scalar",
+      "required_min_access": "read-only",
+      "device_access": "read-only",
+      "verdict": "satisfied",
+      "reasons": [],
+      "evidence": [
+        {
+          "source": "group",
+          "basis": "policy-group:SNMPv2-MIB::systemGroup",
+          "requirement": "mandatory",
+          "min_access": "read-only",
+          "condition": null,
+          "condition_active": null,
+          "group": "SNMPv2-MIB::systemGroup",
+          "verdict": "ok",
+          "detail": ""
+        }
+      ]
+    },
+    {
+      "object": "SNMPv2-MIB::sysUpTime",
+      "oid": "1.3.6.1.2.1.1.3",
+      "kind": "scalar",
+      "required_min_access": "read-only",
+      "device_access": "read-only",
+      "verdict": "satisfied",
+      "reasons": [],
+      "evidence": [
+        {
+          "source": "group",
+          "basis": "policy-group:SNMPv2-MIB::systemGroup",
+          "requirement": "mandatory",
+          "min_access": "read-only",
+          "condition": null,
+          "condition_active": null,
+          "group": "SNMPv2-MIB::systemGroup",
+          "verdict": "ok",
+          "detail": ""
+        },
+        {
+          "source": "required-metric",
+          "basis": "delivery-metric",
+          "requirement": "mandatory",
+          "min_access": "read-only",
+          "condition": null,
+          "condition_active": null,
+          "group": null,
+          "verdict": "ok",
+          "detail": ""
+        }
+      ]
+    },
+    {
+      "object": "SNMPv2-MIB::sysContact",
+      "oid": "1.3.6.1.2.1.1.4",
+      "kind": "scalar",
+      "required_min_access": "read-write",
+      "device_access": "read-write",
+      "verdict": "satisfied",
+      "reasons": [],
+      "evidence": [
+        {
+          "source": "group",
+          "basis": "policy-group:SNMPv2-MIB::systemGroup",
+          "requirement": "mandatory",
+          "min_access": "read-only",
+          "condition": null,
+          "condition_active": null,
+          "group": "SNMPv2-MIB::systemGroup",
+          "verdict": "ok",
+          "detail": ""
+        },
+        {
+          "source": "compliance-object",
+          "basis": "RFC3418 snmpBasicComplianceRev2 OBJECT clause (MIN-ACCESS read-write)",
+          "requirement": "mandatory",
+          "min_access": "read-write",
+          "condition": null,
+          "condition_active": null,
+          "group": null,
+          "verdict": "ok",
+          "detail": ""
+        },
+        {
+          "source": "required-metric",
+          "basis": "delivery-metric",
+          "requirement": "mandatory",
+          "min_access": "read-only",
+          "condition": null,
+          "condition_active": null,
+          "group": null,
+          "verdict": "ok",
+          "detail": ""
+        }
+      ]
+    },
+    {
+      "object": "SNMPv2-MIB::sysName",
+      "oid": "1.3.6.1.2.1.1.5",
+      "kind": "scalar",
+      "required_min_access": "read-only",
+      "device_access": "read-write",
+      "verdict": "satisfied",
+      "reasons": [],
+      "evidence": [
+        {
+          "source": "group",
+          "basis": "policy-group:SNMPv2-MIB::systemGroup",
+          "requirement": "mandatory",
+          "min_access": "read-only",
+          "condition": null,
+          "condition_active": null,
+          "group": "SNMPv2-MIB::systemGroup",
+          "verdict": "ok",
+          "detail": ""
+        },
+        {
+          "source": "required-metric",
+          "basis": "delivery-metric",
+          "requirement": "mandatory",
+          "min_access": "read-only",
+          "condition": null,
+          "condition_active": null,
+          "group": null,
+          "verdict": "ok",
+          "detail": ""
+        }
+      ]
+    },
+    {
+      "object": "SNMPv2-MIB::sysLocation",
+      "oid": "1.3.6.1.2.1.1.6",
+      "kind": "scalar",
+      "required_min_access": "read-only",
+      "device_access": "read-write",
+      "verdict": "satisfied",
+      "reasons": [],
+      "evidence": [
+        {
+          "source": "group",
+          "basis": "policy-group:SNMPv2-MIB::systemGroup",
+          "requirement": "mandatory",
+          "min_access": "read-only",
+          "condition": null,
+          "condition_active": null,
+          "group": "SNMPv2-MIB::systemGroup",
+          "verdict": "ok",
+          "detail": ""
+        }
+      ]
+    },
+    {
+      "object": "SNMPv2-MIB::sysServices",
+      "oid": "1.3.6.1.2.1.1.7",
+      "kind": "scalar",
+      "required_min_access": "read-only",
+      "device_access": "read-only",
+      "verdict": "satisfied",
+      "reasons": [],
+      "evidence": [
+        {
+          "source": "group",
+          "basis": "policy-group:SNMPv2-MIB::systemGroup",
+          "requirement": "mandatory",
+          "min_access": "read-only",
+          "condition": null,
+          "condition_active": null,
+          "group": "SNMPv2-MIB::systemGroup",
+          "verdict": "ok",
+          "detail": ""
+        }
+      ]
+    },
+    {
+      "object": "SNMPv2-MIB::sysORLastChange",
+      "oid": "1.3.6.1.2.1.1.8",
+      "kind": "scalar",
+      "required_min_access": "read-only",
+      "device_access": "read-only",
+      "verdict": "satisfied",
+      "reasons": [],
+      "evidence": [
+        {
+          "source": "group",
+          "basis": "policy-group:SNMPv2-MIB::systemGroup",
+          "requirement": "mandatory",
+          "min_access": "read-only",
+          "condition": null,
+          "condition_active": null,
+          "group": "SNMPv2-MIB::systemGroup",
+          "verdict": "ok",
+          "detail": ""
+        }
+      ]
+    },
+    {
+      "object": "SNMPv2-MIB::sysORID",
+      "oid": "1.3.6.1.2.1.1.9.1.2",
+      "kind": "column",
+      "required_min_access": "read-only",
+      "device_access": "read-only",
+      "verdict": "satisfied",
+      "reasons": [],
+      "evidence": [
+        {
+          "source": "group",
+          "basis": "policy-group:SNMPv2-MIB::systemGroup",
+          "requirement": "mandatory",
+          "min_access": "read-only",
+          "condition": null,
+          "condition_active": null,
+          "group": "SNMPv2-MIB::systemGroup",
+          "verdict": "ok",
+          "detail": ""
+        },
+        {
+          "source": "required-metric",
+          "basis": "delivery-metric",
+          "requirement": "mandatory",
+          "min_access": "read-only",
+          "condition": null,
+          "condition_active": null,
+          "group": null,
+          "verdict": "ok",
+          "detail": ""
+        }
+      ]
+    },
+    {
+      "object": "SNMPv2-MIB::sysORDescr",
+      "oid": "1.3.6.1.2.1.1.9.1.3",
+      "kind": "column",
+      "required_min_access": "read-only",
+      "device_access": "read-only",
+      "verdict": "satisfied",
+      "reasons": [],
+      "evidence": [
+        {
+          "source": "group",
+          "basis": "policy-group:SNMPv2-MIB::systemGroup",
+          "requirement": "mandatory",
+          "min_access": "read-only",
+          "condition": null,
+          "condition_active": null,
+          "group": "SNMPv2-MIB::systemGroup",
+          "verdict": "ok",
+          "detail": ""
+        }
+      ]
+    },
+    {
+      "object": "SNMPv2-MIB::sysORUpTime",
+      "oid": "1.3.6.1.2.1.1.9.1.4",
+      "kind": "column",
+      "required_min_access": "read-only",
+      "device_access": "read-only",
+      "verdict": "satisfied",
+      "reasons": [],
+      "evidence": [
+        {
+          "source": "group",
+          "basis": "policy-group:SNMPv2-MIB::systemGroup",
+          "requirement": "mandatory",
+          "min_access": "read-only",
+          "condition": null,
+          "condition_active": null,
+          "group": "SNMPv2-MIB::systemGroup",
+          "verdict": "ok",
+          "detail": ""
+        }
+      ]
+    },
+    {
+      "object": "SNMPv2-MIB::snmpInPkts",
+      "oid": "1.3.6.1.2.1.11.1",
+      "kind": "scalar",
+      "required_min_access": "read-only",
+      "device_access": "read-only",
+      "verdict": "satisfied",
+      "reasons": [],
+      "evidence": [
+        {
+          "source": "group",
+          "basis": "policy-group:SNMPv2-MIB::snmpGroup",
+          "requirement": "mandatory",
+          "min_access": "read-only",
+          "condition": null,
+          "condition_active": null,
+          "group": "SNMPv2-MIB::snmpGroup",
+          "verdict": "ok",
+          "detail": ""
+        }
+      ]
+    },
+    {
+      "object": "SNMPv2-MIB::snmpInBadVersions",
+      "oid": "1.3.6.1.2.1.11.3",
+      "kind": "scalar",
+      "required_min_access": "read-only",
+      "device_access": "read-only",
+      "verdict": "satisfied",
+      "reasons": [],
+      "evidence": [
+        {
+          "source": "group",
+          "basis": "policy-group:SNMPv2-MIB::snmpGroup",
+          "requirement": "mandatory",
+          "min_access": "read-only",
+          "condition": null,
+          "condition_active": null,
+          "group": "SNMPv2-MIB::snmpGroup",
+          "verdict": "ok",
+          "detail": ""
+        }
+      ]
+    },
+    {
+      "object": "SNMPv2-MIB::snmpInASNParseErrs",
+      "oid": "1.3.6.1.2.1.11.6",
+      "kind": "scalar",
+      "required_min_access": "read-only",
+      "device_access": "read-only",
+      "verdict": "satisfied",
+      "reasons": [],
+      "evidence": [
+        {
+          "source": "group",
+          "basis": "policy-group:SNMPv2-MIB::snmpGroup",
+          "requirement": "mandatory",
+          "min_access": "read-only",
+          "condition": null,
+          "condition_active": null,
+          "group": "SNMPv2-MIB::snmpGroup",
+          "verdict": "ok",
+          "detail": ""
+        }
+      ]
+    },
+    {
+      "object": "SNMPv2-MIB::snmpEnableAuthenTraps",
+      "oid": "1.3.6.1.2.1.11.30",
+      "kind": "scalar",
+      "required_min_access": "read-write",
+      "device_access": "read-only",
+      "verdict": "partial",
+      "reasons": [
+        "RFC3418 snmpBasicComplianceRev2 OBJECT clause (MIN-ACCESS read-write): device offers read-only, requirement needs read-write"
+      ],
+      "evidence": [
+        {
+          "source": "group",
+          "basis": "policy-group:SNMPv2-MIB::snmpGroup",
+          "requirement": "mandatory",
+          "min_access": "read-only",
+          "condition": null,
+          "condition_active": null,
+          "group": "SNMPv2-MIB::snmpGroup",
+          "verdict": "ok",
+          "detail": ""
+        },
+        {
+          "source": "compliance-object",
+          "basis": "RFC3418 snmpBasicComplianceRev2 OBJECT clause (MIN-ACCESS read-write)",
+          "requirement": "mandatory",
+          "min_access": "read-write",
+          "condition": null,
+          "condition_active": null,
+          "group": null,
+          "verdict": "access-deficit",
+          "detail": "device offers read-only, requirement needs read-write"
+        },
+        {
+          "source": "required-metric",
+          "basis": "delivery-metric",
+          "requirement": "mandatory",
+          "min_access": "read-only",
+          "condition": null,
+          "condition_active": null,
+          "group": null,
+          "verdict": "ok",
+          "detail": ""
+        }
+      ]
+    },
+    {
+      "object": "SNMPv2-MIB::snmpSilentDrops",
+      "oid": "1.3.6.1.2.1.11.31",
+      "kind": "scalar",
+      "required_min_access": "read-only",
+      "device_access": "read-only",
+      "verdict": "satisfied",
+      "reasons": [],
+      "evidence": [
+        {
+          "source": "group",
+          "basis": "policy-group:SNMPv2-MIB::snmpGroup",
+          "requirement": "mandatory",
+          "min_access": "read-only",
+          "condition": null,
+          "condition_active": null,
+          "group": "SNMPv2-MIB::snmpGroup",
+          "verdict": "ok",
+          "detail": ""
+        }
+      ]
+    },
+    {
+      "object": "SNMPv2-MIB::snmpProxyDrops",
+      "oid": "1.3.6.1.2.1.11.32",
+      "kind": "scalar",
+      "required_min_access": "read-only",
+      "device_access": "read-only",
+      "verdict": "satisfied",
+      "reasons": [],
+      "evidence": [
+        {
+          "source": "group",
+          "basis": "policy-group:SNMPv2-MIB::snmpGroup",
+          "requirement": "mandatory",
+          "min_access": "read-only",
+          "condition": null,
+          "condition_active": null,
+          "group": "SNMPv2-MIB::snmpGroup",
+          "verdict": "ok",
+          "detail": ""
+        }
+      ]
+    },
+    {
+      "object": "SNMP-FRAMEWORK-MIB::snmpEngineID",
+      "oid": "1.3.6.1.6.3.10.2.1.1",
+      "kind": "scalar",
+      "required_min_access": "read-only",
+      "device_access": "read-only",
+      "verdict": "satisfied",
+      "reasons": [],
+      "evidence": [
+        {
+          "source": "group",
+          "basis": "policy-group:SNMP-FRAMEWORK-MIB::snmpEngineGroup",
+          "requirement": "mandatory",
+          "min_access": "read-only",
+          "condition": null,
+          "condition_active": null,
+          "group": "SNMP-FRAMEWORK-MIB::snmpEngineGroup",
+          "verdict": "ok",
+          "detail": ""
+        },
+        {
+          "source": "required-metric",
+          "basis": "delivery-metric",
+          "requirement": "mandatory",
+          "min_access": "read-only",
+          "condition": null,
+          "condition_active": null,
+          "group": null,
+          "verdict": "ok",
+          "detail": ""
+        }
+      ]
+    },
+    {
+      "object": "SNMP-FRAMEWORK-MIB::snmpEngineBoots",
+      "oid": "1.3.6.1.6.3.10.2.1.2",
+      "kind": "scalar",
+      "required_min_access": "read-only",
+      "device_access": "read-only",
+      "verdict": "satisfied",
+      "reasons": [],
+      "evidence": [
+        {
+          "source": "group",
+          "basis": "policy-group:SNMP-FRAMEWORK-MIB::snmpEngineGroup",
+          "requirement": "mandatory",
+          "min_access": "read-only",
+          "condition": null,
+          "condition_active": null,
+          "group": "SNMP-FRAMEWORK-MIB::snmpEngineGroup",
+          "verdict": "ok",
+          "detail": ""
+        },
+        {
+          "source": "required-metric",
+          "basis": "delivery-metric",
+          "requirement": "mandatory",
+          "min_access": "read-only",
+          "condition": null,
+          "condition_active": null,
+          "group": null,
+          "verdict": "ok",
+          "detail": ""
+        }
+      ]
+    },
+    {
+      "object": "SNMP-FRAMEWORK-MIB::snmpEngineTime",
+      "oid": "1.3.6.1.6.3.10.2.1.3",
+      "kind": "scalar",
+      "required_min_access": "read-only",
+      "device_access": "read-only",
+      "verdict": "satisfied",
+      "reasons": [],
+      "evidence": [
+        {
+          "source": "group",
+          "basis": "policy-group:SNMP-FRAMEWORK-MIB::snmpEngineGroup",
+          "requirement": "mandatory",
+          "min_access": "read-only",
+          "condition": null,
+          "condition_active": null,
+          "group": "SNMP-FRAMEWORK-MIB::snmpEngineGroup",
+          "verdict": "ok",
+          "detail": ""
+        },
+        {
+          "source": "required-metric",
+          "basis": "delivery-metric",
+          "requirement": "mandatory",
+          "min_access": "read-only",
+          "condition": null,
+          "condition_active": null,
+          "group": null,
+          "verdict": "ok",
+          "detail": ""
+        }
+      ]
+    },
+    {
+      "object": "SNMP-FRAMEWORK-MIB::snmpEngineMaxMessageSize",
+      "oid": "1.3.6.1.6.3.10.2.1.4",
+      "kind": "scalar",
+      "required_min_access": "read-only",
+      "device_access": "read-only",
+      "verdict": "satisfied",
+      "reasons": [],
+      "evidence": [
+        {
+          "source": "group",
+          "basis": "policy-group:SNMP-FRAMEWORK-MIB::snmpEngineGroup",
+          "requirement": "mandatory",
+          "min_access": "read-only",
+          "condition": null,
+          "condition_active": null,
+          "group": "SNMP-FRAMEWORK-MIB::snmpEngineGroup",
+          "verdict": "ok",
+          "detail": ""
+        }
+      ]
+    },
+    {
+      "object": "SNMP-TARGET-MIB::snmpTargetAddrName",
+      "oid": "1.3.6.1.6.3.12.1.2.1.1",
+      "kind": "column",
+      "required_min_access": "read-only",
+      "device_access": "not-accessible",
+      "verdict": "unsatisfied",
+      "reasons": [
+        "SNMP-TARGET-MIB::snmpTargetAddrName is column with access not-accessible; it has no pollable instance (index columns such as snmpTargetAddrName only appear encoded inside row instance OIDs)"
+      ],
+      "evidence": [
+        {
+          "source": "required-metric",
+          "basis": "delivery-metric",
+          "requirement": "mandatory",
+          "min_access": "read-only",
+          "condition": null,
+          "condition_active": null,
+          "group": null,
+          "verdict": "undeclared",
+          "detail": "required metric has no active GROUP/OBJECT declaration on this device; instance existence cannot be proven from the declaration and must be verified at runtime"
+        }
+      ]
+    },
+    {
+      "object": "SNMP-TARGET-MIB::snmpTargetAddrTimeout",
+      "oid": "1.3.6.1.6.3.12.1.2.1.4",
+      "kind": "column",
+      "required_min_access": "read-create",
+      "device_access": "read-only",
+      "verdict": "partial",
+      "reasons": [
+        "illustrative MIN-ACCESS clause attached to the response-app condition: device offers read-only, requirement needs read-create"
+      ],
+      "evidence": [
+        {
+          "source": "group",
+          "basis": "policy-group:SNMP-TARGET-MIB::snmpTargetResponseGroup",
+          "requirement": "conditional",
+          "min_access": "read-only",
+          "condition": "device generates SNMP messages for which a response is expected (retries/timeouts apply)",
+          "condition_active": true,
+          "group": "SNMP-TARGET-MIB::snmpTargetResponseGroup",
+          "verdict": "ok",
+          "detail": ""
+        },
+        {
+          "source": "compliance-object",
+          "basis": "illustrative MIN-ACCESS clause attached to the response-app condition",
+          "requirement": "conditional",
+          "min_access": "read-create",
+          "condition": "device generates SNMP messages for which a response is expected (retries/timeouts apply)",
+          "condition_active": true,
+          "group": null,
+          "verdict": "access-deficit",
+          "detail": "device offers read-only, requirement needs read-create"
+        },
+        {
+          "source": "required-metric",
+          "basis": "delivery-metric",
+          "requirement": "mandatory",
+          "min_access": "read-only",
+          "condition": null,
+          "condition_active": null,
+          "group": null,
+          "verdict": "ok",
+          "detail": ""
+        }
+      ]
+    },
+    {
+      "object": "SNMP-TARGET-MIB::snmpTargetAddrRetryCount",
+      "oid": "1.3.6.1.6.3.12.1.2.1.5",
+      "kind": "column",
+      "required_min_access": "read-only",
+      "device_access": "read-create",
+      "verdict": "satisfied",
+      "reasons": [],
+      "evidence": [
+        {
+          "source": "group",
+          "basis": "policy-group:SNMP-TARGET-MIB::snmpTargetResponseGroup",
+          "requirement": "conditional",
+          "min_access": "read-only",
+          "condition": "device generates SNMP messages for which a response is expected (retries/timeouts apply)",
+          "condition_active": true,
+          "group": "SNMP-TARGET-MIB::snmpTargetResponseGroup",
+          "verdict": "ok",
+          "detail": ""
+        }
+      ]
+    },
+    {
+      "object": "SNMP-TARGET-MIB::snmpUnavailableContexts",
+      "oid": "1.3.6.1.6.3.12.1.4",
+      "kind": "scalar",
+      "required_min_access": "read-only",
+      "device_access": "read-only",
+      "verdict": "partial",
+      "reasons": [
+        "policy-group:SNMP-TARGET-MIB::snmpTargetCommandResponderGroup: command responder context counters are not instrumented in firmware 4.2"
+      ],
+      "evidence": [
+        {
+          "source": "group",
+          "basis": "policy-group:SNMP-TARGET-MIB::snmpTargetCommandResponderGroup",
+          "requirement": "conditional",
+          "min_access": "read-only",
+          "condition": "device includes an SNMP command responder application",
+          "condition_active": true,
+          "group": "SNMP-TARGET-MIB::snmpTargetCommandResponderGroup",
+          "verdict": "group-unsupported",
+          "detail": "command responder context counters are not instrumented in firmware 4.2"
+        }
+      ]
+    },
+    {
+      "object": "SNMP-TARGET-MIB::snmpUnknownContexts",
+      "oid": "1.3.6.1.6.3.12.1.5",
+      "kind": "scalar",
+      "required_min_access": "read-only",
+      "device_access": "read-only",
+      "verdict": "partial",
+      "reasons": [
+        "policy-group:SNMP-TARGET-MIB::snmpTargetCommandResponderGroup: command responder context counters are not instrumented in firmware 4.2",
+        "delivery-metric: required metric has no active GROUP/OBJECT declaration on this device; instance existence cannot be proven from the declaration and must be verified at runtime"
+      ],
+      "evidence": [
+        {
+          "source": "group",
+          "basis": "policy-group:SNMP-TARGET-MIB::snmpTargetCommandResponderGroup",
+          "requirement": "conditional",
+          "min_access": "read-only",
+          "condition": "device includes an SNMP command responder application",
+          "condition_active": true,
+          "group": "SNMP-TARGET-MIB::snmpTargetCommandResponderGroup",
+          "verdict": "group-unsupported",
+          "detail": "command responder context counters are not instrumented in firmware 4.2"
+        },
+        {
+          "source": "required-metric",
+          "basis": "delivery-metric",
+          "requirement": "mandatory",
+          "min_access": "read-only",
+          "condition": null,
+          "condition_active": null,
+          "group": null,
+          "verdict": "undeclared",
+          "detail": "required metric has no active GROUP/OBJECT declaration on this device; instance existence cannot be proven from the declaration and must be verified at runtime"
+        }
+      ]
+    },
+    {
+      "object": "SNMP-USER-BASED-SM-MIB::usmStatsUnsupportedSecLevels",
+      "oid": "1.3.6.1.6.3.15.1.1.1",
+      "kind": "scalar",
+      "required_min_access": "read-only",
+      "device_access": "read-only",
+      "verdict": "waived",
+      "reasons": [
+        "policy-group:SNMP-USER-BASED-SM-MIB::usmMIBBasicGroup: condition inactive (device implements the SNMPv3 User-based Security Model (USM))"
+      ],
+      "evidence": [
+        {
+          "source": "group",
+          "basis": "policy-group:SNMP-USER-BASED-SM-MIB::usmMIBBasicGroup",
+          "requirement": "conditional",
+          "min_access": "read-only",
+          "condition": "device implements the SNMPv3 User-based Security Model (USM)",
+          "condition_active": false,
+          "group": "SNMP-USER-BASED-SM-MIB::usmMIBBasicGroup",
+          "verdict": "condition-inactive",
+          "detail": "device implements the SNMPv3 User-based Security Model (USM)"
+        }
+      ]
+    },
+    {
+      "object": "SNMP-USER-BASED-SM-MIB::usmStatsNotInTimeWindows",
+      "oid": "1.3.6.1.6.3.15.1.1.2",
+      "kind": "scalar",
+      "required_min_access": "read-only",
+      "device_access": "read-only",
+      "verdict": "waived",
+      "reasons": [
+        "policy-group:SNMP-USER-BASED-SM-MIB::usmMIBBasicGroup: condition inactive (device implements the SNMPv3 User-based Security Model (USM))"
+      ],
+      "evidence": [
+        {
+          "source": "group",
+          "basis": "policy-group:SNMP-USER-BASED-SM-MIB::usmMIBBasicGroup",
+          "requirement": "conditional",
+          "min_access": "read-only",
+          "condition": "device implements the SNMPv3 User-based Security Model (USM)",
+          "condition_active": false,
+          "group": "SNMP-USER-BASED-SM-MIB::usmMIBBasicGroup",
+          "verdict": "condition-inactive",
+          "detail": "device implements the SNMPv3 User-based Security Model (USM)"
+        }
+      ]
+    },
+    {
+      "object": "SNMP-USER-BASED-SM-MIB::usmStatsUnknownUserNames",
+      "oid": "1.3.6.1.6.3.15.1.1.3",
+      "kind": "scalar",
+      "required_min_access": "read-only",
+      "device_access": "read-only",
+      "verdict": "partial",
+      "reasons": [
+        "policy-group:SNMP-USER-BASED-SM-MIB::usmMIBBasicGroup: condition inactive (device implements the SNMPv3 User-based Security Model (USM))",
+        "delivery-metric: required metric has no active GROUP/OBJECT declaration on this device; instance existence cannot be proven from the declaration and must be verified at runtime"
+      ],
+      "evidence": [
+        {
+          "source": "group",
+          "basis": "policy-group:SNMP-USER-BASED-SM-MIB::usmMIBBasicGroup",
+          "requirement": "conditional",
+          "min_access": "read-only",
+          "condition": "device implements the SNMPv3 User-based Security Model (USM)",
+          "condition_active": false,
+          "group": "SNMP-USER-BASED-SM-MIB::usmMIBBasicGroup",
+          "verdict": "condition-inactive",
+          "detail": "device implements the SNMPv3 User-based Security Model (USM)"
+        },
+        {
+          "source": "required-metric",
+          "basis": "delivery-metric",
+          "requirement": "mandatory",
+          "min_access": "read-only",
+          "condition": null,
+          "condition_active": null,
+          "group": null,
+          "verdict": "undeclared",
+          "detail": "required metric has no active GROUP/OBJECT declaration on this device; instance existence cannot be proven from the declaration and must be verified at runtime"
+        }
+      ]
+    },
+    {
+      "object": "SNMP-USER-BASED-SM-MIB::usmStatsUnknownEngineIDs",
+      "oid": "1.3.6.1.6.3.15.1.1.4",
+      "kind": "scalar",
+      "required_min_access": "read-only",
+      "device_access": "read-only",
+      "verdict": "waived",
+      "reasons": [
+        "policy-group:SNMP-USER-BASED-SM-MIB::usmMIBBasicGroup: condition inactive (device implements the SNMPv3 User-based Security Model (USM))"
+      ],
+      "evidence": [
+        {
+          "source": "group",
+          "basis": "policy-group:SNMP-USER-BASED-SM-MIB::usmMIBBasicGroup",
+          "requirement": "conditional",
+          "min_access": "read-only",
+          "condition": "device implements the SNMPv3 User-based Security Model (USM)",
+          "condition_active": false,
+          "group": "SNMP-USER-BASED-SM-MIB::usmMIBBasicGroup",
+          "verdict": "condition-inactive",
+          "detail": "device implements the SNMPv3 User-based Security Model (USM)"
+        }
+      ]
+    },
+    {
+      "object": "SNMP-USER-BASED-SM-MIB::usmStatsWrongDigests",
+      "oid": "1.3.6.1.6.3.15.1.1.5",
+      "kind": "scalar",
+      "required_min_access": "read-only",
+      "device_access": "read-only",
+      "verdict": "waived",
+      "reasons": [
+        "policy-group:SNMP-USER-BASED-SM-MIB::usmMIBBasicGroup: condition inactive (device implements the SNMPv3 User-based Security Model (USM))"
+      ],
+      "evidence": [
+        {
+          "source": "group",
+          "basis": "policy-group:SNMP-USER-BASED-SM-MIB::usmMIBBasicGroup",
+          "requirement": "conditional",
+          "min_access": "read-only",
+          "condition": "device implements the SNMPv3 User-based Security Model (USM)",
+          "condition_active": false,
+          "group": "SNMP-USER-BASED-SM-MIB::usmMIBBasicGroup",
+          "verdict": "condition-inactive",
+          "detail": "device implements the SNMPv3 User-based Security Model (USM)"
+        }
+      ]
+    },
+    {
+      "object": "SNMP-USER-BASED-SM-MIB::usmStatsDecryptionErrors",
+      "oid": "1.3.6.1.6.3.15.1.1.6",
+      "kind": "scalar",
+      "required_min_access": "read-only",
+      "device_access": "read-only",
+      "verdict": "waived",
+      "reasons": [
+        "policy-group:SNMP-USER-BASED-SM-MIB::usmMIBBasicGroup: condition inactive (device implements the SNMPv3 User-based Security Model (USM))"
+      ],
+      "evidence": [
+        {
+          "source": "group",
+          "basis": "policy-group:SNMP-USER-BASED-SM-MIB::usmMIBBasicGroup",
+          "requirement": "conditional",
+          "min_access": "read-only",
+          "condition": "device implements the SNMPv3 User-based Security Model (USM)",
+          "condition_active": false,
+          "group": "SNMP-USER-BASED-SM-MIB::usmMIBBasicGroup",
+          "verdict": "condition-inactive",
+          "detail": "device implements the SNMPv3 User-based Security Model (USM)"
+        }
+      ]
+    },
+    {
+      "object": "SNMP-USER-BASED-SM-MIB::usmUserSpinLock",
+      "oid": "1.3.6.1.6.3.15.1.2.1",
+      "kind": "scalar",
+      "required_min_access": "read-only",
+      "device_access": "read-write",
+      "verdict": "waived",
+      "reasons": [
+        "policy-group:SNMP-USER-BASED-SM-MIB::usmMIBBasicGroup: condition inactive (device implements the SNMPv3 User-based Security Model (USM))"
+      ],
+      "evidence": [
+        {
+          "source": "group",
+          "basis": "policy-group:SNMP-USER-BASED-SM-MIB::usmMIBBasicGroup",
+          "requirement": "conditional",
+          "min_access": "read-only",
+          "condition": "device implements the SNMPv3 User-based Security Model (USM)",
+          "condition_active": false,
+          "group": "SNMP-USER-BASED-SM-MIB::usmMIBBasicGroup",
+          "verdict": "condition-inactive",
+          "detail": "device implements the SNMPv3 User-based Security Model (USM)"
+        }
+      ]
+    },
+    {
+      "object": "SNMP-USER-BASED-SM-MIB::usmUserSecurityName",
+      "oid": "1.3.6.1.6.3.15.1.2.2.1.3",
+      "kind": "column",
+      "required_min_access": "read-only",
+      "device_access": "read-only",
+      "verdict": "waived",
+      "reasons": [
+        "policy-group:SNMP-USER-BASED-SM-MIB::usmMIBBasicGroup: condition inactive (device implements the SNMPv3 User-based Security Model (USM))"
+      ],
+      "evidence": [
+        {
+          "source": "group",
+          "basis": "policy-group:SNMP-USER-BASED-SM-MIB::usmMIBBasicGroup",
+          "requirement": "conditional",
+          "min_access": "read-only",
+          "condition": "device implements the SNMPv3 User-based Security Model (USM)",
+          "condition_active": false,
+          "group": "SNMP-USER-BASED-SM-MIB::usmMIBBasicGroup",
+          "verdict": "condition-inactive",
+          "detail": "device implements the SNMPv3 User-based Security Model (USM)"
+        }
+      ]
+    },
+    {
+      "object": "SNMP-USER-BASED-SM-MIB::usmUserCloneFrom",
+      "oid": "1.3.6.1.6.3.15.1.2.2.1.4",
+      "kind": "column",
+      "required_min_access": "read-only",
+      "device_access": "read-create",
+      "verdict": "waived",
+      "reasons": [
+        "policy-group:SNMP-USER-BASED-SM-MIB::usmMIBBasicGroup: condition inactive (device implements the SNMPv3 User-based Security Model (USM))"
+      ],
+      "evidence": [
+        {
+          "source": "group",
+          "basis": "policy-group:SNMP-USER-BASED-SM-MIB::usmMIBBasicGroup",
+          "requirement": "conditional",
+          "min_access": "read-only",
+          "condition": "device implements the SNMPv3 User-based Security Model (USM)",
+          "condition_active": false,
+          "group": "SNMP-USER-BASED-SM-MIB::usmMIBBasicGroup",
+          "verdict": "condition-inactive",
+          "detail": "device implements the SNMPv3 User-based Security Model (USM)"
+        }
+      ]
+    },
+    {
+      "object": "SNMP-USER-BASED-SM-MIB::usmUserAuthProtocol",
+      "oid": "1.3.6.1.6.3.15.1.2.2.1.5",
+      "kind": "column",
+      "required_min_access": "read-only",
+      "device_access": "read-create",
+      "verdict": "waived",
+      "reasons": [
+        "policy-group:SNMP-USER-BASED-SM-MIB::usmMIBBasicGroup: condition inactive (device implements the SNMPv3 User-based Security Model (USM))"
+      ],
+      "evidence": [
+        {
+          "source": "group",
+          "basis": "policy-group:SNMP-USER-BASED-SM-MIB::usmMIBBasicGroup",
+          "requirement": "conditional",
+          "min_access": "read-only",
+          "condition": "device implements the SNMPv3 User-based Security Model (USM)",
+          "condition_active": false,
+          "group": "SNMP-USER-BASED-SM-MIB::usmMIBBasicGroup",
+          "verdict": "condition-inactive",
+          "detail": "device implements the SNMPv3 User-based Security Model (USM)"
+        }
+      ]
+    },
+    {
+      "object": "SNMP-USER-BASED-SM-MIB::usmUserAuthKeyChange",
+      "oid": "1.3.6.1.6.3.15.1.2.2.1.6",
+      "kind": "column",
+      "required_min_access": "read-only",
+      "device_access": "read-create",
+      "verdict": "waived",
+      "reasons": [
+        "policy-group:SNMP-USER-BASED-SM-MIB::usmMIBBasicGroup: condition inactive (device implements the SNMPv3 User-based Security Model (USM))"
+      ],
+      "evidence": [
+        {
+          "source": "group",
+          "basis": "policy-group:SNMP-USER-BASED-SM-MIB::usmMIBBasicGroup",
+          "requirement": "conditional",
+          "min_access": "read-only",
+          "condition": "device implements the SNMPv3 User-based Security Model (USM)",
+          "condition_active": false,
+          "group": "SNMP-USER-BASED-SM-MIB::usmMIBBasicGroup",
+          "verdict": "condition-inactive",
+          "detail": "device implements the SNMPv3 User-based Security Model (USM)"
+        }
+      ]
+    },
+    {
+      "object": "SNMP-USER-BASED-SM-MIB::usmUserOwnAuthKeyChange",
+      "oid": "1.3.6.1.6.3.15.1.2.2.1.7",
+      "kind": "column",
+      "required_min_access": "read-only",
+      "device_access": "read-create",
+      "verdict": "waived",
+      "reasons": [
+        "policy-group:SNMP-USER-BASED-SM-MIB::usmMIBBasicGroup: condition inactive (device implements the SNMPv3 User-based Security Model (USM))"
+      ],
+      "evidence": [
+        {
+          "source": "group",
+          "basis": "policy-group:SNMP-USER-BASED-SM-MIB::usmMIBBasicGroup",
+          "requirement": "conditional",
+          "min_access": "read-only",
+          "condition": "device implements the SNMPv3 User-based Security Model (USM)",
+          "condition_active": false,
+          "group": "SNMP-USER-BASED-SM-MIB::usmMIBBasicGroup",
+          "verdict": "condition-inactive",
+          "detail": "device implements the SNMPv3 User-based Security Model (USM)"
+        }
+      ]
+    },
+    {
+      "object": "SNMP-USER-BASED-SM-MIB::usmUserPrivProtocol",
+      "oid": "1.3.6.1.6.3.15.1.2.2.1.8",
+      "kind": "column",
+      "required_min_access": "read-only",
+      "device_access": "read-create",
+      "verdict": "waived",
+      "reasons": [
+        "policy-group:SNMP-USER-BASED-SM-MIB::usmMIBBasicGroup: condition inactive (device implements the SNMPv3 User-based Security Model (USM))"
+      ],
+      "evidence": [
+        {
+          "source": "group",
+          "basis": "policy-group:SNMP-USER-BASED-SM-MIB::usmMIBBasicGroup",
+          "requirement": "conditional",
+          "min_access": "read-only",
+          "condition": "device implements the SNMPv3 User-based Security Model (USM)",
+          "condition_active": false,
+          "group": "SNMP-USER-BASED-SM-MIB::usmMIBBasicGroup",
+          "verdict": "condition-inactive",
+          "detail": "device implements the SNMPv3 User-based Security Model (USM)"
+        }
+      ]
+    },
+    {
+      "object": "SNMP-USER-BASED-SM-MIB::usmUserPrivKeyChange",
+      "oid": "1.3.6.1.6.3.15.1.2.2.1.9",
+      "kind": "column",
+      "required_min_access": "read-only",
+      "device_access": "read-create",
+      "verdict": "waived",
+      "reasons": [
+        "policy-group:SNMP-USER-BASED-SM-MIB::usmMIBBasicGroup: condition inactive (device implements the SNMPv3 User-based Security Model (USM))"
+      ],
+      "evidence": [
+        {
+          "source": "group",
+          "basis": "policy-group:SNMP-USER-BASED-SM-MIB::usmMIBBasicGroup",
+          "requirement": "conditional",
+          "min_access": "read-only",
+          "condition": "device implements the SNMPv3 User-based Security Model (USM)",
+          "condition_active": false,
+          "group": "SNMP-USER-BASED-SM-MIB::usmMIBBasicGroup",
+          "verdict": "condition-inactive",
+          "detail": "device implements the SNMPv3 User-based Security Model (USM)"
+        }
+      ]
+    },
+    {
+      "object": "SNMP-USER-BASED-SM-MIB::usmUserOwnPrivKeyChange",
+      "oid": "1.3.6.1.6.3.15.1.2.2.1.10",
+      "kind": "column",
+      "required_min_access": "read-only",
+      "device_access": "read-create",
+      "verdict": "waived",
+      "reasons": [
+        "policy-group:SNMP-USER-BASED-SM-MIB::usmMIBBasicGroup: condition inactive (device implements the SNMPv3 User-based Security Model (USM))"
+      ],
+      "evidence": [
+        {
+          "source": "group",
+          "basis": "policy-group:SNMP-USER-BASED-SM-MIB::usmMIBBasicGroup",
+          "requirement": "conditional",
+          "min_access": "read-only",
+          "condition": "device implements the SNMPv3 User-based Security Model (USM)",
+          "condition_active": false,
+          "group": "SNMP-USER-BASED-SM-MIB::usmMIBBasicGroup",
+          "verdict": "condition-inactive",
+          "detail": "device implements the SNMPv3 User-based Security Model (USM)"
+        }
+      ]
+    },
+    {
+      "object": "SNMP-USER-BASED-SM-MIB::usmUserPublic",
+      "oid": "1.3.6.1.6.3.15.1.2.2.1.11",
+      "kind": "column",
+      "required_min_access": "read-only",
+      "device_access": "read-create",
+      "verdict": "waived",
+      "reasons": [
+        "policy-group:SNMP-USER-BASED-SM-MIB::usmMIBBasicGroup: condition inactive (device implements the SNMPv3 User-based Security Model (USM))"
+      ],
+      "evidence": [
+        {
+          "source": "group",
+          "basis": "policy-group:SNMP-USER-BASED-SM-MIB::usmMIBBasicGroup",
+          "requirement": "conditional",
+          "min_access": "read-only",
+          "condition": "device implements the SNMPv3 User-based Security Model (USM)",
+          "condition_active": false,
+          "group": "SNMP-USER-BASED-SM-MIB::usmMIBBasicGroup",
+          "verdict": "condition-inactive",
+          "detail": "device implements the SNMPv3 User-based Security Model (USM)"
+        }
+      ]
+    },
+    {
+      "object": "SNMP-USER-BASED-SM-MIB::usmUserStorageType",
+      "oid": "1.3.6.1.6.3.15.1.2.2.1.12",
+      "kind": "column",
+      "required_min_access": "read-only",
+      "device_access": "read-create",
+      "verdict": "waived",
+      "reasons": [
+        "policy-group:SNMP-USER-BASED-SM-MIB::usmMIBBasicGroup: condition inactive (device implements the SNMPv3 User-based Security Model (USM))"
+      ],
+      "evidence": [
+        {
+          "source": "group",
+          "basis": "policy-group:SNMP-USER-BASED-SM-MIB::usmMIBBasicGroup",
+          "requirement": "conditional",
+          "min_access": "read-only",
+          "condition": "device implements the SNMPv3 User-based Security Model (USM)",
+          "condition_active": false,
+          "group": "SNMP-USER-BASED-SM-MIB::usmMIBBasicGroup",
+          "verdict": "condition-inactive",
+          "detail": "device implements the SNMPv3 User-based Security Model (USM)"
+        }
+      ]
+    },
+    {
+      "object": "SNMP-USER-BASED-SM-MIB::usmUserStatus",
+      "oid": "1.3.6.1.6.3.15.1.2.2.1.13",
+      "kind": "column",
+      "required_min_access": "read-only",
+      "device_access": "read-create",
+      "verdict": "waived",
+      "reasons": [
+        "policy-group:SNMP-USER-BASED-SM-MIB::usmMIBBasicGroup: condition inactive (device implements the SNMPv3 User-based Security Model (USM))"
+      ],
+      "evidence": [
+        {
+          "source": "group",
+          "basis": "policy-group:SNMP-USER-BASED-SM-MIB::usmMIBBasicGroup",
+          "requirement": "conditional",
+          "min_access": "read-only",
+          "condition": "device implements the SNMPv3 User-based Security Model (USM)",
+          "condition_active": false,
+          "group": "SNMP-USER-BASED-SM-MIB::usmMIBBasicGroup",
+          "verdict": "condition-inactive",
+          "detail": "device implements the SNMPv3 User-based Security Model (USM)"
+        }
+      ]
+    }
+  ]
+}

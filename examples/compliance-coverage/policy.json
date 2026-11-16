@@ -1,0 +1,59 @@
+{
+  "name": "illustrative-compliance-policy",
+  "comment": "Translated from MODULE-COMPLIANCE clauses. Compiled MIB modules only retain GROUP references; conditional wording and MIN-ACCESS clauses lost at compile time are captured here verbatim in policy terms.",
+  "groups": [
+    {
+      "group": "SNMP-FRAMEWORK-MIB::snmpEngineGroup",
+      "requirement": "mandatory",
+      "condition": null
+    },
+    {
+      "group": "SNMPv2-MIB::systemGroup",
+      "requirement": "mandatory",
+      "condition": null
+    },
+    {
+      "group": "SNMPv2-MIB::snmpGroup",
+      "requirement": "mandatory",
+      "condition": null
+    },
+    {
+      "group": "SNMP-TARGET-MIB::snmpTargetResponseGroup",
+      "requirement": "conditional",
+      "condition": "device generates SNMP messages for which a response is expected (retries/timeouts apply)"
+    },
+    {
+      "group": "SNMP-TARGET-MIB::snmpTargetCommandResponderGroup",
+      "requirement": "conditional",
+      "condition": "device includes an SNMP command responder application"
+    },
+    {
+      "group": "SNMP-USER-BASED-SM-MIB::usmMIBBasicGroup",
+      "requirement": "conditional",
+      "condition": "device implements the SNMPv3 User-based Security Model (USM)"
+    }
+  ],
+  "objects": [
+    {
+      "object": "SNMPv2-MIB::snmpEnableAuthenTraps",
+      "requirement": "mandatory",
+      "min_access": "read-write",
+      "condition": null,
+      "reference": "RFC3418 snmpBasicComplianceRev2 OBJECT clause (MIN-ACCESS read-write)"
+    },
+    {
+      "object": "SNMPv2-MIB::sysContact",
+      "requirement": "mandatory",
+      "min_access": "read-write",
+      "condition": null,
+      "reference": "RFC3418 snmpBasicComplianceRev2 OBJECT clause (MIN-ACCESS read-write)"
+    },
+    {
+      "object": "SNMP-TARGET-MIB::snmpTargetAddrTimeout",
+      "requirement": "conditional",
+      "min_access": "read-create",
+      "condition": "device generates SNMP messages for which a response is expected (retries/timeouts apply)",
+      "reference": "illustrative MIN-ACCESS clause attached to the response-app condition"
+    }
+  ]
+}

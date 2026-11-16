@@ -1,0 +1,369 @@
+[
+  {
+    "operation": "GET",
+    "target": "SNMPv2-MIB::sysDescr.0",
+    "oid": "1.3.6.1.2.1.1.1.0",
+    "dedup_sources": [
+      "policy-group:SNMPv2-MIB::systemGroup"
+    ],
+    "note": "scalar instance; a single GET returns the value",
+    "object": "SNMPv2-MIB::sysDescr",
+    "verdict": "satisfied",
+    "required_min_access": "read-only",
+    "device_access": "read-only"
+  },
+  {
+    "operation": "GET",
+    "target": "SNMPv2-MIB::sysObjectID.0",
+    "oid": "1.3.6.1.2.1.1.2.0",
+    "dedup_sources": [
+      "policy-group:SNMPv2-MIB::systemGroup"
+    ],
+    "note": "scalar instance; a single GET returns the value",
+    "object": "SNMPv2-MIB::sysObjectID",
+    "verdict": "satisfied",
+    "required_min_access": "read-only",
+    "device_access": "read-only"
+  },
+  {
+    "operation": "GET",
+    "target": "SNMPv2-MIB::sysUpTime.0",
+    "oid": "1.3.6.1.2.1.1.3.0",
+    "dedup_sources": [
+      "delivery-metric",
+      "policy-group:SNMPv2-MIB::systemGroup"
+    ],
+    "note": "scalar instance; a single GET returns the value",
+    "object": "SNMPv2-MIB::sysUpTime",
+    "verdict": "satisfied",
+    "required_min_access": "read-only",
+    "device_access": "read-only"
+  },
+  {
+    "operation": "GET",
+    "target": "SNMPv2-MIB::sysContact.0",
+    "oid": "1.3.6.1.2.1.1.4.0",
+    "dedup_sources": [
+      "RFC3418 snmpBasicComplianceRev2 OBJECT clause (MIN-ACCESS read-write)",
+      "delivery-metric",
+      "policy-group:SNMPv2-MIB::systemGroup"
+    ],
+    "note": "scalar instance; a single GET returns the value",
+    "object": "SNMPv2-MIB::sysContact",
+    "verdict": "satisfied",
+    "required_min_access": "read-write",
+    "device_access": "read-write"
+  },
+  {
+    "operation": "GET",
+    "target": "SNMPv2-MIB::sysName.0",
+    "oid": "1.3.6.1.2.1.1.5.0",
+    "dedup_sources": [
+      "delivery-metric",
+      "policy-group:SNMPv2-MIB::systemGroup"
+    ],
+    "note": "scalar instance; a single GET returns the value",
+    "object": "SNMPv2-MIB::sysName",
+    "verdict": "satisfied",
+    "required_min_access": "read-only",
+    "device_access": "read-write"
+  },
+  {
+    "operation": "GET",
+    "target": "SNMPv2-MIB::sysLocation.0",
+    "oid": "1.3.6.1.2.1.1.6.0",
+    "dedup_sources": [
+      "policy-group:SNMPv2-MIB::systemGroup"
+    ],
+    "note": "scalar instance; a single GET returns the value",
+    "object": "SNMPv2-MIB::sysLocation",
+    "verdict": "satisfied",
+    "required_min_access": "read-only",
+    "device_access": "read-write"
+  },
+  {
+    "operation": "GET",
+    "target": "SNMPv2-MIB::sysServices.0",
+    "oid": "1.3.6.1.2.1.1.7.0",
+    "dedup_sources": [
+      "policy-group:SNMPv2-MIB::systemGroup"
+    ],
+    "note": "scalar instance; a single GET returns the value",
+    "object": "SNMPv2-MIB::sysServices",
+    "verdict": "satisfied",
+    "required_min_access": "read-only",
+    "device_access": "read-only"
+  },
+  {
+    "operation": "GET",
+    "target": "SNMPv2-MIB::sysORLastChange.0",
+    "oid": "1.3.6.1.2.1.1.8.0",
+    "dedup_sources": [
+      "policy-group:SNMPv2-MIB::systemGroup"
+    ],
+    "note": "scalar instance; a single GET returns the value",
+    "object": "SNMPv2-MIB::sysORLastChange",
+    "verdict": "satisfied",
+    "required_min_access": "read-only",
+    "device_access": "read-only"
+  },
+  {
+    "operation": "WALK",
+    "target": "SNMPv2-MIB::sysORID",
+    "oid": "1.3.6.1.2.1.1.9.1.2",
+    "index_columns": [
+      "SNMPv2-MIB::sysORIndex"
+    ],
+    "dedup_sources": [
+      "delivery-metric",
+      "policy-group:SNMPv2-MIB::systemGroup"
+    ],
+    "note": "table column root is a schema node, not an instance; issue GETNEXT/GETBulk subtree walk and treat each returned varbind as one row instance - one GET on the column root can never prove the table is populated",
+    "object": "SNMPv2-MIB::sysORID",
+    "verdict": "satisfied",
+    "required_min_access": "read-only",
+    "device_access": "read-only"
+  },
+  {
+    "operation": "WALK",
+    "target": "SNMPv2-MIB::sysORDescr",
+    "oid": "1.3.6.1.2.1.1.9.1.3",
+    "index_columns": [
+      "SNMPv2-MIB::sysORIndex"
+    ],
+    "dedup_sources": [
+      "policy-group:SNMPv2-MIB::systemGroup"
+    ],
+    "note": "table column root is a schema node, not an instance; issue GETNEXT/GETBulk subtree walk and treat each returned varbind as one row instance - one GET on the column root can never prove the table is populated",
+    "object": "SNMPv2-MIB::sysORDescr",
+    "verdict": "satisfied",
+    "required_min_access": "read-only",
+    "device_access": "read-only"
+  },
+  {
+    "operation": "WALK",
+    "target": "SNMPv2-MIB::sysORUpTime",
+    "oid": "1.3.6.1.2.1.1.9.1.4",
+    "index_columns": [
+      "SNMPv2-MIB::sysORIndex"
+    ],
+    "dedup_sources": [
+      "policy-group:SNMPv2-MIB::systemGroup"
+    ],
+    "note": "table column root is a schema node, not an instance; issue GETNEXT/GETBulk subtree walk and treat each returned varbind as one row instance - one GET on the column root can never prove the table is populated",
+    "object": "SNMPv2-MIB::sysORUpTime",
+    "verdict": "satisfied",
+    "required_min_access": "read-only",
+    "device_access": "read-only"
+  },
+  {
+    "operation": "GET",
+    "target": "SNMPv2-MIB::snmpInPkts.0",
+    "oid": "1.3.6.1.2.1.11.1.0",
+    "dedup_sources": [
+      "policy-group:SNMPv2-MIB::snmpGroup"
+    ],
+    "note": "scalar instance; a single GET returns the value",
+    "object": "SNMPv2-MIB::snmpInPkts",
+    "verdict": "satisfied",
+    "required_min_access": "read-only",
+    "device_access": "read-only"
+  },
+  {
+    "operation": "GET",
+    "target": "SNMPv2-MIB::snmpInBadVersions.0",
+    "oid": "1.3.6.1.2.1.11.3.0",
+    "dedup_sources": [
+      "policy-group:SNMPv2-MIB::snmpGroup"
+    ],
+    "note": "scalar instance; a single GET returns the value",
+    "object": "SNMPv2-MIB::snmpInBadVersions",
+    "verdict": "satisfied",
+    "required_min_access": "read-only",
+    "device_access": "read-only"
+  },
+  {
+    "operation": "GET",
+    "target": "SNMPv2-MIB::snmpInASNParseErrs.0",
+    "oid": "1.3.6.1.2.1.11.6.0",
+    "dedup_sources": [
+      "policy-group:SNMPv2-MIB::snmpGroup"
+    ],
+    "note": "scalar instance; a single GET returns the value",
+    "object": "SNMPv2-MIB::snmpInASNParseErrs",
+    "verdict": "satisfied",
+    "required_min_access": "read-only",
+    "device_access": "read-only"
+  },
+  {
+    "operation": "GET",
+    "target": "SNMPv2-MIB::snmpEnableAuthenTraps.0",
+    "oid": "1.3.6.1.2.1.11.30.0",
+    "dedup_sources": [
+      "RFC3418 snmpBasicComplianceRev2 OBJECT clause (MIN-ACCESS read-write)",
+      "delivery-metric",
+      "policy-group:SNMPv2-MIB::snmpGroup"
+    ],
+    "note": "scalar instance; a single GET returns the value",
+    "object": "SNMPv2-MIB::snmpEnableAuthenTraps",
+    "verdict": "partial",
+    "required_min_access": "read-write",
+    "device_access": "read-only"
+  },
+  {
+    "operation": "GET",
+    "target": "SNMPv2-MIB::snmpSilentDrops.0",
+    "oid": "1.3.6.1.2.1.11.31.0",
+    "dedup_sources": [
+      "policy-group:SNMPv2-MIB::snmpGroup"
+    ],
+    "note": "scalar instance; a single GET returns the value",
+    "object": "SNMPv2-MIB::snmpSilentDrops",
+    "verdict": "satisfied",
+    "required_min_access": "read-only",
+    "device_access": "read-only"
+  },
+  {
+    "operation": "GET",
+    "target": "SNMPv2-MIB::snmpProxyDrops.0",
+    "oid": "1.3.6.1.2.1.11.32.0",
+    "dedup_sources": [
+      "policy-group:SNMPv2-MIB::snmpGroup"
+    ],
+    "note": "scalar instance; a single GET returns the value",
+    "object": "SNMPv2-MIB::snmpProxyDrops",
+    "verdict": "satisfied",
+    "required_min_access": "read-only",
+    "device_access": "read-only"
+  },
+  {
+    "operation": "GET",
+    "target": "SNMP-FRAMEWORK-MIB::snmpEngineID.0",
+    "oid": "1.3.6.1.6.3.10.2.1.1.0",
+    "dedup_sources": [
+      "delivery-metric",
+      "policy-group:SNMP-FRAMEWORK-MIB::snmpEngineGroup"
+    ],
+    "note": "scalar instance; a single GET returns the value",
+    "object": "SNMP-FRAMEWORK-MIB::snmpEngineID",
+    "verdict": "satisfied",
+    "required_min_access": "read-only",
+    "device_access": "read-only"
+  },
+  {
+    "operation": "GET",
+    "target": "SNMP-FRAMEWORK-MIB::snmpEngineBoots.0",
+    "oid": "1.3.6.1.6.3.10.2.1.2.0",
+    "dedup_sources": [
+      "delivery-metric",
+      "policy-group:SNMP-FRAMEWORK-MIB::snmpEngineGroup"
+    ],
+    "note": "scalar instance; a single GET returns the value",
+    "object": "SNMP-FRAMEWORK-MIB::snmpEngineBoots",
+    "verdict": "satisfied",
+    "required_min_access": "read-only",
+    "device_access": "read-only"
+  },
+  {
+    "operation": "GET",
+    "target": "SNMP-FRAMEWORK-MIB::snmpEngineTime.0",
+    "oid": "1.3.6.1.6.3.10.2.1.3.0",
+    "dedup_sources": [
+      "delivery-metric",
+      "policy-group:SNMP-FRAMEWORK-MIB::snmpEngineGroup"
+    ],
+    "note": "scalar instance; a single GET returns the value",
+    "object": "SNMP-FRAMEWORK-MIB::snmpEngineTime",
+    "verdict": "satisfied",
+    "required_min_access": "read-only",
+    "device_access": "read-only"
+  },
+  {
+    "operation": "GET",
+    "target": "SNMP-FRAMEWORK-MIB::snmpEngineMaxMessageSize.0",
+    "oid": "1.3.6.1.6.3.10.2.1.4.0",
+    "dedup_sources": [
+      "policy-group:SNMP-FRAMEWORK-MIB::snmpEngineGroup"
+    ],
+    "note": "scalar instance; a single GET returns the value",
+    "object": "SNMP-FRAMEWORK-MIB::snmpEngineMaxMessageSize",
+    "verdict": "satisfied",
+    "required_min_access": "read-only",
+    "device_access": "read-only"
+  },
+  {
+    "operation": "WALK",
+    "target": "SNMP-TARGET-MIB::snmpTargetAddrTimeout",
+    "oid": "1.3.6.1.6.3.12.1.2.1.4",
+    "index_columns": [
+      "SNMP-TARGET-MIB::snmpTargetAddrName"
+    ],
+    "dedup_sources": [
+      "delivery-metric",
+      "illustrative MIN-ACCESS clause attached to the response-app condition",
+      "policy-group:SNMP-TARGET-MIB::snmpTargetResponseGroup"
+    ],
+    "note": "table column root is a schema node, not an instance; issue GETNEXT/GETBulk subtree walk and treat each returned varbind as one row instance - one GET on the column root can never prove the table is populated",
+    "object": "SNMP-TARGET-MIB::snmpTargetAddrTimeout",
+    "verdict": "partial",
+    "required_min_access": "read-create",
+    "device_access": "read-only"
+  },
+  {
+    "operation": "WALK",
+    "target": "SNMP-TARGET-MIB::snmpTargetAddrRetryCount",
+    "oid": "1.3.6.1.6.3.12.1.2.1.5",
+    "index_columns": [
+      "SNMP-TARGET-MIB::snmpTargetAddrName"
+    ],
+    "dedup_sources": [
+      "policy-group:SNMP-TARGET-MIB::snmpTargetResponseGroup"
+    ],
+    "note": "table column root is a schema node, not an instance; issue GETNEXT/GETBulk subtree walk and treat each returned varbind as one row instance - one GET on the column root can never prove the table is populated",
+    "object": "SNMP-TARGET-MIB::snmpTargetAddrRetryCount",
+    "verdict": "satisfied",
+    "required_min_access": "read-only",
+    "device_access": "read-create"
+  },
+  {
+    "operation": "GET",
+    "target": "SNMP-TARGET-MIB::snmpUnavailableContexts.0",
+    "oid": "1.3.6.1.6.3.12.1.4.0",
+    "dedup_sources": [
+      "policy-group:SNMP-TARGET-MIB::snmpTargetCommandResponderGroup"
+    ],
+    "note": "scalar instance; a single GET returns the value",
+    "object": "SNMP-TARGET-MIB::snmpUnavailableContexts",
+    "verdict": "partial",
+    "required_min_access": "read-only",
+    "device_access": "read-only"
+  },
+  {
+    "operation": "GET",
+    "target": "SNMP-TARGET-MIB::snmpUnknownContexts.0",
+    "oid": "1.3.6.1.6.3.12.1.5.0",
+    "dedup_sources": [
+      "delivery-metric",
+      "policy-group:SNMP-TARGET-MIB::snmpTargetCommandResponderGroup"
+    ],
+    "note": "scalar instance; a single GET returns the value",
+    "object": "SNMP-TARGET-MIB::snmpUnknownContexts",
+    "verdict": "partial",
+    "required_min_access": "read-only",
+    "device_access": "read-only"
+  },
+  {
+    "operation": "GET",
+    "target": "SNMP-USER-BASED-SM-MIB::usmStatsUnknownUserNames.0",
+    "oid": "1.3.6.1.6.3.15.1.1.3.0",
+    "dedup_sources": [
+      "delivery-metric",
+      "policy-group:SNMP-USER-BASED-SM-MIB::usmMIBBasicGroup"
+    ],
+    "note": "scalar instance; a single GET returns the value",
+    "object": "SNMP-USER-BASED-SM-MIB::usmStatsUnknownUserNames",
+    "verdict": "partial",
+    "required_min_access": "read-only",
+    "device_access": "read-only"
+  }
+]

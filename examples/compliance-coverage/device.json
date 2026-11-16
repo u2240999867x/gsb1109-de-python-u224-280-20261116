@@ -1,0 +1,57 @@
+{
+  "name": "acme-router-X1-firmware-4.2",
+  "comment": "Device declaration: which compliance statements are claimed, how each conditional group is answered, and AGENT-CAPABILITIES style access refinements.",
+  "claims": [
+    "SNMP-FRAMEWORK-MIB::snmpFrameworkMIBCompliance",
+    "SNMPv2-MIB::snmpBasicComplianceRev2",
+    "SNMP-TARGET-MIB::snmpTargetCommandResponderCompliance"
+  ],
+  "groups": [
+    {
+      "group": "SNMP-FRAMEWORK-MIB::snmpEngineGroup",
+      "supported": true,
+      "condition_active": null,
+      "reason": ""
+    },
+    {
+      "group": "SNMPv2-MIB::systemGroup",
+      "supported": true,
+      "condition_active": null,
+      "reason": ""
+    },
+    {
+      "group": "SNMPv2-MIB::snmpGroup",
+      "supported": true,
+      "condition_active": null,
+      "reason": ""
+    },
+    {
+      "group": "SNMP-TARGET-MIB::snmpTargetResponseGroup",
+      "supported": true,
+      "condition_active": true,
+      "reason": "notification originator sends Inform requests with retry/timeout configuration"
+    },
+    {
+      "group": "SNMP-TARGET-MIB::snmpTargetCommandResponderGroup",
+      "supported": false,
+      "condition_active": true,
+      "reason": "command responder context counters are not instrumented in firmware 4.2"
+    },
+    {
+      "group": "SNMP-USER-BASED-SM-MIB::usmMIBBasicGroup",
+      "supported": false,
+      "condition_active": false,
+      "reason": "SNMPv2c-only product; USM is not implemented"
+    }
+  ],
+  "object_access": [
+    {
+      "object": "SNMPv2-MIB::snmpEnableAuthenTraps",
+      "access": "read-only"
+    },
+    {
+      "object": "SNMP-TARGET-MIB::snmpTargetAddrTimeout",
+      "access": "read-only"
+    }
+  ]
+}
