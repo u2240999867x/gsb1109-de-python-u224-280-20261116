@@ -1,0 +1,26 @@
+{
+  "name": "@foxglove/mcap-example-text-annotation-demo",
+  "description": "Demo foxglove.TextAnnotations",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc -b",
+    "lint:ci": "tsc -b && eslint .",
+    "lint": "tsc -b && eslint --fix .",
+    "main": "tsc -b && tsx scripts/main.ts"
+  },
+  "devDependencies": {
+    "@foxglove/eslint-plugin": "2.1.2",
+    "@mcap/core": "workspace:*",
+    "@mcap/nodejs": "workspace:*",
+    "@types/node": "20.19.43",
+    "eslint": "9.39.5",
+    "prettier": "3.1.0",
+    "tsx": "4.23.5",
+    "typescript": "5.9.3"
+  },
+  "dependencies": {
+    "@foxglove/schemas": "1.8.0"
+  }
+}

@@ -1,0 +1,703 @@
+"""tests for the McapReader implementations."""
+
+# cspell:words getbuffer
+import json
+import os
+import warnings
+from io import BytesIO
+from pathlib import Path
+from typing import IO, Any, Dict, List, Optional, Tuple, Type, Union
+
+import pytest
+
+from mcap.decoder import DecoderFactory
+from mcap.exceptions import (
+    DecoderNotFoundError,
+    InvalidMagic,
+    RecordLengthLimitExceeded,
+)
+from mcap.reader import McapReader, NonSeekingReader, SeekingReader, make_reader
+from mcap.records import Channel, Message, Schema
+from mcap.stream_reader import StreamReader
+from mcap.writer import CompressionType, IndexType, Writer
+
+DEMO_MCAP = (
+    Path(__file__).parent.parent.parent.parent / "testdata" / "mcap" / "demo.mcap"
+)
+
+
+class StrictBytesIO(BytesIO):
+    """A subclass of BytesIO that throws for negative or unspecified-length reads."""
+
+    def read(self, size: Union[int, None] = -1):
+        assert size is not None and size > 0
+        return super().read(size)
+
+
+@pytest.fixture
+def pipe():
+    r, w = os.pipe()
+    try:
+        yield os.fdopen(r, "rb"), os.fdopen(w, "wb")
+    finally:
+        os.close(r)
+        os.close(w)
+
+
+def test_make_seeking():
+    """test that seekable streams get read with the seeking reader."""
+    with open(DEMO_MCAP, "rb") as f:
+        reader = make_reader(f)
+        assert isinstance(reader, SeekingReader)
+
+
+def test_make_not_seeking(pipe: Tuple[IO[bytes], IO[bytes]]):
+    """test that non-seekable streams get read with the non-seeking reader."""
+    r, _ = pipe
+    reader: McapReader = make_reader(r)
+    assert isinstance(reader, NonSeekingReader)
+
+
+READER_SUBCLASSES = [SeekingReader, NonSeekingReader]
+# We use this union rather than the base class McapReader so that the type-checker does not
+# complain about instantiating the class with arguments that the base class constructor does not
+# take.
+AnyReaderSubclass = Union[Type[SeekingReader], Type[NonSeekingReader]]
+
+
+@pytest.mark.parametrize("reader_cls", READER_SUBCLASSES)
+def test_all_messages(reader_cls: AnyReaderSubclass):
+    """test that we can find all messages correctly with all reader implementations."""
+    with open(DEMO_MCAP, "rb") as f:
+        reader: McapReader = reader_cls(f)
+        count = 0
+        for schema, channel, message in reader.iter_messages():
+            assert isinstance(schema, Schema)
+            assert isinstance(channel, Channel)
+            assert isinstance(message, Message)
+            count += 1
+
+        assert count == 3
+
+
+@pytest.mark.parametrize("reader_cls", READER_SUBCLASSES)
+def test_time_range(reader_cls: AnyReaderSubclass):
+    """test that we can filter by time range with all reader implementations."""
+    with open(DEMO_MCAP, "rb") as f:
+        reader: McapReader = reader_cls(f)
+        count = 0
+        start = int(40)
+        end = int(43)
+        for schema, channel, message in reader.iter_messages(
+            starting_at=start, ending_before=end
+        ):
+            assert isinstance(schema, Schema)
+            assert isinstance(channel, Channel)
+            assert isinstance(message, Message)
+            assert message.log_time < end
+            assert message.log_time >= start
+            count += 1
+
+        assert count == 1
+
+
+@pytest.mark.parametrize("reader_cls", READER_SUBCLASSES)
+def test_explicit_time_range_bounds(reader_cls: AnyReaderSubclass):
+    """test the inclusive/exclusive bound spellings with all reader implementations."""
+
+    def count_messages(**kwargs: Any) -> int:
+        with open(DEMO_MCAP, "rb") as f:
+            reader: McapReader = reader_cls(f)
+            return sum(1 for _ in reader.iter_messages(**kwargs))
+
+    # The demo file contains messages at log times 42, 43, and 43.
+    assert count_messages(starting_at=42, ending_before=43) == 1
+    assert count_messages(starting_at=42, ending_at=43) == 3
+    assert count_messages(starting_after=42, ending_at=43) == 2
+    # Equal inclusive bounds select the single matching log time.
+    assert count_messages(starting_at=42, ending_at=42) == 1
+    # At most one bound per side may be provided.
+    with pytest.raises(ValueError, match="starting_after"):
+        count_messages(starting_at=42, starting_after=42)
+    with pytest.raises(ValueError, match="ending_before"):
+        count_messages(ending_at=43, ending_before=43)
+    with pytest.raises(ValueError, match="starting_after"):
+        count_messages(start_time=42, starting_after=42)
+
+
+@pytest.mark.parametrize("reader_cls", READER_SUBCLASSES)
+def test_max_timestamp_bound(reader_cls: AnyReaderSubclass):
+    """a message logged at the maximum uint64 timestamp is included by default and by
+    an explicit ending_at at that timestamp, while starting_after at that timestamp
+    selects nothing."""
+    buffer = BytesIO()
+    writer = Writer(buffer)
+    writer.start()
+    channel_id = writer.register_channel("/t", "json", 0)
+    for log_time in (3, 2**64 - 1):
+        writer.add_message(
+            channel_id, log_time=log_time, data=b"x", publish_time=log_time
+        )
+    writer.finish()
+
+    def count_messages(**kwargs: Any) -> int:
+        buffer.seek(0)
+        reader: McapReader = reader_cls(buffer)
+        return sum(1 for _ in reader.iter_messages(**kwargs))
+
+    assert count_messages() == 2
+    assert count_messages(ending_at=2**64 - 1) == 2
+    # No log time is strictly after the maximum timestamp.
+    assert count_messages(starting_after=2**64 - 1) == 0
+    # With an end bound that also reaches the maximum it is still an empty query.
+    assert count_messages(starting_after=2**64 - 1, ending_at=2**64 - 1) == 0
+    # An end bound that stops short of the maximum makes the range crossed, as it does for
+    # an inclusive lower bound at the maximum.
+    for kwargs in (
+        dict(starting_after=2**64 - 1, ending_before=5),
+        dict(starting_after=2**64 - 1, ending_at=5),
+        dict(starting_at=2**64 - 1, ending_before=5),
+    ):
+        with pytest.raises(ValueError, match="end time cannot come before start time"):
+            count_messages(**kwargs)
+    # starting_after below the maximum keeps its normal exclusive behavior.
+    assert count_messages(starting_after=3) == 1
+    # A strictly crossed range is a caller error; equal bounds are a valid empty query.
+    with pytest.raises(ValueError, match="end time cannot come before start time"):
+        count_messages(starting_at=10, ending_before=5)
+    assert count_messages(starting_at=5, ending_before=5) == 0
+
+
+@pytest.mark.parametrize("reader_cls", READER_SUBCLASSES)
+def test_time_range_bounds_with_duplicate_log_times(reader_cls: AnyReaderSubclass):
+    """an inclusive bound shared by several messages keeps all of them, even when they
+    span several chunks, while the exclusive spellings drop all of them."""
+    buffer = BytesIO()
+    # A tiny chunk size puts every message in its own chunk, so the duplicates span chunks.
+    writer = Writer(buffer, chunk_size=1)
+    writer.start()
+    channel_id = writer.register_channel("/t", "json", 0)
+    written = [2, 3, 3, 3, 4]
+    for log_time in written:
+        writer.add_message(
+            channel_id, log_time=log_time, data=b"x", publish_time=log_time
+        )
+    writer.finish()
+
+    buffer.seek(0)
+    summary = SeekingReader(buffer).get_summary()
+    assert summary is not None
+    assert len(summary.chunk_indexes) == len(written)
+
+    def log_times(**kwargs: Any) -> List[int]:
+        buffer.seek(0)
+        reader: McapReader = reader_cls(buffer)
+        return [message.log_time for _, _, message in reader.iter_messages(**kwargs)]
+
+    orders: List[Dict[str, Any]] = [{"log_time_order": False}, {"log_time_order": True}]
+    if reader_cls is SeekingReader:
+        orders.append({"log_time_order": True, "reverse": True})
+    for order in orders:
+        assert log_times(starting_at=3, ending_at=3, **order) == [3, 3, 3]
+        assert log_times(starting_after=3, **order) == [4]
+        assert log_times(ending_before=3, **order) == [2]
+
+
+@pytest.mark.parametrize("reader_cls", READER_SUBCLASSES)
+def test_deprecated_time_range_names(reader_cls: AnyReaderSubclass):
+    """the deprecated names warn but keep their exact historical behavior."""
+
+    with open(DEMO_MCAP, "rb") as f:
+        reader: McapReader = reader_cls(f)
+        with pytest.warns(DeprecationWarning, match="start_time is deprecated"):
+            with pytest.warns(DeprecationWarning, match="end_time is deprecated"):
+                count = sum(1 for _ in reader.iter_messages(start_time=42, end_time=43))
+    assert count == 1
+
+
+@pytest.mark.parametrize("reader_cls", READER_SUBCLASSES)
+@pytest.mark.parametrize("method", ["iter_messages", "iter_decoded_messages"])
+def test_deprecated_time_range_warning_points_at_caller(
+    reader_cls: AnyReaderSubclass, method: str
+):
+    """the deprecation warning is attributed to the caller's frame, not to mcap.reader.
+
+    Python's default filters only show a DeprecationWarning attributed to __main__, so a
+    warning attributed to the library would be invisible to most callers.
+    """
+
+    class RawDecoderFactory(DecoderFactory):
+        def decoder_for(self, message_encoding: str, schema: Optional[Schema]):
+            return lambda data: data
+
+    with open(DEMO_MCAP, "rb") as f:
+        reader: McapReader = reader_cls(f, decoder_factories=[RawDecoderFactory()])
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            for _ in getattr(reader, method)(start_time=42, end_time=43):
+                pass
+    deprecations = [w for w in caught if issubclass(w.category, DeprecationWarning)]
+    names = [str(w.message).split(" ")[0] for w in deprecations]
+    assert names == ["start_time", "end_time"]
+    for w in deprecations:
+        assert w.filename == __file__
+
+
+@pytest.mark.parametrize("reader_cls", READER_SUBCLASSES)
+def test_only_diagnostics(reader_cls: AnyReaderSubclass):
+    """test that we can filter by topic with all reader implementations."""
+    with open(DEMO_MCAP, "rb") as f:
+        reader: McapReader = reader_cls(f)
+        count = 0
+        for schema, channel, message in reader.iter_messages(topics=["/diagnostics"]):
+            assert isinstance(schema, Schema)
+            assert isinstance(channel, Channel)
+            assert channel.topic == "/diagnostics"
+            assert isinstance(message, Message)
+            count += 1
+
+        assert count == 1
+
+
+@pytest.mark.parametrize("reader_cls", READER_SUBCLASSES)
+def test_only_diagnostics_str(reader_cls: AnyReaderSubclass):
+    """test that we can filter by topic string with all reader implementations."""
+    with open(DEMO_MCAP, "rb") as f:
+        reader: McapReader = reader_cls(f)
+        count = 0
+        for schema, channel, message in reader.iter_messages(topics="/diagnostics"):
+            assert isinstance(schema, Schema)
+            assert isinstance(channel, Channel)
+            assert channel.topic == "/diagnostics"
+            assert isinstance(message, Message)
+            count += 1
+
+        assert count == 1
+
+
+def test_seeking_reader_reads_chunk_index_without_message_index(tmpdir: Path):
+    filepath = tmpdir / "chunk_index_only.mcap"
+    with open(filepath, "wb") as f:
+        writer = Writer(f, index_types=IndexType.CHUNK)
+        writer.start()
+        channel_id = writer.register_channel("sample_topic", "json", 0)
+        writer.add_message(
+            channel_id,
+            log_time=42,
+            data=json.dumps({"sample": "test"}).encode("utf8"),
+            publish_time=43,
+        )
+        writer.finish()
+
+    def messages(**kwargs: Any) -> list[Tuple[Optional[Schema], Channel, Message]]:
+        with open(filepath, "rb") as f:
+            return list(SeekingReader(f).iter_messages(**kwargs))
+
+    all_messages = messages()
+    assert len(all_messages) == 1
+    assert all_messages[0][1].topic == "sample_topic"
+    assert all_messages[0][2].data == b'{"sample": "test"}'
+    assert len(messages(topics=["sample_topic"])) == 1
+    assert len(messages(topics=["other_topic"])) == 0
+    assert len(messages(starting_at=43)) == 0
+    assert len(messages(ending_before=42)) == 0
+
+
+def write_json_mcap(filepath: Path):
+    with open(filepath, "wb") as f:
+        writer = Writer(f)
+        writer.start()
+        schemaless_channel = writer.register_channel("/a", "json", 0)
+        writer.add_message(
+            schemaless_channel, 10, json.dumps({"a": 0}).encode("utf8"), 10
+        )
+        schema = writer.register_schema("msg", "jsonschema", "true".encode("utf8"))
+        channel_with_schema = writer.register_channel("/b", "json", schema)
+        writer.add_message(
+            channel_with_schema, 20, json.dumps({"a": 1}).encode("utf8"), 20
+        )
+        writer.finish()
+
+
+@pytest.mark.parametrize("reader_cls", READER_SUBCLASSES)
+def test_decode_schemaless(reader_cls: AnyReaderSubclass, tmpdir: Path):
+    filepath = tmpdir / "json.mcap"
+    write_json_mcap(filepath)
+
+    with open(filepath, "rb") as f:
+        reader = reader_cls(
+            f, decoder_factories=[JsonDecoderFactory(require_schema=False)]
+        )
+        results = [
+            (schema, value) for (schema, _, _, value) in reader.iter_decoded_messages()
+        ]
+        assert results[0] == (None, {"a": 0})
+        assert results[1][0] is not None
+        assert results[1][1] == {"a": 1}
+
+
+class JsonDecoderFactory(DecoderFactory):
+    def __init__(self, require_schema: bool = True):
+        self._require_schema = require_schema
+
+    def decoder_for(self, message_encoding: str, schema: Optional[Schema]):
+        def decoder(message_data: bytes) -> Any:
+            return json.loads(message_data)
+
+        if message_encoding != "json":
+            return None
+        if self._require_schema and schema is None:
+            return None
+        return decoder
+
+
+@pytest.mark.parametrize("reader_cls", READER_SUBCLASSES)
+def test_decode_with_schema(reader_cls: AnyReaderSubclass, tmpdir: Path):
+    filepath = tmpdir / "json.mcap"
+    write_json_mcap(filepath)
+
+    # should throw DecoderNotFound when it encounters the schemaless channel /a.
+    with open(filepath, "rb") as f:
+        reader = reader_cls(f, decoder_factories=[JsonDecoderFactory()])
+        with pytest.raises(DecoderNotFoundError):
+            for _ in reader.iter_decoded_messages():
+                pass
+    with open(filepath, "rb") as f:
+        reader = reader_cls(f, decoder_factories=[JsonDecoderFactory()])
+        results = [
+            (schema, value)
+            for (schema, _, _, value) in reader.iter_decoded_messages(topics=["/b"])
+        ]
+        assert len(results) == 1
+        assert results[0][0] is not None
+        assert results[0][1] == {"a": 1}
+
+
+def test_non_seeking_used_once():
+    """test that the non-seeking reader blocks users from trying to read more that once."""
+    with open(DEMO_MCAP, "rb") as f:
+        reader = NonSeekingReader(f)
+        reader.get_summary()
+        with pytest.raises(RuntimeError):
+            reader.get_summary()
+
+    with open(DEMO_MCAP, "rb") as f:
+        reader = NonSeekingReader(f)
+        _ = list(reader.iter_messages())
+        with pytest.raises(RuntimeError):
+            _ = list(reader.iter_messages())
+
+    with open(DEMO_MCAP, "rb") as f:
+        reader = NonSeekingReader(f)
+        _ = list(reader.iter_attachments())
+        with pytest.raises(RuntimeError):
+            _ = list(reader.iter_attachments())
+
+    with open(DEMO_MCAP, "rb") as f:
+        reader = NonSeekingReader(f)
+        _ = list(reader.iter_metadata())
+        with pytest.raises(RuntimeError):
+            _ = list(reader.iter_metadata())
+
+
+def write_no_summary_mcap(filepath: Path):
+    with open(filepath, "wb") as f:
+        writer = Writer(
+            f,
+            index_types=IndexType.NONE,
+            repeat_channels=False,
+            repeat_schemas=False,
+            use_chunking=False,
+            use_statistics=False,
+            use_summary_offsets=False,
+        )
+        writer.start()
+        writer.add_attachment(10, 10, "my_attach", "text", b"some data")
+        writer.add_metadata("my_meta", {"foo": "bar"})
+        foo_channel = writer.register_channel("/foo", "json", 0)
+        for _ in range(200):
+            writer.add_message(foo_channel, 10, json.dumps({"a": 0}).encode("utf8"), 10)
+        writer.finish()
+
+
+def test_no_summary_seeking(tmpdir: Path):
+    filepath = tmpdir / "no_summary.mcap"
+    write_no_summary_mcap(filepath)
+
+    with open(filepath, "rb") as f:
+        reader = SeekingReader(f)
+        assert len(list(reader.iter_messages())) == 200
+        assert len(list(reader.iter_attachments())) == 1
+        assert len(list(reader.iter_metadata())) == 1
+
+
+def test_no_summary_not_seeking(tmpdir: Path):
+    filepath = tmpdir / "no_summary.mcap"
+    write_no_summary_mcap(filepath)
+
+    with open(filepath, "rb") as f:
+        assert len(list(NonSeekingReader(f).iter_messages())) == 200
+    with open(filepath, "rb") as f:
+        assert len(list(NonSeekingReader(f).iter_attachments())) == 1
+    with open(filepath, "rb") as f:
+        assert len(list(NonSeekingReader(f).iter_metadata())) == 1
+
+
+def test_detect_invalid_initial_magic(tmpdir: Path):
+    filepath = tmpdir / "invalid_magic.mcap"
+    with open(filepath, "w") as f:
+        f.write("some bytes longer than the initial magic bytes")
+
+    with open(filepath, "rb") as f:
+        with pytest.raises(InvalidMagic):
+            SeekingReader(f)
+
+    with open(filepath, "rb") as f:
+        with pytest.raises(InvalidMagic):
+            NonSeekingReader(f).get_header()
+
+
+def test_record_size_limit():
+    # create a simple small MCAP
+    write_stream = StrictBytesIO()
+    writer = Writer(write_stream)
+    writer.start("profile", "library")
+    writer.finish()
+
+    # default stream reader can read it
+    stream_reader = StreamReader(
+        StrictBytesIO(write_stream.getbuffer()), record_size_limit=100
+    )
+    records = [r for r in stream_reader.records]
+    assert len(records) == 10
+
+    # can cause "large" records to raise an error by setting a low limit
+    stream_reader = StreamReader(
+        StrictBytesIO(write_stream.getbuffer()), record_size_limit=10
+    )
+    with pytest.raises(
+        RecordLengthLimitExceeded,
+        match="HEADER record has length 22 that exceeds limit 10",
+    ):
+        next(stream_reader.records)
+
+    # default seeking reader can read it
+    seeking_reader = SeekingReader(
+        StrictBytesIO(write_stream.getbuffer()), record_size_limit=100
+    )
+    seeking_reader.get_header()
+    seeking_reader.get_summary()
+    assert len([m for m in seeking_reader.iter_messages()]) == 0
+
+    # can cause "large" records to raise an error by setting a low limit
+    seeking_reader = SeekingReader(
+        StrictBytesIO(write_stream.getbuffer()), record_size_limit=10
+    )
+    with pytest.raises(
+        RecordLengthLimitExceeded,
+        match="HEADER record has length 22 that exceeds limit 10",
+    ):
+        seeking_reader.get_header()
+
+    with pytest.raises(
+        RecordLengthLimitExceeded,
+        match="FOOTER record has length 20 that exceeds limit 10",
+    ):
+        seeking_reader.get_summary()
+
+    # default non-seeking reader can read it
+    non_seeking_reader = NonSeekingReader(
+        StrictBytesIO(write_stream.getbuffer()), record_size_limit=100
+    )
+    non_seeking_reader.get_header()
+
+    # can cause "large" records to raise an error by setting a low limit
+    non_seeking_reader = NonSeekingReader(
+        StrictBytesIO(write_stream.getbuffer()), record_size_limit=10
+    )
+    with pytest.raises(
+        RecordLengthLimitExceeded,
+        match="HEADER record has length 22 that exceeds limit 10",
+    ):
+        non_seeking_reader.get_header()
+
+
+def test_custom_record():
+    write_stream = StrictBytesIO()
+    writer = Writer(write_stream)
+    writer.start("profile", "library")
+    write_stream.write(b"\x80\x00\x00\x00\x00\x00\x00\x00\x00")
+    writer.finish()
+    stream_reader = StreamReader(
+        StrictBytesIO(write_stream.getbuffer()), record_size_limit=100
+    )
+    records = [r for r in stream_reader.records]
+    assert len(records) == 10
+
+
+def _write_ordering_mcap(
+    filepath: Path,
+    messages: list[Tuple[str, int]],
+    chunk_size: int = 256,
+    index_types: IndexType = IndexType.ALL,
+):
+    """Write one message per (topic, log_time) pair, in the order given."""
+    with open(filepath, "wb") as f:
+        writer = Writer(f, chunk_size=chunk_size, index_types=index_types)
+        writer.start()
+        channels: dict[str, int] = {}
+        for sequence, (topic, log_time) in enumerate(messages):
+            if topic not in channels:
+                channels[topic] = writer.register_channel(topic, "json", 0)
+            writer.add_message(
+                channels[topic],
+                log_time=log_time,
+                data=str(sequence).encode("utf8"),
+                publish_time=log_time,
+                sequence=sequence,
+            )
+        writer.finish()
+
+
+def _read(filepath: Path, **kwargs: Any) -> list[Tuple[str, int, int]]:
+    with open(filepath, "rb") as f:
+        return [
+            (channel.topic, message.log_time, message.sequence)
+            for _, channel, message in SeekingReader(f).iter_messages(**kwargs)
+        ]
+
+
+def test_log_time_order_is_global_across_channels(tmpdir: Path):
+    """messages come out in log time order across every channel, not per channel."""
+    filepath = Path(tmpdir) / "interleaved.mcap"
+    # Three channels each running at a different rate, written out of log time order
+    # within each chunk, with timestamps that tie both within and across channels.
+    messages = [(f"/topic{i % 3}", ((i * 37) % 50) * 10 + (i % 3)) for i in range(500)]
+    _write_ordering_mcap(filepath, messages)
+
+    forward = _read(filepath)
+    assert len(forward) == len(messages)
+    log_times = [log_time for _, log_time, _ in forward]
+    assert log_times == sorted(log_times)
+    # Every channel is represented, so this is not accidentally a per-channel order.
+    assert len({topic for topic, _, _ in forward}) == 3
+    assert sorted(forward) == sorted(
+        (topic, log_time, sequence)
+        for sequence, (topic, log_time) in enumerate(messages)
+    )
+
+    # Ordering is total, so reversing it is exactly the reverse iteration order.
+    assert _read(filepath, reverse=True) == list(reversed(forward))
+
+
+def test_log_time_order_with_filters(tmpdir: Path):
+    """topic and time filters do not disturb the ordering."""
+    filepath = Path(tmpdir) / "filtered.mcap"
+    messages = [(f"/topic{i % 3}", ((i * 17) % 40) * 10) for i in range(400)]
+    _write_ordering_mcap(filepath, messages)
+
+    filtered = _read(filepath, topics=["/topic1"], starting_at=100, ending_before=300)
+    assert filtered  # the filter is not vacuous
+    assert all(topic == "/topic1" for topic, _, _ in filtered)
+    assert all(100 <= log_time < 300 for _, log_time, _ in filtered)
+    assert [log_time for _, log_time, _ in filtered] == sorted(
+        log_time for _, log_time, _ in filtered
+    )
+    assert _read(
+        filepath, topics=["/topic1"], starting_at=100, ending_before=300, reverse=True
+    ) == list(reversed(filtered))
+
+
+def test_reverse_order_with_back_to_back_chunks(tmpdir: Path):
+    """reverse ordering holds when chunks sit directly against each other.
+
+    Without message indexes a chunk starts at the byte its predecessor ends on. In
+    reverse a chunk index is ordered on that end offset, so it lands on exactly the
+    same offset as the messages of the following chunk. Where the log times tie as
+    well, the chunk index and those messages agree on every ordering component.
+    """
+    filepath = Path(tmpdir) / "back_to_back.mcap"
+    # One log time throughout, so ordering rests entirely on file position.
+    messages = [(f"/topic{i % 2}", 777) for i in range(200)]
+    _write_ordering_mcap(filepath, messages, chunk_size=64, index_types=IndexType.CHUNK)
+
+    with open(filepath, "rb") as f:
+        summary = SeekingReader(f).get_summary()
+    assert summary is not None
+    chunk_indexes = summary.chunk_indexes
+    assert len(chunk_indexes) > 1
+    assert all(
+        before.chunk_start_offset + before.chunk_length == after.chunk_start_offset
+        for before, after in zip(chunk_indexes, chunk_indexes[1:])
+    ), "test needs chunks written with no message index between them"
+
+    forward = _read(filepath)
+    assert [sequence for _, _, sequence in forward] == list(range(200))
+    assert _read(filepath, reverse=True) == list(reversed(forward))
+
+
+class CountingBytesIO(BytesIO):
+    """A BytesIO that records how many bytes have been read out of it."""
+
+    def __init__(self, data: bytes):
+        super().__init__(data)
+        self.bytes_read = 0
+
+    def read(self, size: Union[int, None] = -1) -> bytes:
+        data = super().read(size)
+        self.bytes_read += len(data)
+        return data
+
+
+def test_file_order_yields_before_reading_every_chunk(tmpdir: Path):
+    """in file order a chunk's messages come out as soon as that chunk is read.
+
+    Holding them instead means the first message costs a read of the whole file,
+    and every message in the file is resident by the time it arrives.
+    """
+    filepath = Path(tmpdir) / "many_chunks.mcap"
+    _write_ordering_mcap(
+        filepath, [(f"/topic{i % 2}", i * 10) for i in range(2000)], chunk_size=512
+    )
+    raw = filepath.read_bytes()
+
+    with open(filepath, "rb") as f:
+        summary = SeekingReader(f).get_summary()
+    assert summary is not None
+    assert len(summary.chunk_indexes) > 10
+
+    def bytes_read(take_all: bool) -> int:
+        stream = CountingBytesIO(raw)
+        messages = SeekingReader(stream).iter_messages(log_time_order=False)
+        if take_all:
+            assert len(list(messages)) == 2000
+        else:
+            next(messages)
+        return stream.bytes_read
+
+    assert bytes_read(take_all=False) < bytes_read(take_all=True)
+
+
+def test_seeking_reader_orders_overlapping_chunks():
+    buffer = BytesIO()
+    writer = Writer(buffer, compression=CompressionType.NONE)
+    writer.start()
+    channel_id = writer.register_channel("/t", "json", 0)
+    # Three chunks spanning [1, 5], [3, 7] and [2, 5]: each overlaps the one before it,
+    # and the two messages at time 5 sit in different chunks.
+    for chunk, times in enumerate(([1, 5], [3, 7], [5, 2])):
+        for t in times:
+            writer.add_message(channel_id, t, f"{chunk}:{t}".encode(), t)
+        writer.flush()
+    writer.finish()
+
+    def read(**kwargs: Any) -> List[bytes]:
+        buffer.seek(0)
+        return [m.data for _, _, m in SeekingReader(buffer).iter_messages(**kwargs)]
+
+    # Payloads are "chunk:time". Ties on time are broken by chunk position in the file.
+    forward = [b"0:1", b"2:2", b"1:3", b"0:5", b"2:5", b"1:7"]
+    assert read() == forward
+    assert read(reverse=True) == forward[::-1]
+    file_order = [b"0:1", b"0:5", b"1:3", b"1:7", b"2:5", b"2:2"]
+    assert read(log_time_order=False) == file_order

@@ -1,0 +1,17 @@
+.DS_Store
+/target
+.vscode/c_cpp_properties.json
+node_modules
+yarn-error.log
+.swiftpm
+.build
+__docs__
+dist
+site/
+.cache
+.pnp.*
+.yarn/*
+*.tgz
+*.tsbuildinfo
+*.db3-shm
+*.db3-wal

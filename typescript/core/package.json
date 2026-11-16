@@ -1,0 +1,59 @@
+{
+  "name": "@mcap/core",
+  "version": "2.4.0",
+  "description": "MCAP file support in TypeScript",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/foxglove/mcap.git"
+  },
+  "author": {
+    "name": "Foxglove Technologies",
+    "email": "support@foxglove.dev"
+  },
+  "homepage": "https://foxglove.dev/",
+  "type": "module",
+  "main": "dist/cjs/index.js",
+  "exports": {
+    ".": {
+      "types": "./dist/esm/index.d.ts",
+      "import": "./dist/esm/index.js",
+      "require": "./dist/cjs/index.js"
+    }
+  },
+  "typedocOptions": {
+    "entryPoints": [
+      "src/index.ts"
+    ]
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsc -b tsconfig.json tsconfig.cjs.json && echo '{\"type\":\"commonjs\"}' > dist/cjs/package.json",
+    "prepack": "yarn build",
+    "typecheck": "tsc -b",
+    "lint:ci": "tsc -b && eslint .",
+    "lint": "tsc -b && eslint --fix .",
+    "test": "jest"
+  },
+  "devDependencies": {
+    "@foxglove/eslint-plugin": "2.1.2",
+    "@foxglove/tsconfig": "3.2.0",
+    "@types/jest": "29.5.14",
+    "@types/node": "20.19.43",
+    "@typescript-eslint/eslint-plugin": "8.67.0",
+    "@typescript-eslint/parser": "8.67.0",
+    "eslint": "9.39.5",
+    "jest": "29.7.0",
+    "prettier": "3.1.0",
+    "ts-jest": "29.4.12",
+    "typescript": "5.9.3"
+  },
+  "dependencies": {
+    "@foxglove/crc": "^0.0.3",
+    "heap-js": "^2.7.1",
+    "tslib": "^2.8.1"
+  }
+}

@@ -1,0 +1,57 @@
+{
+  "name": "@mcap/support",
+  "version": "1.1.1",
+  "description": "Common decompression for use with MCAP files",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/foxglove/mcap.git"
+  },
+  "author": {
+    "name": "Foxglove Technologies",
+    "email": "support@foxglove.dev"
+  },
+  "homepage": "https://foxglove.dev/",
+  "type": "module",
+  "main": "dist/cjs/index.js",
+  "exports": {
+    ".": {
+      "types": "./dist/esm/index.d.ts",
+      "import": "./dist/esm/index.js",
+      "require": "./dist/cjs/index.js"
+    }
+  },
+  "typedocOptions": {
+    "entryPoints": [
+      "src/index.ts"
+    ]
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsc -b tsconfig.json tsconfig.cjs.json && echo '{\"type\":\"commonjs\"}' > dist/cjs/package.json",
+    "prepack": "yarn build",
+    "lint:ci": "tsc -b && eslint .",
+    "lint": "tsc -b && eslint --fix ."
+  },
+  "devDependencies": {
+    "@foxglove/eslint-plugin": "2.1.2",
+    "@foxglove/tsconfig": "3.2.0",
+    "@mcap/core": "workspace:*",
+    "@types/node": "20.19.43",
+    "@typescript-eslint/eslint-plugin": "8.67.0",
+    "@typescript-eslint/parser": "8.67.0",
+    "eslint": "9.39.5",
+    "prettier": "3.1.0",
+    "typescript": "5.9.3"
+  },
+  "dependencies": {
+    "@foxglove/wasm-bz2": "^0.3.0",
+    "@foxglove/wasm-lz4": "^1.0.2",
+    "@foxglove/wasm-zstd": "^1.0.1",
+    "protobufjs": "^7.6.5",
+    "tslib": "^2.8.1"
+  }
+}

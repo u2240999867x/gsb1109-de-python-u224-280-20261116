@@ -1,0 +1,1037 @@
+use std::ffi::OsString;
+use std::io::Read as _;
+use std::path::{Path, PathBuf};
+use std::process::{Command, ExitStatus, Stdio};
+use std::time::{Duration, Instant};
+
+use criterion::measurement::WallTime;
+use criterion::{
+    criterion_group, criterion_main, BenchmarkGroup, BenchmarkId, Criterion, Throughput,
+};
+
+const DEFAULT_TOTAL_MB: u64 = 250;
+const DEFAULT_MERGE_INPUTS: usize = 4;
+const DEFAULT_SAMPLE_SIZE: usize = 10;
+const DEFAULT_WARMUP_MS: u64 = 250;
+const DEFAULT_MEASUREMENT_SECS: u64 = 2;
+const PAYLOAD_SIZES: &[usize] = &[100, 1_000, 10_000, 100_000, 1_000_000];
+// Real schemas (e.g. concatenated ROS 2 message definitions) are often tens of KB. A trivial
+// schema hides any per-message cost that scales with schema size.
+const SCHEMA_BYTES: usize = 64 * 1024;
+
+#[derive(Debug, Clone)]
+struct BenchConfig {
+    root: PathBuf,
+    mcap_bin: PathBuf,
+    total_mb: u64,
+    merge_inputs: usize,
+    chunk_bytes: u64,
+}
+
+#[derive(Debug, Clone)]
+struct InputCase {
+    path: PathBuf,
+    payload_size: usize,
+    message_count: usize,
+    selected_count: usize,
+}
+
+#[derive(Debug, Clone)]
+struct MergeCase {
+    paths: Vec<PathBuf>,
+    payload_size: usize,
+    expected_count: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum InputOrder {
+    Ordered,
+    Reversed,
+    Interleaved {
+        input_idx: usize,
+        input_count: usize,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InputMode {
+    Indexed,
+    Linear,
+}
+
+impl InputMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Indexed => "indexed",
+            Self::Linear => "linear",
+        }
+    }
+}
+
+fn criterion_config() -> Criterion {
+    Criterion::default()
+        .sample_size(env_usize("MCAP_CLI_BENCH_SAMPLE_SIZE", DEFAULT_SAMPLE_SIZE).max(10))
+        .warm_up_time(Duration::from_millis(env_u64(
+            "MCAP_CLI_BENCH_WARMUP_MS",
+            DEFAULT_WARMUP_MS,
+        )))
+        .measurement_time(Duration::from_secs(env_u64(
+            "MCAP_CLI_BENCH_MEASUREMENT_SECS",
+            DEFAULT_MEASUREMENT_SECS,
+        )))
+}
+
+fn bench_commands(c: &mut Criterion) {
+    let config = BenchConfig::from_env();
+    let suites = SuiteSelection::from_args();
+    std::fs::create_dir_all(config.inputs_dir()).expect("create benchmark input dir");
+    std::fs::create_dir_all(config.outputs_dir()).expect("create benchmark output dir");
+    assert!(
+        config.mcap_bin.exists(),
+        "mcap binary '{}' does not exist; set MCAP_CLI_BENCH_BIN to a built mcap binary",
+        config.mcap_bin.display()
+    );
+
+    for mode in suites.modes() {
+        // On an indexed input info reads only the summary, a few kilobytes at any file size, so
+        // the run would mostly time process startup. Bench it only where it scans the file.
+        let info = suites.info && matches!(mode, InputMode::Linear);
+        // Without a summary `du --approximate` falls back to the exact scan and would duplicate
+        // `du`, so it has no linear benchmarks.
+        let du_approximate = suites.du_approximate && matches!(mode, InputMode::Indexed);
+
+        if suites.merge {
+            let merge_cases = PAYLOAD_SIZES
+                .iter()
+                .copied()
+                .map(|payload_size| config.merge_case(mode, payload_size))
+                .collect::<Vec<_>>();
+            bench_merge(c, &config, mode, &merge_cases);
+        }
+
+        if suites.filter || suites.decompress || suites.cat || info || suites.du || du_approximate {
+            let input_cases = PAYLOAD_SIZES
+                .iter()
+                .copied()
+                .map(|payload_size| {
+                    config.input_case(mode, payload_size, InputOrder::Ordered, Some("zstd"))
+                })
+                .collect::<Vec<_>>();
+            if suites.filter {
+                bench_filter(c, &config, mode, &input_cases);
+            }
+            if suites.decompress {
+                bench_decompress(c, &config, mode, &input_cases);
+            }
+            if suites.cat {
+                bench_cat(c, &config, mode, &input_cases);
+            }
+            if info {
+                bench_info(c, &config, mode, &input_cases);
+            }
+            if suites.du {
+                bench_du(c, &config, mode, &input_cases, false);
+            }
+            if du_approximate {
+                bench_du(c, &config, mode, &input_cases, true);
+            }
+        }
+
+        if suites.sort {
+            let sort_cases = PAYLOAD_SIZES
+                .iter()
+                .copied()
+                .map(|payload_size| {
+                    config.input_case(mode, payload_size, InputOrder::Reversed, Some("zstd"))
+                })
+                .collect::<Vec<_>>();
+            bench_sort(c, &config, mode, &sort_cases);
+        }
+
+        if suites.compress {
+            let uncompressed_cases = PAYLOAD_SIZES
+                .iter()
+                .copied()
+                .map(|payload_size| {
+                    config.input_case(mode, payload_size, InputOrder::Ordered, None)
+                })
+                .collect::<Vec<_>>();
+            bench_compress(c, &config, mode, &uncompressed_cases);
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SuiteSelection {
+    merge: bool,
+    filter: bool,
+    sort: bool,
+    compress: bool,
+    decompress: bool,
+    cat: bool,
+    info: bool,
+    du: bool,
+    du_approximate: bool,
+    indexed: bool,
+    linear: bool,
+}
+
+impl SuiteSelection {
+    fn from_args() -> Self {
+        // Mirror the documented Criterion filters (`-- merge`, `-- indexed`, `cat|info`, `^cli/du`)
+        // so filtered runs only generate inputs for the selected suites. Positional filters only.
+        let filters = std::env::args()
+            .skip(1)
+            .filter(|arg| !arg.starts_with('-'))
+            .map(|arg| {
+                arg.chars()
+                    .filter(|c| !matches!(c, '(' | ')' | '^' | '$'))
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+        let selected = |name: &str| {
+            filters.iter().any(|filter| {
+                filter
+                    .split(['/', ':', '|'])
+                    .any(|component| component == name)
+            })
+        };
+        let any_suite = [
+            "merge",
+            "filter",
+            "sort",
+            "compress",
+            "decompress",
+            "cat",
+            "info",
+            "du",
+            "du-approximate",
+        ]
+        .iter()
+        .any(|name| selected(name));
+        let any_mode = ["indexed", "linear"].iter().any(|name| selected(name));
+
+        Self {
+            merge: !any_suite || selected("merge"),
+            filter: !any_suite || selected("filter"),
+            sort: !any_suite || selected("sort"),
+            compress: !any_suite || selected("compress"),
+            decompress: !any_suite || selected("decompress"),
+            cat: !any_suite || selected("cat"),
+            info: !any_suite || selected("info"),
+            du: !any_suite || selected("du"),
+            // Criterion's filter is a regex, so `du` matches the `du-approximate` ids too.
+            du_approximate: !any_suite || selected("du") || selected("du-approximate"),
+            indexed: !any_mode || selected("indexed"),
+            linear: !any_mode || selected("linear"),
+        }
+    }
+
+    fn modes(self) -> impl Iterator<Item = InputMode> {
+        [
+            (self.indexed, InputMode::Indexed),
+            (self.linear, InputMode::Linear),
+        ]
+        .into_iter()
+        .filter_map(|(enabled, mode)| enabled.then_some(mode))
+    }
+}
+
+fn bench_merge(c: &mut Criterion, config: &BenchConfig, mode: InputMode, cases: &[MergeCase]) {
+    let mut group = c.benchmark_group(format!("cli/merge/{}", mode.label()));
+    for case in cases {
+        group.throughput(Throughput::Bytes(config.total_bytes()));
+        group.bench_with_input(
+            BenchmarkId::from_parameter(size_label(case.payload_size)),
+            case,
+            |bench, case| {
+                bench.iter_custom(|iters| {
+                    run_measured(iters, |iteration| {
+                        let output =
+                            config.output_path("merge", mode, case.payload_size, iteration);
+                        let mut args = vec![OsString::from("merge")];
+                        args.extend(case.paths.iter().map(|path| path.as_os_str().to_owned()));
+                        args.extend([
+                            OsString::from("--compression"),
+                            OsString::from("zstd"),
+                            OsString::from("--chunk-size"),
+                            OsString::from(config.chunk_bytes.to_string()),
+                            OsString::from("--output-file"),
+                            output.as_os_str().to_owned(),
+                        ]);
+                        let duration = run_mcap(&config.mcap_bin, args);
+                        if iteration == 0 {
+                            validate_output(&output, case.expected_count, true);
+                        }
+                        remove_file(&output);
+                        duration
+                    })
+                });
+            },
+        );
+    }
+    group.finish();
+}
+
+fn bench_filter(c: &mut Criterion, config: &BenchConfig, mode: InputMode, cases: &[InputCase]) {
+    let mut group = c.benchmark_group(format!("cli/filter/{}", mode.label()));
+    for case in cases {
+        group.throughput(Throughput::Bytes(config.total_bytes()));
+        group.bench_with_input(
+            BenchmarkId::from_parameter(size_label(case.payload_size)),
+            case,
+            |bench, case| {
+                bench.iter_custom(|iters| {
+                    run_measured(iters, |iteration| {
+                        let output =
+                            config.output_path("filter", mode, case.payload_size, iteration);
+                        let args = vec![
+                            OsString::from("filter"),
+                            case.path.as_os_str().to_owned(),
+                            OsString::from("--include-topic-regex"),
+                            OsString::from("/bench/selected"),
+                            OsString::from("--output"),
+                            output.as_os_str().to_owned(),
+                            OsString::from("--compression"),
+                            OsString::from("zstd"),
+                            OsString::from("--chunk-size"),
+                            OsString::from(config.chunk_bytes.to_string()),
+                        ];
+                        let duration = run_mcap(&config.mcap_bin, args);
+                        if iteration == 0 {
+                            validate_output(&output, case.selected_count, true);
+                        }
+                        remove_file(&output);
+                        duration
+                    })
+                });
+            },
+        );
+    }
+    group.finish();
+}
+
+fn bench_sort(c: &mut Criterion, config: &BenchConfig, mode: InputMode, cases: &[InputCase]) {
+    let mut group = c.benchmark_group(format!("cli/sort/{}", mode.label()));
+    for case in cases {
+        group.throughput(Throughput::Bytes(config.total_bytes()));
+        group.bench_with_input(
+            BenchmarkId::from_parameter(size_label(case.payload_size)),
+            case,
+            |bench, case| {
+                bench.iter_custom(|iters| {
+                    run_measured(iters, |iteration| {
+                        let output = config.output_path("sort", mode, case.payload_size, iteration);
+                        let args = vec![
+                            OsString::from("sort"),
+                            case.path.as_os_str().to_owned(),
+                            OsString::from("--compression"),
+                            OsString::from("zstd"),
+                            OsString::from("--chunk-size"),
+                            OsString::from(config.chunk_bytes.to_string()),
+                            OsString::from("--output"),
+                            output.as_os_str().to_owned(),
+                        ];
+                        let duration = run_mcap(&config.mcap_bin, args);
+                        if iteration == 0 {
+                            validate_output(&output, case.message_count, true);
+                        }
+                        remove_file(&output);
+                        duration
+                    })
+                });
+            },
+        );
+    }
+    group.finish();
+}
+
+fn bench_compress(c: &mut Criterion, config: &BenchConfig, mode: InputMode, cases: &[InputCase]) {
+    let mut group = c.benchmark_group(format!("cli/compress/{}", mode.label()));
+    for case in cases {
+        group.throughput(Throughput::Bytes(config.total_bytes()));
+        group.bench_with_input(
+            BenchmarkId::from_parameter(size_label(case.payload_size)),
+            case,
+            |bench, case| {
+                bench.iter_custom(|iters| {
+                    run_measured(iters, |iteration| {
+                        let output =
+                            config.output_path("compress", mode, case.payload_size, iteration);
+                        let args = vec![
+                            OsString::from("compress"),
+                            case.path.as_os_str().to_owned(),
+                            OsString::from("--output"),
+                            output.as_os_str().to_owned(),
+                            OsString::from("--compression"),
+                            OsString::from("zstd"),
+                            OsString::from("--chunk-size"),
+                            OsString::from(config.chunk_bytes.to_string()),
+                        ];
+                        let duration = run_mcap(&config.mcap_bin, args);
+                        if iteration == 0 {
+                            validate_output(&output, case.message_count, true);
+                        }
+                        remove_file(&output);
+                        duration
+                    })
+                });
+            },
+        );
+    }
+    group.finish();
+}
+
+fn bench_decompress(c: &mut Criterion, config: &BenchConfig, mode: InputMode, cases: &[InputCase]) {
+    let mut group = c.benchmark_group(format!("cli/decompress/{}", mode.label()));
+    for case in cases {
+        group.throughput(Throughput::Bytes(config.total_bytes()));
+        group.bench_with_input(
+            BenchmarkId::from_parameter(size_label(case.payload_size)),
+            case,
+            |bench, case| {
+                bench.iter_custom(|iters| {
+                    run_measured(iters, |iteration| {
+                        let output =
+                            config.output_path("decompress", mode, case.payload_size, iteration);
+                        let args = vec![
+                            OsString::from("decompress"),
+                            case.path.as_os_str().to_owned(),
+                            OsString::from("--output"),
+                            output.as_os_str().to_owned(),
+                            OsString::from("--chunk-size"),
+                            OsString::from(config.chunk_bytes.to_string()),
+                        ];
+                        let duration = run_mcap(&config.mcap_bin, args);
+                        if iteration == 0 {
+                            validate_output(&output, case.message_count, true);
+                        }
+                        remove_file(&output);
+                        duration
+                    })
+                });
+            },
+        );
+    }
+    group.finish();
+}
+
+fn bench_cat(c: &mut Criterion, config: &BenchConfig, mode: InputMode, cases: &[InputCase]) {
+    let mut group = c.benchmark_group(format!("cli/cat/{}", mode.label()));
+    for case in cases {
+        let args = || {
+            vec![
+                OsString::from("cat"),
+                case.path.as_os_str().to_owned(),
+                OsString::from("--time-format"),
+                OsString::from("nanoseconds"),
+            ]
+        };
+        group.throughput(Throughput::Bytes(config.total_bytes()));
+        bench_read_only(
+            &mut group,
+            BenchmarkId::from_parameter(size_label(case.payload_size)),
+            || {
+                // cat prints one line per message, millions for the 100B case, so count them
+                // from the pipe instead of buffering stdout.
+                let lines = count_mcap_stdout_lines(&config.mcap_bin, args());
+                validate_cat_line_count(lines, case.message_count, &case.path);
+            },
+            || run_mcap(&config.mcap_bin, args()),
+        );
+    }
+    group.finish();
+}
+
+fn bench_info(c: &mut Criterion, config: &BenchConfig, mode: InputMode, cases: &[InputCase]) {
+    let mut group = c.benchmark_group(format!("cli/info/{}", mode.label()));
+    for case in cases {
+        let args = || vec![OsString::from("info"), case.path.as_os_str().to_owned()];
+        group.throughput(Throughput::Bytes(config.total_bytes()));
+        bench_read_only(
+            &mut group,
+            BenchmarkId::from_parameter(size_label(case.payload_size)),
+            || {
+                let stdout = run_mcap_stdout(&config.mcap_bin, args());
+                validate_info_output(&stdout, case.message_count, &case.path);
+            },
+            || run_mcap(&config.mcap_bin, args()),
+        );
+    }
+    group.finish();
+}
+
+/// Benchmarks `du`, or `du --approximate` as the `du-approximate` suite so every id keeps the
+/// `cli/<command>/<mode>/<payload>` shape.
+fn bench_du(
+    c: &mut Criterion,
+    config: &BenchConfig,
+    mode: InputMode,
+    cases: &[InputCase],
+    approximate: bool,
+) {
+    let suite = if approximate { "du-approximate" } else { "du" };
+    let mut group = c.benchmark_group(format!("cli/{suite}/{}", mode.label()));
+    for case in cases {
+        let args = || {
+            let mut args = vec![OsString::from("du")];
+            if approximate {
+                args.push(OsString::from("--approximate"));
+            }
+            args.push(case.path.as_os_str().to_owned());
+            args
+        };
+        // `--approximate` reads the summary and message indexes, not message data, so its work
+        // scales with the message count rather than the file size.
+        group.throughput(if approximate {
+            Throughput::Elements(case.message_count as u64)
+        } else {
+            Throughput::Bytes(config.total_bytes())
+        });
+        bench_read_only(
+            &mut group,
+            BenchmarkId::from_parameter(size_label(case.payload_size)),
+            || {
+                let stdout = run_mcap_stdout(&config.mcap_bin, args());
+                validate_du_output(&stdout, case, approximate);
+            },
+            || run_mcap(&config.mcap_bin, args()),
+        );
+    }
+    group.finish();
+}
+
+/// Benchmarks a command whose result is printed rather than written to a file. `validate` runs
+/// once, untimed, the first time Criterion calls the benchmark. Criterion never calls it for an
+/// id its filter excludes, so filtered-out cases skip validation too.
+fn bench_read_only(
+    group: &mut BenchmarkGroup<'_, WallTime>,
+    id: BenchmarkId,
+    validate: impl FnOnce(),
+    mut run_once: impl FnMut() -> Duration,
+) {
+    let mut validate = Some(validate);
+    group.bench_function(id, |bench| {
+        if let Some(validate) = validate.take() {
+            validate();
+        }
+        bench.iter_custom(|iters| run_measured(iters, |_| run_once()));
+    });
+}
+
+impl BenchConfig {
+    fn from_env() -> Self {
+        Self {
+            root: env_path("MCAP_CLI_BENCH_DIR").unwrap_or_else(default_bench_dir),
+            mcap_bin: env_path("MCAP_CLI_BENCH_BIN").unwrap_or_else(default_mcap_bin),
+            total_mb: env_u64("MCAP_CLI_BENCH_TOTAL_MB", DEFAULT_TOTAL_MB),
+            merge_inputs: env_usize("MCAP_CLI_BENCH_INPUTS", DEFAULT_MERGE_INPUTS).max(1),
+            chunk_bytes: env_u64(
+                "MCAP_CLI_BENCH_CHUNK_BYTES",
+                mcap::WriteOptions::DEFAULT_CHUNK_SIZE,
+            ),
+        }
+    }
+
+    fn total_bytes(&self) -> u64 {
+        self.total_mb * 1_000_000
+    }
+
+    fn inputs_dir(&self) -> PathBuf {
+        self.root.join("inputs")
+    }
+
+    fn outputs_dir(&self) -> PathBuf {
+        self.root.join("outputs")
+    }
+
+    fn input_case(
+        &self,
+        mode: InputMode,
+        payload_size: usize,
+        order: InputOrder,
+        compression: Option<&'static str>,
+    ) -> InputCase {
+        let message_count = message_count(self.total_bytes(), payload_size, 1);
+        let selected_count = message_count.div_ceil(2);
+        let path = self.input_path(mode, payload_size, message_count, order, compression, 0);
+        if !path.exists() {
+            write_input(
+                &path,
+                mode,
+                payload_size,
+                message_count,
+                order,
+                compression,
+                self.chunk_bytes,
+            );
+        }
+        InputCase {
+            path,
+            payload_size,
+            message_count,
+            selected_count,
+        }
+    }
+
+    fn merge_case(&self, mode: InputMode, payload_size: usize) -> MergeCase {
+        let messages_per_input = message_count(self.total_bytes(), payload_size, self.merge_inputs);
+        let paths = (0..self.merge_inputs)
+            .map(|input_idx| {
+                let order = InputOrder::Interleaved {
+                    input_idx,
+                    input_count: self.merge_inputs,
+                };
+                let path = self.input_path(
+                    mode,
+                    payload_size,
+                    messages_per_input,
+                    order,
+                    Some("zstd"),
+                    input_idx,
+                );
+                if !path.exists() {
+                    write_input(
+                        &path,
+                        mode,
+                        payload_size,
+                        messages_per_input,
+                        order,
+                        Some("zstd"),
+                        self.chunk_bytes,
+                    );
+                }
+                path
+            })
+            .collect::<Vec<_>>();
+        MergeCase {
+            paths,
+            payload_size,
+            expected_count: messages_per_input * self.merge_inputs,
+        }
+    }
+
+    fn input_path(
+        &self,
+        mode: InputMode,
+        payload_size: usize,
+        message_count: usize,
+        order: InputOrder,
+        compression: Option<&str>,
+        input_idx: usize,
+    ) -> PathBuf {
+        let order_label = match order {
+            InputOrder::Ordered => "ordered".to_string(),
+            InputOrder::Reversed => "reversed".to_string(),
+            InputOrder::Interleaved { input_count, .. } => format!("interleaved{input_count}"),
+        };
+        let compression_label = compression.unwrap_or("none");
+        self.inputs_dir().join(format!(
+            "payload{}_messages{}_schema{}_chunk{}_{}_{}_{}_part{}.mcap",
+            payload_size,
+            message_count,
+            SCHEMA_BYTES,
+            self.chunk_bytes,
+            mode.label(),
+            order_label,
+            compression_label,
+            input_idx
+        ))
+    }
+
+    fn output_path(
+        &self,
+        command: &str,
+        mode: InputMode,
+        payload_size: usize,
+        iteration: u64,
+    ) -> PathBuf {
+        self.outputs_dir().join(format!(
+            "{}_{}_payload{}_pid{}_iter{}.mcap",
+            command,
+            mode.label(),
+            payload_size,
+            std::process::id(),
+            iteration
+        ))
+    }
+}
+
+fn write_input(
+    path: &Path,
+    mode: InputMode,
+    payload_size: usize,
+    message_count: usize,
+    order: InputOrder,
+    compression: Option<&str>,
+    chunk_bytes: u64,
+) {
+    let compression = match compression {
+        Some("zstd") => Some(mcap::Compression::Zstd),
+        Some("lz4") => Some(mcap::Compression::Lz4),
+        Some(value) => panic!("unsupported compression {value}"),
+        None => None,
+    };
+
+    let file = std::fs::File::create(path).expect("create generated MCAP");
+    let mut write_options = mcap::WriteOptions::new()
+        .profile("bench")
+        .library("mcap-cli-bench")
+        .compression(compression)
+        .chunk_size(Some(chunk_bytes));
+    if mode == InputMode::Linear {
+        write_options = write_options
+            .emit_summary_records(false)
+            .emit_summary_offsets(false);
+    }
+    let mut writer = write_options
+        .create(std::io::BufWriter::new(file))
+        .expect("create MCAP writer");
+
+    let schema_id = writer
+        .add_schema("Bench", "raw", &vec![b'#'; SCHEMA_BYTES])
+        .expect("add generated schema");
+    let selected_channel_id = writer
+        .add_channel(schema_id, "/bench/selected", "raw", &Default::default())
+        .expect("add generated channel");
+    let other_channel_id = writer
+        .add_channel(schema_id, "/bench/other", "raw", &Default::default())
+        .expect("add generated channel");
+
+    let mut payload = vec![0u8; payload_size];
+    for input_order in 0..message_count {
+        fill_payload(&mut payload, input_order as u64);
+        let log_time = match order {
+            InputOrder::Ordered => input_order as u64,
+            InputOrder::Reversed => (message_count - input_order) as u64,
+            InputOrder::Interleaved {
+                input_idx,
+                input_count,
+            } => (input_order * input_count + input_idx) as u64,
+        };
+        let channel_id = if input_order % 2 == 0 {
+            selected_channel_id
+        } else {
+            other_channel_id
+        };
+        writer
+            .write_to_known_channel(
+                &mcap::records::MessageHeader {
+                    channel_id,
+                    sequence: input_order as u32,
+                    log_time,
+                    publish_time: log_time,
+                },
+                &payload,
+            )
+            .expect("write generated message");
+    }
+    writer.finish().expect("finish generated MCAP");
+}
+
+fn run_measured<F>(iters: u64, mut run_once: F) -> Duration
+where
+    F: FnMut(u64) -> Duration,
+{
+    let mut total = Duration::ZERO;
+    for iteration in 0..iters {
+        total += run_once(iteration);
+    }
+    total
+}
+
+/// Runs the CLI with stdout discarded and returns its wall-clock duration. Every timed run goes
+/// through here, so draining a pipe is never part of the measured region; the read-only suites
+/// validate their output in an untimed run first.
+fn run_mcap(bin: &Path, args: Vec<OsString>) -> Duration {
+    let start = Instant::now();
+    let output = Command::new(bin)
+        .args(args)
+        .stdout(Stdio::null())
+        .output()
+        .expect("run mcap command");
+    let duration = start.elapsed();
+    ensure_success(output.status, &output.stderr);
+    duration
+}
+
+/// Runs the CLI and returns its stdout, for validating commands that print a few lines.
+fn run_mcap_stdout(bin: &Path, args: Vec<OsString>) -> Vec<u8> {
+    let output = Command::new(bin)
+        .args(args)
+        .output()
+        .expect("run mcap command");
+    ensure_success(output.status, &output.stderr);
+    output.stdout
+}
+
+/// Runs the CLI and counts the non-empty lines it prints, reading stdout through a fixed buffer
+/// so the bench process stays small however much the command prints. stderr is inherited.
+fn count_mcap_stdout_lines(bin: &Path, args: Vec<OsString>) -> usize {
+    let mut child = Command::new(bin)
+        .args(args)
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn mcap command");
+    let mut stdout = child.stdout.take().expect("piped stdout");
+    let mut buffer = [0u8; 64 * 1024];
+    let mut lines = 0;
+    let mut line_has_bytes = false;
+    loop {
+        let read = stdout.read(&mut buffer).expect("read mcap stdout");
+        if read == 0 {
+            break;
+        }
+        for &byte in &buffer[..read] {
+            if byte == b'\n' {
+                lines += usize::from(line_has_bytes);
+                line_has_bytes = false;
+            } else {
+                line_has_bytes = true;
+            }
+        }
+    }
+    lines += usize::from(line_has_bytes);
+    let status = child.wait().expect("wait for mcap command");
+    ensure_success(status, b"(inherited; see above)");
+    lines
+}
+
+fn ensure_success(status: ExitStatus, stderr: &[u8]) {
+    if !status.success() {
+        panic!(
+            "mcap command failed with status {:?}\nstderr:\n{}",
+            status.code(),
+            String::from_utf8_lossy(stderr)
+        );
+    }
+}
+
+fn validate_cat_line_count(lines: usize, expected_count: usize, input: &Path) {
+    assert_eq!(
+        lines,
+        expected_count,
+        "unexpected cat line count for {}",
+        input.display()
+    );
+}
+
+fn validate_info_output(stdout: &[u8], expected_count: usize, input: &Path) {
+    let stdout = String::from_utf8_lossy(stdout);
+    let reported = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("messages:"))
+        .and_then(|value| value.trim().parse::<usize>().ok());
+    assert_eq!(
+        reported,
+        Some(expected_count),
+        "unexpected info message count for {}:\n{stdout}",
+        input.display()
+    );
+}
+
+fn validate_du_output(stdout: &[u8], case: &InputCase, approximate: bool) {
+    let stdout = String::from_utf8_lossy(stdout);
+    // Topics alternate starting with `/bench/selected`; `/bench/other` needs 2+ messages.
+    let other_count = case.message_count - case.selected_count;
+    let expected = [
+        ("/bench/selected", case.selected_count),
+        ("/bench/other", other_count),
+    ];
+    for (topic, count) in expected {
+        if count == 0 {
+            continue;
+        }
+        let row = stdout
+            .lines()
+            .find(|line| line.starts_with(topic))
+            .unwrap_or_else(|| {
+                panic!(
+                    "du output is missing topic {topic} for {}:\n{stdout}",
+                    case.path.display()
+                )
+            });
+        let reported = row.split('\t').nth(1).map(str::trim).unwrap_or_default();
+        let want_bytes = (count * case.payload_size) as u64;
+        if approximate {
+            // `--approximate` attributes interleaved non-message records to the preceding message,
+            // so accept a small over-count but never an under-count.
+            let reported_bytes = parse_human_bytes(reported).unwrap_or_else(|| {
+                panic!(
+                    "unparsable du size {reported:?} for {topic} in {}",
+                    case.path.display()
+                )
+            });
+            // The CLI prints two decimals, so compare against the bounds as it would print them:
+            // a correct count just below a rounding step must not fail the lower bound.
+            let rounded = |bytes: u64| {
+                parse_human_bytes(&human_bytes(bytes)).expect("round-trip human_bytes")
+            };
+            let min_bytes = rounded(want_bytes);
+            let max_bytes = rounded(want_bytes + want_bytes / 100 + 1_000);
+            assert!(
+                reported_bytes >= min_bytes && reported_bytes <= max_bytes,
+                "approximate du size {reported} for {topic} is outside [{min_bytes}, {max_bytes}] bytes in {}:\n{stdout}",
+                case.path.display()
+            );
+        } else {
+            assert_eq!(
+                reported,
+                human_bytes(want_bytes),
+                "unexpected du size for {topic} in {}:\n{stdout}",
+                case.path.display()
+            );
+        }
+    }
+}
+
+const BYTE_PREFIXES: [&str; 6] = ["B", "kB", "MB", "GB", "TB", "PB"];
+
+/// Mirrors the CLI's `render::human_bytes` (SI prefixes, two decimals); the bench cannot import
+/// the binary crate.
+fn human_bytes(num_bytes: u64) -> String {
+    for (index, prefix) in BYTE_PREFIXES.iter().enumerate() {
+        let displayed = num_bytes as f64 / 1000f64.powi(index as i32);
+        let rounded = (displayed * 100.0).round() / 100.0;
+        if rounded < 1000.0 {
+            return format!("{rounded:.2} {prefix}");
+        }
+    }
+    let last = BYTE_PREFIXES.len() - 1;
+    let displayed = num_bytes as f64 / 1000f64.powi(last as i32);
+    format!("{displayed:.2} {}", BYTE_PREFIXES[last])
+}
+
+/// Inverse of [`human_bytes`], to within the two decimals the CLI prints.
+fn parse_human_bytes(text: &str) -> Option<u64> {
+    let (value, prefix) = text.split_once(' ')?;
+    let index = BYTE_PREFIXES.iter().position(|p| *p == prefix)?;
+    let value = value.parse::<f64>().ok()?;
+    Some((value * 1000f64.powi(index as i32)).round() as u64)
+}
+
+fn validate_output(path: &Path, expected_count: usize, require_ordered: bool) {
+    let bytes = std::fs::read(path).expect("read benchmark output");
+    assert!(
+        bytes.starts_with(mcap::MAGIC) && bytes.ends_with(mcap::MAGIC),
+        "output is not an MCAP file: {}",
+        path.display()
+    );
+    assert!(
+        mcap::Summary::read(&bytes)
+            .expect("read output summary")
+            .is_some(),
+        "output should include a summary: {}",
+        path.display()
+    );
+
+    let mut count = 0usize;
+    let mut previous_log_time = None;
+    for message in mcap::MessageStream::new(&bytes).expect("open output message stream") {
+        let message = message.expect("read output message");
+        if require_ordered {
+            if let Some(previous) = previous_log_time {
+                assert!(
+                    previous <= message.log_time,
+                    "messages are not log-time ordered in {}",
+                    path.display()
+                );
+            }
+            previous_log_time = Some(message.log_time);
+        }
+        count += 1;
+    }
+    assert_eq!(
+        count,
+        expected_count,
+        "unexpected output message count for {}",
+        path.display()
+    );
+}
+
+fn remove_file(path: &Path) {
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => panic!("failed to remove {}: {err}", path.display()),
+    }
+}
+
+fn message_count(total_bytes: u64, payload_size: usize, inputs: usize) -> usize {
+    ((total_bytes / payload_size as u64) / inputs as u64).max(1) as usize
+}
+
+fn fill_payload(payload: &mut [u8], message_idx: u64) {
+    let mut state = splitmix64(message_idx ^ payload.len() as u64);
+    for chunk in payload.chunks_mut(8) {
+        state = splitmix64(state);
+        let bytes = state.to_le_bytes();
+        chunk.copy_from_slice(&bytes[..chunk.len()]);
+    }
+}
+
+fn splitmix64(mut x: u64) -> u64 {
+    x = x.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    x ^ (x >> 31)
+}
+
+fn default_bench_dir() -> PathBuf {
+    workspace_root().join("target/mcap-cli-bench")
+}
+
+fn default_mcap_bin() -> PathBuf {
+    if let Some(path) = option_env!("CARGO_BIN_EXE_mcap") {
+        return PathBuf::from(path);
+    }
+    if let Ok(target_dir) = std::env::var("CARGO_TARGET_DIR") {
+        return PathBuf::from(target_dir).join("release/mcap");
+    }
+    workspace_root().join("target/release/mcap")
+}
+
+fn workspace_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("rust/cli has parent rust")
+        .parent()
+        .expect("rust has parent workspace")
+        .to_path_buf()
+}
+
+fn env_path(name: &str) -> Option<PathBuf> {
+    std::env::var_os(name).map(PathBuf::from)
+}
+
+fn env_u64(name: &str, default: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(default)
+}
+
+fn env_usize(name: &str, default: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(default)
+}
+
+fn size_label(bytes: usize) -> String {
+    match bytes {
+        100 => "100B".to_string(),
+        1_000 => "1KB".to_string(),
+        10_000 => "10KB".to_string(),
+        100_000 => "100KB".to_string(),
+        1_000_000 => "1MB".to_string(),
+        _ => format!("{bytes}B"),
+    }
+}
+
+criterion_group! {
+    name = benches;
+    config = criterion_config();
+    targets = bench_commands
+}
+criterion_main!(benches);

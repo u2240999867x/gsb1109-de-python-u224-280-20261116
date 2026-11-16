@@ -1,0 +1,1493 @@
+use std::borrow::Cow;
+use std::collections::{BTreeMap, BTreeSet};
+
+use anyhow::Result;
+
+use crate::byte_source::{self, ByteSource};
+use crate::cli::DoctorCommand;
+use crate::context::CommandContext;
+use crate::source;
+
+pub fn run(ctx: &CommandContext, args: DoctorCommand) -> Result<()> {
+    // Doctor always walks the full file, so remote inputs need an explicit opt-in even when
+    // range requests are available.
+    let source_options = source::SourceOptions::new(ctx.allow_remote_scan());
+    let mut input = byte_source::open_byte_source_for_scan(&args.file, source_options)?;
+
+    let diagnosis = diagnose_byte_source(input.as_mut(), args.strict_message_order);
+    for warning in &diagnosis.warnings {
+        eprintln!("Warning: {warning}");
+    }
+    for error in &diagnosis.errors {
+        eprintln!("Error: {error}");
+    }
+
+    if !diagnosis.errors.is_empty() {
+        anyhow::bail!("encountered {} errors", diagnosis.errors.len());
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct Diagnosis {
+    errors: Vec<String>,
+    warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedSchema {
+    header: mcap::records::SchemaHeader,
+    data: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+struct ScannedChunk {
+    header: mcap::records::ChunkHeader,
+    /// Full record length including the opcode and length prefix.
+    record_length: u64,
+}
+
+#[derive(Debug)]
+struct Doctor {
+    strict_message_order: bool,
+    diagnosis: Diagnosis,
+    schemas_in_data_section: BTreeMap<u16, ParsedSchema>,
+    channels_in_data_section: BTreeMap<u16, mcap::records::Channel>,
+    channels_referenced_in_chunks_by_offset: BTreeMap<u64, BTreeSet<u16>>,
+    channel_ids_in_summary_section: BTreeSet<u16>,
+    schema_ids_in_summary_section: BTreeSet<u16>,
+    chunk_indexes: BTreeMap<u64, mcap::records::ChunkIndex>,
+    /// Chunk headers the scan saw, by record offset, so chunk index validation needs no second
+    /// read of the data section.
+    scanned_chunks: BTreeMap<u64, ScannedChunk>,
+    in_summary_section: bool,
+    /// Set when the scan stops before the end of the file, so checks that need the whole file
+    /// (the DataEnd and Footer presence checks) do not report what the scan never reached.
+    scan_stopped_early: bool,
+    saw_data_end: bool,
+    saw_footer: bool,
+    saw_top_level_message: bool,
+    message_index_warning_emitted: bool,
+    last_top_level_message_time: Option<u64>,
+    global_max_log_time: Option<u64>,
+    min_log_time: Option<u64>,
+    max_log_time: Option<u64>,
+    message_count: u64,
+    statistics: Option<mcap::records::Statistics>,
+    duplicate_schema_warning_ids: BTreeSet<u16>,
+    duplicate_channel_warning_ids: BTreeSet<u16>,
+}
+
+/// Every failure, including a read that cannot complete, becomes a finding in the diagnosis.
+fn diagnose_byte_source(source: &mut dyn ByteSource, strict_message_order: bool) -> Diagnosis {
+    let mut doctor = Doctor::new(strict_message_order);
+    doctor.scan_top_level(source);
+    doctor.finalize_record_presence();
+    doctor.validate_chunk_indexes(source);
+    doctor.validate_statistics();
+    doctor.diagnosis
+}
+
+#[cfg(test)]
+fn diagnose_mcap(mcap: &[u8], strict_message_order: bool) -> Diagnosis {
+    let mut source = byte_source::MemorySource::new(mcap.to_vec());
+    diagnose_byte_source(&mut source, strict_message_order)
+}
+
+impl Doctor {
+    fn new(strict_message_order: bool) -> Self {
+        Self {
+            strict_message_order,
+            diagnosis: Diagnosis::default(),
+            schemas_in_data_section: BTreeMap::new(),
+            channels_in_data_section: BTreeMap::new(),
+            channels_referenced_in_chunks_by_offset: BTreeMap::new(),
+            channel_ids_in_summary_section: BTreeSet::new(),
+            schema_ids_in_summary_section: BTreeSet::new(),
+            chunk_indexes: BTreeMap::new(),
+            scanned_chunks: BTreeMap::new(),
+            in_summary_section: false,
+            scan_stopped_early: false,
+            saw_data_end: false,
+            saw_footer: false,
+            saw_top_level_message: false,
+            message_index_warning_emitted: false,
+            last_top_level_message_time: None,
+            global_max_log_time: None,
+            min_log_time: None,
+            max_log_time: None,
+            message_count: 0,
+            statistics: None,
+            duplicate_schema_warning_ids: BTreeSet::new(),
+            duplicate_channel_warning_ids: BTreeSet::new(),
+        }
+    }
+
+    fn warn(&mut self, message: impl Into<String>) {
+        self.diagnosis.warnings.push(message.into());
+    }
+
+    fn error(&mut self, message: impl Into<String>) {
+        self.diagnosis.errors.push(message.into());
+    }
+
+    fn scan_top_level(&mut self, source: &mut dyn ByteSource) {
+        let record_length_limit = source
+            .size()
+            .and_then(|size| usize::try_from(size).ok())
+            .unwrap_or(usize::MAX);
+        let mut reader = mcap::sans_io::LinearReader::new_with_options(
+            mcap::sans_io::LinearReaderOptions::default()
+                .with_emit_chunks(true)
+                .with_validate_chunk_crcs(true)
+                .with_validate_data_section_crc(true)
+                .with_validate_summary_section_crc(true)
+                .with_record_length_limit(record_length_limit),
+        );
+        let mut pos = 0u64;
+        let mut next_record_offset = mcap::MAGIC.len() as u64;
+
+        while let Some(event) = reader.next_event() {
+            match event {
+                Err(err) => {
+                    self.error(format!("Failed to read next token: {err:#}"));
+                    // The reader decides whether it can go on. A CRC mismatch is reported once
+                    // and reading continues; after an error with no record boundary to resume
+                    // from it returns `None`, which ends this loop.
+                    continue;
+                }
+                Ok(mcap::sans_io::LinearReadEvent::ReadRequest(need)) => {
+                    let buf = reader.insert(need);
+                    let n = match source.read_into(pos, buf) {
+                        Ok(n) => n,
+                        Err(err) => {
+                            // Report the failure as a finding so the ones gathered before it
+                            // still reach the user, then stop: nothing past this offset can be
+                            // read.
+                            self.error(format!("Failed to read file at offset {pos}: {err:#}"));
+                            self.scan_stopped_early = true;
+                            break;
+                        }
+                    };
+                    reader.notify_read(n);
+                    pos = pos.saturating_add(n as u64);
+                }
+                Ok(mcap::sans_io::LinearReadEvent::Record { opcode, data }) => {
+                    let record_offset = next_record_offset;
+                    next_record_offset += 9 + data.len() as u64;
+                    let record = match mcap::parse_record(opcode, data) {
+                        Ok(record) => record,
+                        Err(err) => {
+                            self.error(format!(
+                                "Failed to parse top-level record at offset {}: {err:#}",
+                                record_offset
+                            ));
+                            continue;
+                        }
+                    };
+                    self.handle_top_level_record(record, record_offset, 9 + data.len() as u64);
+                }
+            }
+        }
+        if reader.failed() {
+            // The reader ended on an error it could not resume from, before the end of the
+            // file.
+            self.scan_stopped_early = true;
+        }
+    }
+
+    fn handle_top_level_record(
+        &mut self,
+        record: mcap::records::Record<'_>,
+        offset: u64,
+        record_length: u64,
+    ) {
+        match record {
+            mcap::records::Record::Header(header) => {
+                if header.library.is_empty() {
+                    self.warn(
+                        "Set the Header.library field to a value that identifies the software that produced the file.",
+                    );
+                }
+                if !header.profile.is_empty()
+                    && header.profile != "ros1"
+                    && header.profile != "ros2"
+                {
+                    self.warn(format!(
+                        "Header.profile field {:?} is not a well-known profile.",
+                        header.profile
+                    ));
+                }
+            }
+            mcap::records::Record::Footer(_) => {
+                self.saw_footer = true;
+            }
+            mcap::records::Record::Schema { header, data } => {
+                self.examine_schema(header, data.as_ref());
+            }
+            mcap::records::Record::Channel(channel) => {
+                self.examine_channel(channel);
+            }
+            mcap::records::Record::Message { header, .. } => {
+                self.saw_top_level_message = true;
+                self.examine_top_level_message(&header);
+            }
+            mcap::records::Record::Chunk { header, data } => {
+                self.scanned_chunks.insert(
+                    offset,
+                    ScannedChunk {
+                        header: header.clone(),
+                        record_length,
+                    },
+                );
+                self.examine_chunk(header, data.as_ref(), offset);
+            }
+            mcap::records::Record::MessageIndex(_) => {
+                if self.saw_top_level_message {
+                    self.warn_message_index_outside_chunks_once();
+                }
+            }
+            mcap::records::Record::ChunkIndex(chunk_index) => {
+                if self.saw_top_level_message {
+                    self.warn_message_index_outside_chunks_once();
+                }
+                if self
+                    .chunk_indexes
+                    .insert(chunk_index.chunk_start_offset, chunk_index.clone())
+                    .is_some()
+                {
+                    self.error(format!(
+                        "Multiple chunk indexes found for chunk at offset {}",
+                        chunk_index.chunk_start_offset
+                    ));
+                }
+            }
+            mcap::records::Record::Statistics(statistics) => {
+                if self.statistics.is_some() {
+                    self.error("File contains multiple Statistics records");
+                }
+                if self.in_summary_section {
+                    // Validate inline so later Channel records cannot satisfy the ordering rule.
+                    self.validate_statistics_summary_channels(&statistics);
+                }
+                self.statistics = Some(statistics);
+            }
+            mcap::records::Record::DataEnd(_) => {
+                self.saw_data_end = true;
+                self.in_summary_section = true;
+            }
+            mcap::records::Record::AttachmentIndex(_) => {}
+            mcap::records::Record::Attachment { .. } => {}
+            mcap::records::Record::Metadata(_) => {}
+            mcap::records::Record::MetadataIndex(_) => {}
+            mcap::records::Record::SummaryOffset(_) => {}
+            mcap::records::Record::Unknown { opcode, .. } => {
+                self.warn(format!(
+                    "Encountered unknown top-level record opcode 0x{opcode:02x}"
+                ));
+            }
+        }
+    }
+
+    fn finalize_record_presence(&mut self) {
+        if self.scan_stopped_early {
+            // The scan never reached the end of the file, so it cannot say whether these
+            // records are missing. The error that stopped it is already reported.
+            return;
+        }
+        if !self.saw_data_end {
+            self.error("File does not contain a DataEnd record");
+        }
+        if !self.saw_footer {
+            self.error("File does not contain a Footer record");
+        }
+    }
+
+    fn warn_message_index_outside_chunks_once(&mut self) {
+        if self.message_index_warning_emitted {
+            return;
+        }
+        self.message_index_warning_emitted = true;
+        self.warn(
+            "Message index in file has message records outside chunks. Indexed readers will miss these messages.",
+        );
+    }
+
+    fn examine_schema(&mut self, header: mcap::records::SchemaHeader, data: &[u8]) {
+        if header.encoding.is_empty() {
+            if data.is_empty() {
+                self.warn(format!(
+                    "Schema with ID: {}, Name: {:?} has empty Encoding and Data fields",
+                    header.id, header.name
+                ));
+            } else {
+                self.error(format!(
+                    "Schema with ID: {} has empty Encoding but Data is non-empty",
+                    header.id
+                ));
+            }
+        }
+
+        if header.id == 0 {
+            self.error("Schema.ID 0 is reserved. Do not make Schema records with ID 0.");
+        }
+
+        let parsed = ParsedSchema {
+            header: header.clone(),
+            data: data.to_vec(),
+        };
+        if let Some(previous) = self.schemas_in_data_section.get(&header.id).cloned() {
+            if previous.header.name != header.name {
+                self.error(format!(
+                    "Two schema records with same ID {} but different names ({:?} != {:?})",
+                    header.id, header.name, previous.header.name
+                ));
+            }
+            if previous.header.encoding != header.encoding {
+                self.error(format!(
+                    "Two schema records with same ID {} but different encodings ({:?} != {:?})",
+                    header.id, header.encoding, previous.header.encoding
+                ));
+            }
+            if previous.data != parsed.data {
+                self.error(format!(
+                    "Two schema records with different data present with same ID {}",
+                    header.id
+                ));
+            }
+        }
+
+        if self.in_summary_section {
+            if !self.schemas_in_data_section.contains_key(&header.id) {
+                self.error(format!(
+                    "Schema with id {} in summary section does not exist in data section",
+                    header.id
+                ));
+            }
+            self.schema_ids_in_summary_section.insert(header.id);
+        } else {
+            if self.schemas_in_data_section.contains_key(&header.id)
+                && self.duplicate_schema_warning_ids.insert(header.id)
+            {
+                self.warn(format!(
+                    "Duplicate schema records in data section with ID {}",
+                    header.id
+                ));
+            }
+            self.schemas_in_data_section.insert(header.id, parsed);
+        }
+    }
+
+    fn examine_channel(&mut self, channel: mcap::records::Channel) {
+        if let Some(previous) = self.channels_in_data_section.get(&channel.id).cloned() {
+            if previous.schema_id != channel.schema_id {
+                self.error(format!(
+                    "Two channel records with same ID {} but different schema IDs ({} != {})",
+                    channel.id, channel.schema_id, previous.schema_id
+                ));
+            }
+            if previous.topic != channel.topic {
+                self.error(format!(
+                    "Two channel records with same ID {} but different topics ({:?} != {:?})",
+                    channel.id, channel.topic, previous.topic
+                ));
+            }
+            if previous.message_encoding != channel.message_encoding {
+                self.error(format!(
+                    "Two channel records with same ID {} but different message encodings ({:?} != {:?})",
+                    channel.id, channel.message_encoding, previous.message_encoding
+                ));
+            }
+            if previous.metadata != channel.metadata {
+                self.error(format!(
+                    "Two channel records with different metadata present with same ID {}",
+                    channel.id
+                ));
+            }
+        }
+
+        if self.in_summary_section {
+            if !self.channels_in_data_section.contains_key(&channel.id) {
+                self.error(format!(
+                    "Channel with ID {} in summary section does not exist in data section",
+                    channel.id
+                ));
+            }
+            self.channel_ids_in_summary_section.insert(channel.id);
+        } else {
+            if self.channels_in_data_section.contains_key(&channel.id)
+                && self.duplicate_channel_warning_ids.insert(channel.id)
+            {
+                self.warn(format!(
+                    "Duplicate channel records in data section with ID {}",
+                    channel.id
+                ));
+            }
+            self.channels_in_data_section
+                .insert(channel.id, channel.clone());
+        }
+
+        if channel.schema_id != 0
+            && !self
+                .schemas_in_data_section
+                .contains_key(&channel.schema_id)
+        {
+            self.error(format!(
+                "Encountered Channel ({}) with unknown Schema ({})",
+                channel.id, channel.schema_id
+            ));
+        }
+    }
+
+    fn examine_top_level_message(&mut self, header: &mcap::records::MessageHeader) {
+        let channel_topic = self
+            .channels_in_data_section
+            .get(&header.channel_id)
+            .map(|channel| channel.topic.clone());
+        if channel_topic.is_none() {
+            self.error(format!(
+                "Got a Message record for channel: {} before a channel record.",
+                header.channel_id
+            ));
+        }
+
+        if let Some(previous) = self.last_top_level_message_time {
+            self.check_message_order(
+                header.log_time,
+                channel_topic.as_deref(),
+                previous,
+                "previous message record time",
+            );
+        }
+        self.last_top_level_message_time = Some(header.log_time);
+        self.observe_message_time(header.log_time);
+    }
+
+    fn examine_chunk(
+        &mut self,
+        header: mcap::records::ChunkHeader,
+        data: &[u8],
+        start_offset: u64,
+    ) {
+        let mut referenced_channels = BTreeSet::new();
+        let mut min_log_time = None::<u64>;
+        let mut max_log_time = None::<u64>;
+        let mut chunk_message_count = 0u64;
+        let mut unreadable_records = 0u64;
+
+        let chunk_reader = match mcap::read::ChunkReader::new(header.clone(), data) {
+            Ok(reader) => reader,
+            Err(err) => {
+                self.error(format!(
+                    "failed to read chunk at offset {start_offset}: {err:#}"
+                ));
+                return;
+            }
+        };
+
+        for nested_record in chunk_reader {
+            let nested_record = match nested_record {
+                Ok(record) => record,
+                Err(mcap::McapError::BadChunkCrc { saved, calculated }) => {
+                    // ChunkReader checks the CRC after yielding the last record, so every record
+                    // has been examined by now. Parsing only checks framing: a damaged payload
+                    // byte parses cleanly, and payloads are most of a chunk, so clean parsing
+                    // must not be read as a stale CRC field.
+                    let records = match unreadable_records {
+                        0 => "every record inside it parsed, but the CRC does not confirm that \
+                              the payloads are intact"
+                            .to_string(),
+                        1 => "1 record inside it could not be read, which points at corrupted \
+                              data"
+                            .to_string(),
+                        n => format!(
+                            "{n} records inside it could not be read, which points at corrupted \
+                             data"
+                        ),
+                    };
+                    self.error(format!(
+                        "Chunk at offset {start_offset} has a CRC mismatch (stored {saved:08X}, \
+                         computed {calculated:08X}); {records}. `mcap recover` writes a new CRC \
+                         from the current bytes; run it only if you accept the payloads as they \
+                         are."
+                    ));
+                    continue;
+                }
+                Err(err) => {
+                    unreadable_records += 1;
+                    self.error(format!(
+                        "failed to parse nested chunk record at {start_offset}: {err:#}"
+                    ));
+                    continue;
+                }
+            };
+            match nested_record {
+                mcap::records::Record::Schema { header, data } => {
+                    self.examine_schema(header, data.as_ref());
+                }
+                mcap::records::Record::Channel(channel) => {
+                    self.examine_channel(channel);
+                }
+                mcap::records::Record::Message { header, .. } => {
+                    referenced_channels.insert(header.channel_id);
+                    let channel_topic = self
+                        .channels_in_data_section
+                        .get(&header.channel_id)
+                        .map(|channel| channel.topic.clone());
+                    if channel_topic.is_none() {
+                        self.error(format!(
+                            "Got a Message record for channel: {} before a channel record.",
+                            header.channel_id
+                        ));
+                    }
+
+                    if let Some(latest_log_time) = self.global_max_log_time {
+                        self.check_message_order(
+                            header.log_time,
+                            channel_topic.as_deref(),
+                            latest_log_time,
+                            "latest log time",
+                        );
+                    }
+                    min_log_time =
+                        Some(min_log_time.map_or(header.log_time, |min| min.min(header.log_time)));
+                    max_log_time =
+                        Some(max_log_time.map_or(header.log_time, |max| max.max(header.log_time)));
+                    chunk_message_count += 1;
+                    self.observe_message_time(header.log_time);
+                }
+                other => {
+                    self.error(format!(
+                        "Illegal record in chunk: {}",
+                        opcode_name(other.opcode())
+                    ));
+                }
+            }
+        }
+
+        if chunk_message_count > 0 {
+            let observed_min = min_log_time.expect("min present for non-empty chunk");
+            let observed_max = max_log_time.expect("max present for non-empty chunk");
+            if observed_min != header.message_start_time {
+                self.error(format!(
+                    "Chunk.message_start_time {} does not match the earliest message log time {}",
+                    header.message_start_time, observed_min
+                ));
+            }
+            if observed_max != header.message_end_time {
+                self.error(format!(
+                    "Chunk.message_end_time {} does not match the latest message log time {}",
+                    header.message_end_time, observed_max
+                ));
+            }
+        }
+
+        self.channels_referenced_in_chunks_by_offset
+            .insert(start_offset, referenced_channels);
+    }
+
+    fn observe_message_time(&mut self, log_time: u64) {
+        self.message_count += 1;
+        self.global_max_log_time = Some(
+            self.global_max_log_time
+                .map_or(log_time, |max| max.max(log_time)),
+        );
+        self.min_log_time = Some(self.min_log_time.map_or(log_time, |min| min.min(log_time)));
+        self.max_log_time = Some(self.max_log_time.map_or(log_time, |max| max.max(log_time)));
+    }
+
+    fn check_message_order(
+        &mut self,
+        log_time: u64,
+        topic: Option<&str>,
+        reference_time: u64,
+        reference_name: &str,
+    ) {
+        if log_time < reference_time {
+            let topic = topic.unwrap_or("<unknown>");
+            let message = format!(
+                "Message.log_time {log_time} on {topic:?} is less than the {reference_name} {reference_time}",
+            );
+            if self.strict_message_order {
+                self.error(message);
+            } else {
+                self.warn(message);
+            }
+        }
+    }
+
+    fn validate_chunk_indexes(&mut self, source: &mut dyn ByteSource) {
+        let chunk_indexes: Vec<(u64, mcap::records::ChunkIndex)> = self
+            .chunk_indexes
+            .iter()
+            .map(|(offset, index)| (*offset, index.clone()))
+            .collect();
+        for (chunk_offset, chunk_index) in chunk_indexes {
+            if let Some(channels_referenced) = self
+                .channels_referenced_in_chunks_by_offset
+                .get(&chunk_offset)
+            {
+                let channel_ids: Vec<u16> = channels_referenced.iter().copied().collect();
+                for channel_id in channel_ids {
+                    if !self.channel_ids_in_summary_section.contains(&channel_id) {
+                        self.error(format!(
+                            "Indexed chunk at offset {} contains messages referencing channel ({}) not duplicated in summary section",
+                            chunk_offset, channel_id
+                        ));
+                    }
+                    let schema_id = self
+                        .channels_in_data_section
+                        .get(&channel_id)
+                        .map(|channel| channel.schema_id);
+                    if let Some(schema_id) = schema_id {
+                        if schema_id != 0
+                            && !self.schema_ids_in_summary_section.contains(&schema_id)
+                        {
+                            self.error(format!(
+                                "Indexed chunk at offset {} contains messages referencing schema ({}) not duplicated in summary section",
+                                chunk_offset, schema_id
+                            ));
+                        }
+                    }
+                }
+            }
+
+            let Some(scanned) = self.scanned_chunks.get(&chunk_offset).cloned() else {
+                // Only an index that points where the scan saw no chunk costs a read: the
+                // nine-byte record header, to name what is there.
+                match read_opcode_at_offset(source, chunk_offset) {
+                    Ok(opcode) if opcode != mcap::records::op::CHUNK => {
+                        self.error(format!(
+                            "Chunk index points to offset {} but the record at this offset is a {}",
+                            chunk_offset,
+                            opcode_name(opcode)
+                        ));
+                    }
+                    Ok(_) => {
+                        self.error(format!(
+                            "Chunk index points to offset {} but encountered an error parsing the chunk at that offset",
+                            chunk_offset
+                        ));
+                    }
+                    Err(err) => {
+                        self.error(format!(
+                            "Chunk index points to offset {} but encountered an error reading at that offset: {err}",
+                            chunk_offset
+                        ));
+                    }
+                }
+                continue;
+            };
+            if chunk_index.chunk_length != scanned.record_length {
+                self.error(format!(
+                    "Chunk index {} length mismatch: {} vs {}.",
+                    chunk_offset, chunk_index.chunk_length, scanned.record_length
+                ));
+                continue;
+            }
+
+            let header = scanned.header;
+            if header.message_start_time != chunk_index.message_start_time {
+                self.error(format!(
+                    "Chunk at offset {} has message start time {}, but its chunk index has message start time {}",
+                    chunk_offset, header.message_start_time, chunk_index.message_start_time
+                ));
+            }
+            if header.message_end_time != chunk_index.message_end_time {
+                self.error(format!(
+                    "Chunk at offset {} has message end time {}, but its chunk index has message end time {}",
+                    chunk_offset, header.message_end_time, chunk_index.message_end_time
+                ));
+            }
+            if header.compression != chunk_index.compression {
+                self.error(format!(
+                    "Chunk at offset {} has compression {:?}, but its chunk index has compression {:?}",
+                    chunk_offset, header.compression, chunk_index.compression
+                ));
+            }
+            if header.compressed_size != chunk_index.compressed_size {
+                self.error(format!(
+                    "Chunk at offset {} has data length {}, but its chunk index has compressed size {}",
+                    chunk_offset, header.compressed_size, chunk_index.compressed_size
+                ));
+            }
+            if header.uncompressed_size != chunk_index.uncompressed_size {
+                self.error(format!(
+                    "Chunk at offset {} has uncompressed size {}, but its chunk index has uncompressed size {}",
+                    chunk_offset, header.uncompressed_size, chunk_index.uncompressed_size
+                ));
+            }
+        }
+    }
+
+    fn validate_statistics(&mut self) {
+        let Some(statistics) = self.statistics.clone() else {
+            return;
+        };
+
+        if self.message_count > 0 {
+            if let Some(min_log_time) = self.min_log_time {
+                if statistics.message_start_time != min_log_time {
+                    self.error(format!(
+                        "Statistics has message start time {}, but the minimum message start time is {}",
+                        statistics.message_start_time, min_log_time
+                    ));
+                }
+            }
+            if let Some(max_log_time) = self.max_log_time {
+                if statistics.message_end_time != max_log_time {
+                    self.error(format!(
+                        "Statistics has message end time {}, but the maximum message end time is {}",
+                        statistics.message_end_time, max_log_time
+                    ));
+                }
+            }
+        }
+        if statistics.message_count != self.message_count {
+            self.error(format!(
+                "Statistics has message count {}, but actual number of messages is {}",
+                statistics.message_count, self.message_count
+            ));
+        }
+    }
+
+    fn validate_statistics_summary_channels(&mut self, statistics: &mcap::records::Statistics) {
+        if statistics.channel_message_counts.is_empty() {
+            return;
+        }
+
+        let mut required_channel_ids: BTreeSet<u16> =
+            self.channels_in_data_section.keys().copied().collect();
+        required_channel_ids.extend(statistics.channel_message_counts.keys().copied());
+
+        for channel_id in required_channel_ids {
+            if !self.channel_ids_in_summary_section.contains(&channel_id) {
+                self.error(format!(
+                    "Statistics.channel_message_counts is non-empty, but Channel with ID {} is missing from the summary section before the Statistics record",
+                    channel_id
+                ));
+            }
+        }
+    }
+}
+
+/// Reads the opcode of the record whose nine-byte prefix starts at `offset`.
+fn read_opcode_at_offset(source: &mut dyn ByteSource, offset: u64) -> Result<u8> {
+    let header = source.read_at(offset, 9)?;
+    if header.len() < 9 {
+        anyhow::bail!("record header extends beyond file");
+    }
+    Ok(header[0])
+}
+
+fn opcode_name(opcode: u8) -> Cow<'static, str> {
+    match opcode {
+        mcap::records::op::HEADER => Cow::Borrowed("Header"),
+        mcap::records::op::FOOTER => Cow::Borrowed("Footer"),
+        mcap::records::op::SCHEMA => Cow::Borrowed("Schema"),
+        mcap::records::op::CHANNEL => Cow::Borrowed("Channel"),
+        mcap::records::op::MESSAGE => Cow::Borrowed("Message"),
+        mcap::records::op::CHUNK => Cow::Borrowed("Chunk"),
+        mcap::records::op::MESSAGE_INDEX => Cow::Borrowed("MessageIndex"),
+        mcap::records::op::CHUNK_INDEX => Cow::Borrowed("ChunkIndex"),
+        mcap::records::op::ATTACHMENT => Cow::Borrowed("Attachment"),
+        mcap::records::op::ATTACHMENT_INDEX => Cow::Borrowed("AttachmentIndex"),
+        mcap::records::op::STATISTICS => Cow::Borrowed("Statistics"),
+        mcap::records::op::METADATA => Cow::Borrowed("Metadata"),
+        mcap::records::op::METADATA_INDEX => Cow::Borrowed("MetadataIndex"),
+        mcap::records::op::SUMMARY_OFFSET => Cow::Borrowed("SummaryOffset"),
+        mcap::records::op::DATA_END => Cow::Borrowed("DataEnd"),
+        _ => Cow::Owned(format!("opcode 0x{opcode:02x}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+    use std::collections::BTreeMap;
+    use std::rc::Rc;
+
+    use super::diagnose_mcap;
+    use crate::byte_source::InstrumentedSource;
+    use mcap::records::op;
+
+    fn write_mcap(
+        configure: impl FnOnce(mcap::WriteOptions) -> mcap::WriteOptions,
+        schema_id: Option<u16>,
+        message_times: &[u64],
+    ) -> Vec<u8> {
+        let mut buffer = Vec::new();
+        {
+            let options = configure(mcap::WriteOptions::new().chunk_size(Some(64)));
+            let mut writer = options
+                .create(std::io::Cursor::new(&mut buffer))
+                .expect("create writer");
+
+            let schema_id = schema_id.unwrap_or_else(|| {
+                writer
+                    .add_schema("test_schema", "raw", b"{}")
+                    .expect("add schema")
+            });
+            let channel_id = writer
+                .add_channel(schema_id, "/demo", "raw", &BTreeMap::new())
+                .expect("add channel");
+
+            for (sequence, log_time) in message_times.iter().copied().enumerate() {
+                writer
+                    .write_to_known_channel(
+                        &mcap::records::MessageHeader {
+                            channel_id,
+                            sequence: sequence as u32,
+                            log_time,
+                            publish_time: log_time,
+                        },
+                        b"payload",
+                    )
+                    .expect("write message");
+            }
+
+            writer.finish().expect("finish writer");
+        }
+        buffer
+    }
+
+    #[test]
+    fn no_error_on_messageless_chunks() {
+        let mcap = write_mcap(|opts| opts, Some(0), &[]);
+        let diagnosis = diagnose_mcap(&mcap, false);
+        assert!(diagnosis.errors.is_empty(), "{:?}", diagnosis.errors);
+    }
+
+    #[test]
+    fn no_error_on_schemaless_messages() {
+        let mcap = write_mcap(|opts| opts, Some(0), &[10]);
+        let diagnosis = diagnose_mcap(&mcap, false);
+        assert!(diagnosis.errors.is_empty(), "{:?}", diagnosis.errors);
+    }
+
+    #[test]
+    fn requires_duplicated_schemas_for_indexed_messages() {
+        let mcap = write_mcap(
+            |opts| opts.repeat_channels(false).repeat_schemas(false),
+            None,
+            &[10],
+        );
+        let diagnosis = diagnose_mcap(&mcap, false);
+        assert!(
+            diagnosis
+                .errors
+                .iter()
+                .any(|msg| msg.contains("channel (1)")),
+            "{:?}",
+            diagnosis.errors
+        );
+        assert!(
+            diagnosis
+                .errors
+                .iter()
+                .any(|msg| msg.contains("schema (1)")),
+            "{:?}",
+            diagnosis.errors
+        );
+    }
+
+    #[test]
+    fn passes_indexed_messages_with_repeated_schemas() {
+        let mcap = write_mcap(|opts| opts, None, &[10]);
+        let diagnosis = diagnose_mcap(&mcap, false);
+        assert!(diagnosis.errors.is_empty(), "{:?}", diagnosis.errors);
+    }
+
+    #[test]
+    fn statistics_requires_summary_channels() {
+        let mcap = write_mcap(
+            |opts| opts.use_chunks(false).repeat_channels(false),
+            Some(0),
+            &[10],
+        );
+
+        let diagnosis = diagnose_mcap(&mcap, false);
+
+        let expected =
+            "Channel with ID 1 is missing from the summary section before the Statistics record";
+        assert!(
+            diagnosis.errors.iter().any(|msg| msg.contains(expected)),
+            "{:?}",
+            diagnosis.errors
+        );
+    }
+
+    #[test]
+    fn statistics_requires_summary_channels_before_statistics() {
+        let mut mcap = write_mcap(
+            |opts| opts.use_chunks(false).calculate_summary_section_crc(false),
+            Some(0),
+            &[10],
+        );
+        move_first_summary_channel_after_statistics(&mut mcap);
+
+        let diagnosis = diagnose_mcap(&mcap, false);
+
+        let expected =
+            "Channel with ID 1 is missing from the summary section before the Statistics record";
+        assert!(
+            diagnosis.errors.iter().any(|msg| msg.contains(expected)),
+            "{:?}",
+            diagnosis.errors
+        );
+    }
+
+    #[test]
+    fn strict_message_order_toggles_warning_vs_error_for_chunked_messages() {
+        let mcap = write_mcap(|opts| opts, None, &[20, 10]);
+
+        let non_strict = diagnose_mcap(&mcap, false);
+        assert!(
+            non_strict
+                .warnings
+                .iter()
+                .any(|msg| msg.contains("less than the latest log time")),
+            "{:?}",
+            non_strict.warnings
+        );
+        assert!(non_strict.errors.is_empty(), "{:?}", non_strict.errors);
+
+        let strict = diagnose_mcap(&mcap, true);
+        assert!(
+            strict
+                .errors
+                .iter()
+                .any(|msg| msg.contains("less than the latest log time")),
+            "{:?}",
+            strict.errors
+        );
+    }
+
+    #[test]
+    fn strict_message_order_toggles_warning_vs_error_for_top_level_messages() {
+        let mcap = write_mcap(|opts| opts.use_chunks(false), None, &[20, 10]);
+
+        let non_strict = diagnose_mcap(&mcap, false);
+        assert!(
+            non_strict
+                .warnings
+                .iter()
+                .any(|msg| msg.contains("less than the previous message record time")),
+            "{:?}",
+            non_strict.warnings
+        );
+        assert!(non_strict.errors.is_empty(), "{:?}", non_strict.errors);
+
+        let strict = diagnose_mcap(&mcap, true);
+        assert!(
+            strict
+                .errors
+                .iter()
+                .any(|msg| msg.contains("less than the previous message record time")),
+            "{:?}",
+            strict.errors
+        );
+    }
+
+    #[test]
+    fn top_level_messages_keep_previous_message_order_baseline() {
+        let mcap = write_mcap(|opts| opts.use_chunks(false), None, &[100, 1, 2, 99]);
+
+        let diagnosis = diagnose_mcap(&mcap, false);
+        assert_eq!(diagnosis.warnings.len(), 1, "{:?}", diagnosis.warnings);
+        assert!(
+            diagnosis.warnings[0].contains("less than the previous message record time"),
+            "{:?}",
+            diagnosis.warnings
+        );
+        assert!(diagnosis.errors.is_empty(), "{:?}", diagnosis.errors);
+    }
+
+    #[test]
+    fn continues_scanning_after_corrupt_top_level_record() {
+        let mut mcap = write_mcap(
+            |opts| {
+                opts.use_chunks(false)
+                    .repeat_channels(false)
+                    .repeat_schemas(false)
+            },
+            None,
+            &[10],
+        );
+
+        corrupt_first_schema_data_length(&mut mcap);
+
+        let diagnosis = diagnose_mcap(&mcap, false);
+        assert!(
+            diagnosis
+                .errors
+                .iter()
+                .any(|err| err.contains("Failed to parse top-level record")),
+            "{:?}",
+            diagnosis.errors
+        );
+        assert!(
+            diagnosis
+                .errors
+                .iter()
+                .any(|err| err.contains("unknown Schema")),
+            "{:?}",
+            diagnosis.errors
+        );
+    }
+
+    #[test]
+    fn chunk_index_pointing_at_a_huge_record_length_is_reported_not_fatal() {
+        // A message payload that, read as a record header, is a Chunk with a length near
+        // u64::MAX. The fixture is otherwise valid, so only the chunk index is corrupted.
+        let mut payload = vec![op::CHUNK];
+        payload.extend_from_slice(&(u64::MAX - 1).to_le_bytes());
+        let mut mcap = Vec::new();
+        {
+            let mut writer = mcap::WriteOptions::new()
+                .compression(None)
+                .create(std::io::Cursor::new(&mut mcap))
+                .expect("create writer");
+            let schema_id = writer
+                .add_schema("test_schema", "raw", b"{}")
+                .expect("add schema");
+            let channel_id = writer
+                .add_channel(schema_id, "/demo", "raw", &BTreeMap::new())
+                .expect("add channel");
+            writer
+                .write_to_known_channel(
+                    &mcap::records::MessageHeader {
+                        channel_id,
+                        sequence: 0,
+                        log_time: 10,
+                        publish_time: 10,
+                    },
+                    &payload,
+                )
+                .expect("write message");
+            writer.finish().expect("finish writer");
+        }
+
+        let payload_offset =
+            mcap.windows(payload.len())
+                .position(|window| window == payload)
+                .expect("uncompressed payload should be in the file") as u64;
+        set_chunk_index_start_offset(&mut mcap, payload_offset);
+
+        let diagnosis = diagnose_mcap(&mcap, false);
+        assert!(
+            diagnosis.errors.iter().any(|err| {
+                err.contains(&format!("Chunk index points to offset {payload_offset}"))
+                    && err.contains("encountered an error parsing the chunk at that offset")
+            }),
+            "{:?}",
+            diagnosis.errors
+        );
+    }
+
+    #[test]
+    fn chunk_index_pointing_at_another_record_names_its_type() {
+        let mut mcap = write_mcap(|opts| opts, None, &[10]);
+        let schema_offset = first_record_offset(&mcap, op::SCHEMA).expect("schema record") as u64;
+        set_chunk_index_start_offset(&mut mcap, schema_offset);
+
+        let diagnosis = diagnose_mcap(&mcap, false);
+        assert!(
+            diagnosis.errors.iter().any(|err| {
+                err.contains(&format!("Chunk index points to offset {schema_offset}"))
+                    && err.contains("the record at this offset is a Schema")
+            }),
+            "{:?}",
+            diagnosis.errors
+        );
+    }
+
+    #[test]
+    fn chunk_index_fields_are_checked_against_the_scanned_chunk_header() {
+        let mut mcap = write_mcap(|opts| opts, None, &[10]);
+        let chunk_index_offset =
+            first_record_offset(&mcap, op::CHUNK_INDEX).expect("chunk index should exist");
+        // ChunkIndex body starts with message_start_time.
+        let field = chunk_index_offset + 9;
+        mcap[field..field + 8].copy_from_slice(&999u64.to_le_bytes());
+        zero_summary_crc(&mut mcap);
+
+        let diagnosis = diagnose_mcap(&mcap, false);
+        assert!(
+            diagnosis.errors.iter().any(|err| {
+                err.contains(
+                    "has message start time 0, but its chunk index has message start time 999",
+                )
+            }),
+            "{:?}",
+            diagnosis.errors
+        );
+    }
+
+    #[test]
+    fn read_failure_is_reported_after_earlier_findings() {
+        let mut mcap = write_mcap(
+            |opts| {
+                opts.use_chunks(false)
+                    .repeat_channels(false)
+                    .repeat_schemas(false)
+            },
+            None,
+            &[10],
+        );
+        corrupt_first_schema_data_length(&mut mcap);
+        let fail_at = first_record_offset(&mcap, op::MESSAGE).expect("message should exist");
+
+        // Every read at or past the first message fails, standing in for a disk or network
+        // error partway through the scan.
+        let fail_at = fail_at as u64;
+        let mut source = InstrumentedSource::new(mcap, move |offset, _: &[u8]| {
+            if offset >= fail_at {
+                anyhow::bail!("simulated read failure");
+            }
+            Ok(())
+        });
+        let diagnosis = super::diagnose_byte_source(&mut source, false);
+
+        let parse_error = diagnosis
+            .errors
+            .iter()
+            .position(|err| err.contains("Failed to parse top-level record"));
+        let read_error = diagnosis.errors.iter().position(|err| {
+            err.contains(&format!("Failed to read file at offset {fail_at}"))
+                && err.contains("simulated read failure")
+        });
+        assert!(
+            matches!((parse_error, read_error), (Some(parse), Some(read)) if parse < read),
+            "{:?}",
+            diagnosis.errors
+        );
+        // The scan never reached the end of the file, so it cannot claim records are missing.
+        assert!(
+            !diagnosis
+                .errors
+                .iter()
+                .any(|err| err.contains("does not contain a")),
+            "{:?}",
+            diagnosis.errors
+        );
+    }
+
+    fn uncompressed_single_chunk_mcap() -> Vec<u8> {
+        write_mcap(
+            |opts| opts.compression(None).chunk_size(Some(1024 * 1024)),
+            None,
+            &[10, 20, 30],
+        )
+    }
+
+    #[test]
+    fn reports_a_nested_record_the_reader_cannot_skip_once() {
+        let mut mcap = uncompressed_single_chunk_mcap();
+        let chunk_offset = first_record_offset(&mcap, op::CHUNK).expect("chunk record");
+        let first_nested_record = chunk_records_offset(&mcap, chunk_offset);
+        // Claim far more bytes than the chunk holds for the first nested record.
+        mcap[first_nested_record + 1..first_nested_record + 9]
+            .copy_from_slice(&(u64::MAX / 2).to_le_bytes());
+        zero_chunk_and_data_section_crcs(&mut mcap, chunk_offset);
+
+        let diagnosis = diagnose_mcap(&mcap, false);
+        let nested_errors = diagnosis
+            .errors
+            .iter()
+            .filter(|err| err.contains("failed to parse nested chunk record"))
+            .count();
+        assert_eq!(nested_errors, 1, "{:?}", diagnosis.errors);
+    }
+
+    #[test]
+    fn keeps_examining_a_chunk_after_a_nested_record_fails_to_parse() {
+        let mut mcap = uncompressed_single_chunk_mcap();
+        let chunk_offset = first_record_offset(&mcap, op::CHUNK).expect("chunk record");
+        let schema_offset = chunk_records_offset(&mcap, chunk_offset);
+        assert_eq!(
+            mcap[schema_offset],
+            op::SCHEMA,
+            "the chunk opens with the schema"
+        );
+        corrupt_schema_data_length(&mut mcap, schema_offset);
+        zero_chunk_and_data_section_crcs(&mut mcap, chunk_offset);
+
+        let diagnosis = diagnose_mcap(&mcap, false);
+        let nested_errors = diagnosis
+            .errors
+            .iter()
+            .filter(|err| err.contains("failed to parse nested chunk record"))
+            .count();
+        assert_eq!(nested_errors, 1, "{:?}", diagnosis.errors);
+        // The channel after the bad schema was still examined: it names a schema the scan
+        // never saw.
+        assert!(
+            diagnosis
+                .errors
+                .iter()
+                .any(|err| err.contains("unknown Schema")),
+            "{:?}",
+            diagnosis.errors
+        );
+        // And the messages after the channel were checked against it.
+        assert!(
+            !diagnosis
+                .errors
+                .iter()
+                .any(|err| err.contains("before a channel record")),
+            "{:?}",
+            diagnosis.errors
+        );
+    }
+
+    #[test]
+    fn chunk_index_validation_reads_the_file_once() {
+        let mcap = write_mcap(|opts| opts, None, &[10, 20, 30, 40]);
+        let bytes_read = Rc::new(Cell::new(0u64));
+        let mut source = InstrumentedSource::new(mcap.clone(), {
+            let bytes_read = Rc::clone(&bytes_read);
+            move |_, bytes: &[u8]| {
+                bytes_read.set(bytes_read.get() + bytes.len() as u64);
+                Ok(())
+            }
+        });
+        let diagnosis = super::diagnose_byte_source(&mut source, false);
+        assert!(diagnosis.errors.is_empty(), "{:?}", diagnosis.errors);
+        assert!(
+            first_record_offset(&mcap, op::CHUNK_INDEX).is_some(),
+            "fixture should have chunk indexes to validate"
+        );
+        assert_eq!(
+            bytes_read.get(),
+            mcap.len() as u64,
+            "validating chunk indexes should not re-read the data section"
+        );
+    }
+
+    fn set_chunk_index_start_offset(mcap: &mut [u8], start_offset: u64) {
+        let chunk_index_offset =
+            first_record_offset(mcap, op::CHUNK_INDEX).expect("chunk index should exist");
+        // ChunkIndex body: message_start_time, message_end_time, chunk_start_offset, ...
+        let field = chunk_index_offset + 9 + 16;
+        mcap[field..field + 8].copy_from_slice(&start_offset.to_le_bytes());
+        zero_summary_crc(mcap);
+    }
+
+    /// Footer body: summary_start, summary_offset_start, summary_crc. A zero CRC is "not
+    /// computed", so the scan reaches a corrupted summary record without a CRC error.
+    fn zero_summary_crc(mcap: &mut [u8]) {
+        let footer_offset = mcap.len() - mcap::MAGIC.len() - 9 - 20;
+        assert_eq!(mcap[footer_offset], op::FOOTER);
+        let crc_field = footer_offset + 9 + 16;
+        mcap[crc_field..crc_field + 4].copy_from_slice(&[0; 4]);
+    }
+
+    #[test]
+    fn a_reader_error_it_cannot_resume_from_stops_the_scan_without_presence_claims() {
+        let mcap = write_mcap(|opts| opts, None, &[10, 20, 30]);
+        // Cut the file off inside its last chunk.
+        let chunk_offset = first_record_offset(&mcap, op::CHUNK).expect("chunk record");
+        let truncated = &mcap[..chunk_offset + 9 + 24];
+
+        let diagnosis = diagnose_mcap(truncated, false);
+        assert!(
+            diagnosis
+                .errors
+                .iter()
+                .any(|err| err.contains("Failed to read next token")),
+            "{:?}",
+            diagnosis.errors
+        );
+        assert!(
+            !diagnosis
+                .errors
+                .iter()
+                .any(|err| err.contains("does not contain a")),
+            "{:?}",
+            diagnosis.errors
+        );
+    }
+
+    #[test]
+    fn reports_a_chunk_crc_mismatch_and_keeps_scanning() {
+        let mut mcap = uncompressed_single_chunk_mcap();
+        let chunk_offset = first_record_offset(&mcap, op::CHUNK).expect("chunk record");
+        // ChunkHeader: message_start_time, message_end_time, uncompressed_size (8 each), then
+        // uncompressed_crc.
+        mcap[chunk_offset + 9 + 24] ^= 0xFF;
+        zero_data_section_crc(&mut mcap);
+
+        let diagnosis = diagnose_mcap(&mcap, false);
+        assert_eq!(diagnosis.errors.len(), 1, "{:?}", diagnosis.errors);
+        let error = &diagnosis.errors[0];
+        assert!(error.contains("has a CRC mismatch"), "{error}");
+        assert!(
+            error.contains("every record inside it parsed, but the CRC does not confirm"),
+            "{error}"
+        );
+        assert!(
+            error.contains("run it only if you accept the payloads as they are"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_chunk_crc_mismatch_names_records_it_could_not_read() {
+        let mut mcap = uncompressed_single_chunk_mcap();
+        let chunk_offset = first_record_offset(&mcap, op::CHUNK).expect("chunk record");
+        let schema_offset = chunk_records_offset(&mcap, chunk_offset);
+        corrupt_schema_data_length(&mut mcap, schema_offset);
+        zero_data_section_crc(&mut mcap);
+
+        let diagnosis = diagnose_mcap(&mcap, false);
+        let crc_error = diagnosis
+            .errors
+            .iter()
+            .find(|err| err.contains("has a CRC mismatch"))
+            .expect("chunk crc mismatch reported");
+        assert!(
+            crc_error.contains("1 record inside it could not be read"),
+            "{crc_error}"
+        );
+    }
+
+    #[test]
+    fn reports_a_bad_data_section_crc_and_still_checks_the_summary() {
+        let mut mcap = write_mcap(|opts| opts, None, &[10, 20, 30]);
+        let data_end = first_record_offset(&mcap, op::DATA_END).expect("data end record");
+        mcap[data_end + 9] ^= 0xFF;
+
+        let diagnosis = diagnose_mcap(&mcap, false);
+        assert_eq!(diagnosis.errors.len(), 1, "{:?}", diagnosis.errors);
+        assert!(
+            diagnosis.errors[0].contains("Data section CRC failed"),
+            "{:?}",
+            diagnosis.errors
+        );
+        // The scan went on past DataEnd: the summary was read and found consistent, and the
+        // Footer was seen.
+        assert!(
+            !diagnosis
+                .errors
+                .iter()
+                .any(|err| err.contains("does not contain a")),
+            "{:?}",
+            diagnosis.errors
+        );
+    }
+
+    /// Zeroes the data section CRC (zero means "not computed") so a chunk edited by a test is
+    /// reported for its own CRC alone.
+    fn zero_data_section_crc(mcap: &mut [u8]) {
+        let data_end = first_record_offset(mcap, op::DATA_END).expect("data end record");
+        mcap[data_end + 9..data_end + 13].copy_from_slice(&[0; 4]);
+    }
+
+    /// Offset of the first record inside an uncompressed chunk's records field.
+    fn chunk_records_offset(mcap: &[u8], chunk_offset: usize) -> usize {
+        // ChunkHeader: message_start_time, message_end_time, uncompressed_size (8 each),
+        // uncompressed_crc (4), compression string (4 + len), compressed_size (8).
+        let header_offset = chunk_offset + 9;
+        let compression_len = u32::from_le_bytes(
+            mcap[header_offset + 28..header_offset + 32]
+                .try_into()
+                .expect("compression length"),
+        ) as usize;
+        header_offset + 32 + compression_len + 8
+    }
+
+    /// Zeroes the chunk's CRC and the data section CRC (zero means "not computed") so a
+    /// corrupted chunk is examined record by record and the scan reaches the summary.
+    fn zero_chunk_and_data_section_crcs(mcap: &mut [u8], chunk_offset: usize) {
+        let crc_field = chunk_offset + 9 + 24;
+        mcap[crc_field..crc_field + 4].copy_from_slice(&[0; 4]);
+        zero_data_section_crc(mcap);
+    }
+
+    fn corrupt_first_schema_data_length(mcap: &mut [u8]) {
+        let schema_record_offset =
+            first_record_offset(mcap, op::SCHEMA).expect("schema record should exist");
+        corrupt_schema_data_length(mcap, schema_record_offset);
+    }
+
+    /// Sets the data length of the schema record at `schema_record_offset` to u32::MAX so it
+    /// fails to parse.
+    fn corrupt_schema_data_length(mcap: &mut [u8], schema_record_offset: usize) {
+        let body_offset = schema_record_offset + 9;
+        let body_len = read_record_len(mcap, schema_record_offset) as usize;
+        let body = &mut mcap[body_offset..body_offset + body_len];
+
+        let mut cursor = 0usize;
+        cursor += 2; // schema id
+
+        let name_len = u32::from_le_bytes(
+            body[cursor..cursor + 4]
+                .try_into()
+                .expect("name len slice should exist"),
+        ) as usize;
+        cursor += 4 + name_len;
+
+        let encoding_len = u32::from_le_bytes(
+            body[cursor..cursor + 4]
+                .try_into()
+                .expect("encoding len slice should exist"),
+        ) as usize;
+        cursor += 4 + encoding_len;
+
+        body[cursor..cursor + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+    }
+
+    fn move_first_summary_channel_after_statistics(mcap: &mut Vec<u8>) {
+        let data_end_offset =
+            first_record_offset(mcap, op::DATA_END).expect("data end record should exist");
+        let summary_start = record_end(mcap, data_end_offset);
+        let channel_offset = first_record_offset_after(mcap, op::CHANNEL, summary_start)
+            .expect("summary channel record should exist");
+        let statistics_offset = first_record_offset_after(mcap, op::STATISTICS, channel_offset)
+            .expect("summary statistics record should exist");
+        assert!(channel_offset < statistics_offset);
+
+        let channel_end = record_end(mcap, channel_offset);
+        let statistics_end = record_end(mcap, statistics_offset);
+
+        let mut reordered = Vec::with_capacity(mcap.len());
+        reordered.extend_from_slice(&mcap[..channel_offset]);
+        reordered.extend_from_slice(&mcap[statistics_offset..statistics_end]);
+        reordered.extend_from_slice(&mcap[channel_end..statistics_offset]);
+        reordered.extend_from_slice(&mcap[channel_offset..channel_end]);
+        reordered.extend_from_slice(&mcap[statistics_end..]);
+        *mcap = reordered;
+    }
+
+    fn first_record_offset(mcap: &[u8], opcode: u8) -> Option<usize> {
+        first_record_offset_after(mcap, opcode, mcap::MAGIC.len())
+    }
+
+    fn first_record_offset_after(mcap: &[u8], opcode: u8, min_offset: usize) -> Option<usize> {
+        let mut offset = mcap::MAGIC.len();
+        let end_magic_start = mcap.len().saturating_sub(mcap::MAGIC.len());
+        while offset + 9 <= end_magic_start {
+            let record_opcode = mcap[offset];
+            if offset >= min_offset && record_opcode == opcode {
+                return Some(offset);
+            }
+            let len = read_record_len(mcap, offset) as usize;
+            offset += 9 + len;
+        }
+        None
+    }
+
+    fn record_end(mcap: &[u8], offset: usize) -> usize {
+        offset + 9 + read_record_len(mcap, offset) as usize
+    }
+
+    fn read_record_len(mcap: &[u8], offset: usize) -> u64 {
+        u64::from_le_bytes(
+            mcap[offset + 1..offset + 9]
+                .try_into()
+                .expect("record length slice should exist"),
+        )
+    }
+}

@@ -1,0 +1,22 @@
+// cspell:ignore webcodecs, mediacapture
+{
+  "extends": "@foxglove/tsconfig/bundler.json",
+  "include": ["./**/*"],
+  "compilerOptions": {
+    "noEmit": true,
+    "target": "es2022",
+    "lib": ["es2022", "dom"],
+    "jsx": "react",
+    "types": [
+      "@docusaurus/module-type-aliases",
+      "@docusaurus/theme-classic",
+      "dom-mediacapture-transform",
+      "dom-webcodecs"
+    ],
+    "verbatimModuleSyntax": false
+  },
+  "references": [
+    { "path": "../typescript/core" },
+    { "path": "../typescript/support" }
+  ]
+}

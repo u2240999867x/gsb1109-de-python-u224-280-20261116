@@ -1,0 +1,36 @@
+{
+  "name": "@foxglove/mcap-example-bag2mcap",
+  "description": "MCAP bag2mcap example",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc -b",
+    "lint:ci": "tsc -b && eslint .",
+    "lint": "tsc -b && eslint --fix .",
+    "bag2mcap": "tsc -b && tsx scripts/bag2mcap.ts"
+  },
+  "devDependencies": {
+    "@foxglove/eslint-plugin": "2.1.2",
+    "@foxglove/rosbag": "0.2.3",
+    "@foxglove/rosmsg": "3.1.0",
+    "@foxglove/rosmsg-serialization": "1.5.3",
+    "@foxglove/rosmsg2-serialization": "1.1.1",
+    "@foxglove/tsconfig": "3.2.0",
+    "@foxglove/wasm-bz2": "0.3.0",
+    "@foxglove/wasm-lz4": "1.0.2",
+    "@foxglove/wasm-zstd": "1.0.1",
+    "@mcap/core": "workspace:*",
+    "@mcap/nodejs": "workspace:*",
+    "@mcap/support": "workspace:*",
+    "@types/node": "20.19.43",
+    "@typescript-eslint/eslint-plugin": "8.67.0",
+    "@typescript-eslint/parser": "8.67.0",
+    "commander": "11.1.0",
+    "eslint": "9.39.5",
+    "prettier": "3.1.0",
+    "protobufjs": "7.6.5",
+    "tsx": "4.23.5",
+    "typescript": "5.9.3"
+  }
+}

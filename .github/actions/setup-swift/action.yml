@@ -1,0 +1,47 @@
+name: Setup Swift
+inputs:
+  swift-version:
+    description: "The Swift version"
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: install swiftly
+      shell: bash
+      run: |
+        set -e
+
+        checksum="0b26b568811404374c7d7f07276b6aad4145db5d1893a45f307de6a94ca8d9c3"
+        version="1.2.0"
+        archive="swiftly-$version-x86_64.tar.gz"
+
+        wget https://download.swift.org/swiftly/linux/$archive
+        echo "$checksum  ./$archive" | sha256sum --check
+
+        tar xzf $archive
+
+        export SWIFTLY_HOME_DIR="$HOME/.local/share/swiftly"
+        export SWIFTLY_BIN_DIR="$HOME/.local/share/swiftly/bin"
+
+        echo "SWIFTLY_HOME_DIR=$SWIFTLY_HOME_DIR" >> $GITHUB_ENV
+        echo "SWIFTLY_BIN_DIR=$SWIFTLY_BIN_DIR" >> $GITHUB_ENV
+        echo "$HOME/.local/share/swiftly/bin" >> $GITHUB_PATH
+
+        ./swiftly init --no-modify-profile --assume-yes --skip-install
+
+    - name: install deps
+      shell: bash
+      # The package list after libcurl4-openssl-dev is what `swiftly install`
+      # reports as required by the toolchain on Ubuntu 26.04.
+      run: |
+        sudo apt-get update
+        sudo apt-get -y install libcurl4-openssl-dev \
+          binutils binutils-gold unzip zip gnupg2 libgcc-15-dev libpython3-dev \
+          libstdc++-15-dev libxml2-dev libncurses-dev libz3-dev pkg-config
+
+    - name: install swift
+      shell: bash
+      run: swiftly install --use -y ${{ inputs.swift-version }}
+    - shell: bash
+      run: swift --version

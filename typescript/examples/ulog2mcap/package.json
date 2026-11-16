@@ -1,0 +1,37 @@
+{
+  "name": "@foxglove/mcap-example-ulog2mcap",
+  "description": "MCAP ulog2mcap example",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc -b",
+    "lint:ci": "tsc -b && eslint .",
+    "lint": "tsc -b && eslint --fix .",
+    "typescript:test": "yarn jest --config jest.config.json",
+    "ulog2mcap": "tsc -b && tsx scripts/ulog2mcap.ts"
+  },
+  "devDependencies": {
+    "@foxglove/eslint-plugin": "2.1.2",
+    "@foxglove/tsconfig": "3.2.0",
+    "@foxglove/ulog": "2.3.1",
+    "@mcap/core": "workspace:*",
+    "@mcap/nodejs": "workspace:*",
+    "@mcap/support": "workspace:*",
+    "@types/node": "20.19.43",
+    "@typescript-eslint/eslint-plugin": "8.67.0",
+    "@typescript-eslint/parser": "8.67.0",
+    "commander": "11.1.0",
+    "eslint": "9.39.5",
+    "jest": "30.4.2",
+    "long": "5.3.2",
+    "prettier": "3.1.0",
+    "protobufjs": "^7.6.5",
+    "ts-jest": "29.4.12",
+    "tsx": "4.23.5",
+    "typescript": "5.9.3"
+  },
+  "dependencies": {
+    "@foxglove/schemas": "1.8.0"
+  }
+}
