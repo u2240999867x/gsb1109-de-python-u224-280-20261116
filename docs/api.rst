@@ -18,6 +18,12 @@ Segments and paths
 - :doc:`api/pyx12/segment/index` — segment, composite, and element model
 - :doc:`api/pyx12/path/index` — X12 path parser (XPath-style references into a transaction)
 
+Service lines
+-------------
+
+- :doc:`service_lines` — qualifier-driven service-line normalization and cross-day proration guide
+- :doc:`api/pyx12/serviceline/index` — measurement-qualifier table, quantity conversion and daily detail lines
+
 Validation
 ----------
 
