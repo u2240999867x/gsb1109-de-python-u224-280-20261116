@@ -1,4 +1,5 @@
-from .constants import PropertyAccess, ArgDirection
+from .constants import (PropertyAccess, ArgDirection, EmitsChangedSignal,
+                        PROPERTY_EMITS_CHANGED_SIGNAL)
 from .signature import SignatureTree, SignatureType
 from .validators import assert_member_name_valid, assert_interface_name_valid
 from .errors import InvalidIntrospectionError
@@ -229,6 +230,10 @@ class Property:
     :vartype access: :class:`PropertyAccess <dbus_next.PropertyAccess>`
     :ivar type: The parsed type of this property.
     :vartype type: :class:`SignatureType <dbus_next.SignatureType>`
+    :ivar emits_changed_signal: How the property is reported when it changes,
+        according to the ``org.freedesktop.DBus.Property.EmitsChangedSignal``
+        annotation. Defaults to ``true``.
+    :vartype emits_changed_signal: :class:`EmitsChangedSignal <dbus_next.EmitsChangedSignal>`
 
     :raises:
         - :class:`InvalidIntrospectionError <dbus_next.InvalidIntrospectionError>` - If the property is not a single complete type.
@@ -238,7 +243,8 @@ class Property:
     def __init__(self,
                  name: str,
                  signature: str,
-                 access: PropertyAccess = PropertyAccess.READWRITE):
+                 access: PropertyAccess = PropertyAccess.READWRITE,
+                 emits_changed_signal: EmitsChangedSignal = EmitsChangedSignal.TRUE):
         assert_member_name_valid(name)
 
         tree = SignatureTree._get(signature)
@@ -249,6 +255,7 @@ class Property:
         self.name = name
         self.signature = signature
         self.access = access
+        self.emits_changed_signal = EmitsChangedSignal.parse(emits_changed_signal)
         self.type = tree.types[0]
 
     def from_xml(element):
@@ -261,6 +268,7 @@ class Property:
 
         :raises:
             - :class:`InvalidIntrospectionError <dbus_next.InvalidIntrospectionError>` - If the XML tree is not valid introspection data.
+            - :class:`InvalidIntrospectionError <dbus_next.InvalidIntrospectionError>` - If the EmitsChangedSignal annotation is not valid.
         """
         name = element.attrib.get('name')
         signature = element.attrib.get('type')
@@ -271,7 +279,18 @@ class Property:
         if not signature:
             raise InvalidIntrospectionError('properties must have a "type" attribute')
 
-        return Property(name, signature, access)
+        emits_changed_signal = EmitsChangedSignal.TRUE
+        for child in element:
+            if child.tag != 'annotation':
+                continue
+            if child.attrib.get('name') != PROPERTY_EMITS_CHANGED_SIGNAL:
+                continue
+            try:
+                emits_changed_signal = EmitsChangedSignal.parse(child.attrib.get('value'))
+            except ValueError as e:
+                raise InvalidIntrospectionError(str(e))
+
+        return Property(name, signature, access, emits_changed_signal)
 
     def to_xml(self) -> ET.Element:
         """Convert this :class:`Property` into an :class:`xml.etree.ElementTree.Element`.
@@ -280,6 +299,13 @@ class Property:
         element.set('name', self.name)
         element.set('type', self.signature)
         element.set('access', self.access.value)
+
+        if self.emits_changed_signal != EmitsChangedSignal.TRUE:
+            annotation = ET.Element('annotation')
+            annotation.set('name', PROPERTY_EMITS_CHANGED_SIGNAL)
+            annotation.set('value', self.emits_changed_signal.value)
+            element.append(annotation)
+
         return element
 
 

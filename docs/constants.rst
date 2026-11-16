@@ -30,6 +30,12 @@ Constants
     :members:
     :undoc-members:
 
+.. autoclass:: dbus_next.EmitsChangedSignal
+    :members:
+    :undoc-members:
+
+.. autodata:: dbus_next.PROPERTY_EMITS_CHANGED_SIGNAL
+
 .. autoclass:: dbus_next.ArgDirection
     :members:
     :undoc-members:

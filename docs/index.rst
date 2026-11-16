@@ -10,6 +10,7 @@ Python DBus-Next Documentation
    type-system/index.rst
    high-level-client/index.rst
    high-level-service/index.rst
+   property-compaction.rst
    low-level-interface/index.rst
    message-bus/index.rst
    introspection

@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+* Add `dbus_next.property_compaction` to fold `PropertiesChanged` signals into
+  answer-preserving batches, with an audit record and per-observation knowable
+  state.
+* Introspection: parse and emit the
+  `org.freedesktop.DBus.Property.EmitsChangedSignal` property annotation.
+* Service: accept `emits_changed_signal` in `@dbus_property()`.
+
 ## Version 0.2.3
 
 This version contains some bugfixes and new features.

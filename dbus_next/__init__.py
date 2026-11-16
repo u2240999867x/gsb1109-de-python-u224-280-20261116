@@ -1,7 +1,8 @@
 from . import aio
 from . import glib
 from .constants import (BusType, MessageType, MessageFlag, NameFlag, RequestNameReply,
-                        ReleaseNameReply, PropertyAccess, ArgDirection, ErrorType)
+                        ReleaseNameReply, PropertyAccess, ArgDirection, ErrorType,
+                        EmitsChangedSignal, PROPERTY_EMITS_CHANGED_SIGNAL)
 from .errors import (SignatureBodyMismatchError, InvalidSignatureError, InvalidAddressError,
                      AuthError, InvalidMessageError, InvalidIntrospectionError,
                      InterfaceNotFoundError, SignalDisabledError, InvalidBusNameError,

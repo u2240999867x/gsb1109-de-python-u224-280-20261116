@@ -1,4 +1,4 @@
-from .constants import PropertyAccess
+from .constants import PropertyAccess, EmitsChangedSignal
 from .signature import SignatureTree, SignatureBodyMismatchError, Variant
 from . import introspection as intr
 from .errors import SignalDisabledError
@@ -200,7 +200,13 @@ class _Property(property):
         else:
             self.disabled = False
 
-        self.introspection = intr.Property(self.name, self.signature, self.access)
+        if 'emits_changed_signal' in options:
+            self.emits_changed_signal = EmitsChangedSignal.parse(options['emits_changed_signal'])
+        else:
+            self.emits_changed_signal = EmitsChangedSignal.TRUE
+
+        self.introspection = intr.Property(self.name, self.signature, self.access,
+                                           self.emits_changed_signal)
 
         self.__dict__['__DBUS_PROPERTY'] = True
 
@@ -245,7 +251,8 @@ class _Property(property):
 
 def dbus_property(access: PropertyAccess = PropertyAccess.READWRITE,
                   name: str = None,
-                  disabled: bool = False):
+                  disabled: bool = False,
+                  emits_changed_signal: EmitsChangedSignal = EmitsChangedSignal.TRUE):
     """A decorator to mark a class method of a :class:`ServiceInterface` to be a DBus property.
 
     The class method must be a Python getter method with a return annotation
@@ -270,6 +277,10 @@ def dbus_property(access: PropertyAccess = PropertyAccess.READWRITE,
     :param disabled: If set to true, the property will not be visible to
         clients.
     :type disabled: bool
+    :param emits_changed_signal: How changes to this property are reported.
+        The value is emitted as the ``org.freedesktop.DBus.Property.EmitsChangedSignal``
+        annotation so that clients know whether they may cache the value.
+    :type emits_changed_signal: :class:`EmitsChangedSignal <dbus_next.EmitsChangedSignal>`
 
     :example:
 
@@ -290,9 +301,16 @@ def dbus_property(access: PropertyAccess = PropertyAccess.READWRITE,
     if type(disabled) is not bool:
         raise TypeError('disabled must be a bool')
 
+    emits_changed_signal = EmitsChangedSignal.parse(emits_changed_signal)
+
     @no_type_check_decorator
     def decorator(fn):
-        options = {'name': name, 'access': access, 'disabled': disabled}
+        options = {
+            'name': name,
+            'access': access,
+            'disabled': disabled,
+            'emits_changed_signal': emits_changed_signal
+        }
         return _Property(fn, options=options)
 
     return decorator

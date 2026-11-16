@@ -77,6 +77,47 @@ class PropertyAccess(Enum):
         return self == PropertyAccess.WRITE or self == PropertyAccess.READWRITE
 
 
+class EmitsChangedSignal(Enum):
+    """The value of the ``org.freedesktop.DBus.Property.EmitsChangedSignal``
+    property annotation.
+
+    The annotation tells clients how a property is reported when it changes.
+    ``TRUE`` means a ``PropertiesChanged`` signal carries the new value,
+    ``INVALIDATED`` means the signal only says the cached value is no longer
+    valid, ``CONST`` means the value never changes, and ``FALSE`` means a
+    change may not be reported at all.
+    """
+    TRUE = 'true'  #: The property is reported with its new value.
+    INVALIDATED = 'invalidated'  #: The property must be re-read after a change.
+    CONST = 'const'  #: The property never changes.
+    FALSE = 'false'  #: Changes may not be reported.
+
+    @staticmethod
+    def parse(value: 'EmitsChangedSignal') -> 'EmitsChangedSignal':
+        """Coerce a string or boolean annotation value into this enum.
+
+        :raises: :class:`ValueError` if the value is not a valid annotation value.
+        """
+        if type(value) is EmitsChangedSignal:
+            return value
+        if type(value) is bool:
+            return EmitsChangedSignal.TRUE if value else EmitsChangedSignal.FALSE
+        if type(value) is str:
+            normalized = value.strip().lower()
+            if normalized in ('true', '1', 'yes'):
+                return EmitsChangedSignal.TRUE
+            if normalized in ('false', '0', 'no'):
+                return EmitsChangedSignal.FALSE
+            try:
+                return EmitsChangedSignal(normalized)
+            except ValueError:
+                pass
+        raise ValueError(f'invalid EmitsChangedSignal annotation value: {value!r}')
+
+
+PROPERTY_EMITS_CHANGED_SIGNAL = 'org.freedesktop.DBus.Property.EmitsChangedSignal'
+
+
 class ArgDirection(Enum):
     """For an introspected argument, indicates whether it is an input parameter or a return value.
     """
