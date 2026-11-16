@@ -11,6 +11,7 @@ Reading and writing X12
 - :doc:`api/pyx12/x12file/index` — streaming reader/writer for an X12 data stream
 - :doc:`api/pyx12/x12context/index` — context-aware parser; iterate claim loops, alter children, track state
 - :doc:`api/pyx12/rawx12file/index` — low-level interface to an X12 input stream
+- :doc:`api/pyx12/rawx12stream/index` — chunk-fed byte reader for concatenated interchanges (per-ISA delimiters, BIN payloads)
 
 Segments and paths
 ------------------
