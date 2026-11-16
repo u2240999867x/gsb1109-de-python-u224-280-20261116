@@ -4,6 +4,12 @@ Changelog
 1.5.0 (unreleased)
 ------------------
 
+- Add ``fastkml.update`` with ``apply_update``/``apply_updates`` and an
+  ``UpdateResult`` record to apply parsed ``Update``/``Create``/``Change``/
+  ``Delete`` operations to a loaded object tree by stable ``id``. Unknown
+  targets are not replaced by same-name stubs, replayed ``Create`` operations do
+  not duplicate children, and dangling references caused by a deletion are
+  reported.
 - Drop support for Python 3.9.
 - Add ``Update``, ``Create``, ``Change``, and ``Delete`` element support to
   ``NetworkLinkControl``.

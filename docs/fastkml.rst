@@ -199,6 +199,14 @@ fastkml.times
    :undoc-members:
    :show-inheritance:
 
+fastkml.update
+--------------------
+
+.. automodule:: fastkml.update
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 fastkml.types
 --------------------
 

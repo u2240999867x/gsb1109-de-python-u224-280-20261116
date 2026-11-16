@@ -86,6 +86,9 @@ from fastkml.styles import StyleUrl
 from fastkml.times import KmlDateTime
 from fastkml.times import TimeSpan
 from fastkml.times import TimeStamp
+from fastkml.update import UpdateResult
+from fastkml.update import apply_update
+from fastkml.update import apply_updates
 from fastkml.utils import find
 from fastkml.utils import find_all
 from fastkml.validator import get_schema_parser
@@ -154,7 +157,10 @@ __all__ = [
     "TimeSpan",
     "TimeStamp",
     "Update",
+    "UpdateResult",
     "ViewVolume",
+    "apply_update",
+    "apply_updates",
     "create_kml_geometry",
     "find",
     "find_all",
