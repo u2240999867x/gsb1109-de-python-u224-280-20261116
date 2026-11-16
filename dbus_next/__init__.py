@@ -12,6 +12,7 @@ from .message import Message
 from . import message_bus
 from . import proxy_object
 from . import service
+from .batch import CallOutcome, CallRecord, BatchResult, BatchCollector
 from .signature import SignatureType, SignatureTree, Variant
 from .validators import (is_bus_name_valid, is_object_path_valid, is_interface_name_valid,
                          is_member_name_valid, assert_bus_name_valid, assert_object_path_valid,
