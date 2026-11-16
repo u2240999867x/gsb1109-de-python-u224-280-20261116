@@ -16,3 +16,8 @@ from .signature import SignatureType, SignatureTree, Variant
 from .validators import (is_bus_name_valid, is_object_path_valid, is_interface_name_valid,
                          is_member_name_valid, assert_bus_name_valid, assert_object_path_valid,
                          assert_interface_name_valid, assert_member_name_valid)
+from .bridge import (Bridge, BridgeError, InvalidBridgeBodyError, MessageBridge, MessageRouter,
+                     MessageTranslator, MissingMappingError, MissingUnixFdError,
+                     RecordedMessageBridge, bridge_message, bridge_messages,
+                     bridge_recorded_message, bridge_recorded_messages,
+                     recorded_message_to_message, remap_message, translate_message)

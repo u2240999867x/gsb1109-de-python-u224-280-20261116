@@ -5,6 +5,7 @@ The Low Level Interface
    :maxdepth: 2
 
    message
+   bridge
 
 The low-level interface allows you to work with messages directly through the :class:`MessageBus <dbus_next.message_bus.BaseMessageBus>` with the :class:`Message <dbus_next.Message>` class. This might be useful in the following cases:
 

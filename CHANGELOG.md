@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+* Add :mod:`dbus_next.bridge` for translating recorded messages to an isolated bus, including signature-aware object path translation, serial/reply correlation, and UNIX_FD index remapping.
+
 ## Version 0.2.3
 
 This version contains some bugfixes and new features.

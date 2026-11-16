@@ -208,6 +208,23 @@ class Message:
 
         return True
 
+    def bridge(self, *args, **kwargs) -> 'Message':
+        """Bridge this recorded message to an isolated bus.
+
+        This is a convenience wrapper around
+        :func:`dbus_next.bridge.bridge_message`.  The arguments are the same:
+        mapping tables may be passed positionally or by keyword.
+
+        :returns: A sendable message, or ``None`` if a required mapping is
+            missing.
+        """
+        from .bridge import bridge_message
+
+        return bridge_message(self, *args, **kwargs)
+
+    translate = bridge
+    remap = bridge
+
     def _marshall(self, negotiate_unix_fd=False):
         # TODO maximum message size is 134217728 (128 MiB)
         body_block = Marshaller(self.signature, self.body)
