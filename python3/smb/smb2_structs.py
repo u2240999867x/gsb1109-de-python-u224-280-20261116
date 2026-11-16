@@ -414,6 +414,9 @@ class SMB2CreateResponse(Structure):
     - file_size (long)
     - file_attributes (integer)
     - fid (16-bytes string)
+    - create_context_offset (integer), create_context_length (integer): location of the create contexts in the raw message
+    - contexts (dict): parsed create contexts keyed by their 4-character name (e.g. 'DHnQ', 'QFid')
+    - durable_file_id (16-bytes string or None): persistent file id returned in a 'DHnQ' context for durable opens ([MS-SMB2] 2.2.14.2.12)
     - create_time, lastaccess_time, lastwrite_time, change_time (float)
 
     References:
@@ -427,16 +430,32 @@ class SMB2CreateResponse(Structure):
     def decode(self, message):
         assert message.command == SMB2_COM_CREATE
 
+        self.contexts = { }
+        self.durable_file_id = None
+        self.create_context_offset = 0
+        self.create_context_length = 0
+
         if message.status == 0:
             struct_size, self.oplock, _, self.create_action, \
             create_time, lastaccess_time, lastwrite_time, change_time, \
             self.allocation_size, self.file_size, self.file_attributes, \
-            _, self.fid, _, _ = struct.unpack(self.STRUCTURE_FORMAT, message.raw_data[SMB2Message.HEADER_SIZE:SMB2Message.HEADER_SIZE+self.STRUCTURE_SIZE])
+            _, self.fid, self.create_context_offset, self.create_context_length = struct.unpack(self.STRUCTURE_FORMAT, message.raw_data[SMB2Message.HEADER_SIZE:SMB2Message.HEADER_SIZE+self.STRUCTURE_SIZE])
 
             self.create_time = convertFILETIMEtoEpoch(create_time)
             self.lastaccess_time = convertFILETIMEtoEpoch(lastaccess_time)
             self.lastwrite_time = convertFILETIMEtoEpoch(lastwrite_time)
             self.change_time = convertFILETIMEtoEpoch(change_time)
+
+            self.contexts = { }
+            self.durable_file_id = None
+            if self.create_context_length > 0:
+                from .resume import parse_create_contexts
+                self.contexts = parse_create_contexts(message.raw_data,
+                                                       self.create_context_offset,
+                                                       self.create_context_length)
+                durable_data = self.contexts.get('DHnQ')
+                if durable_data and len(durable_data) >= 16:
+                    self.durable_file_id = durable_data[:16]
 
 
 class SMB2WriteRequest(Structure):

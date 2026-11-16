@@ -281,6 +281,26 @@ class SMBProtocolFactory(ClientFactory):
         self.instance._retrieveFileFromOffset(service_name, path, file_obj, d.callback, d.errback, offset, max_length, timeout = timeout)
         return d
 
+    def retrieveFileResume(self, service_name, path, local_path, timeout = 30, show_progress = False, tqdm_kwargs = {}):
+        """
+        Reliably retrieve *path* into *local_path*, resuming after interruptions.
+
+        See :meth:`smb.SMBConnection.SMBConnection.retrieveFileResume` for the
+        fragment/token layout and recovery semantics. Requires an SMB2 session;
+        otherwise :class:`smb.smb_structs.UnsupportedFeature` is raised.
+
+        :return: a *twisted.internet.defer.Deferred* whose callback receives a
+                 2-element tuple of ( file attributes, final file size ).
+        """
+        if not self.instance:
+            raise NotConnectedError('Not connected to server')
+
+        d = defer.Deferred()
+        self.instance._resumableRetrieveFile_SMB2(service_name, path, local_path, d.callback, d.errback,
+                                                  timeout = timeout, show_progress = show_progress,
+                                                  tqdm_kwargs = tqdm_kwargs)
+        return d
+
     def storeFile(self, service_name, path, file_obj, timeout = 30):
         """
         Store the contents of the *file_obj* at *path* on the *service_name*.

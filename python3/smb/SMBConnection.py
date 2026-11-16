@@ -361,6 +361,56 @@ class SMBConnection(SMB):
 
         return results[0]
 
+    def retrieveFileResume(self, service_name, path, local_path, timeout = 30, show_progress = False, tqdm_kwargs = {}):
+        """
+        Reliably retrieve the file at *path* on *service_name* into *local_path*,
+        resuming automatically after an interrupted download.
+
+        A partial fragment (``<local_path>.part``) and a sidecar resume token
+        (``<local_path>.smbresume``) record the remote file identity, version
+        evidence (size, timestamps) and the confirmed byte range. On retry:
+
+        * an SMB2 durable handle is reattached when the server still holds it;
+        * otherwise the file is reopened by path and the fragment is reused only
+          when the version evidence still matches;
+        * when the version cannot be confirmed, or the path now refers to a
+          different file, the old fragment is moved to ``<local_path>.archive``
+          and the full file is re-read. The archived bytes are never spliced.
+
+        This method requires an SMB2 connection; SMB1 raises
+        :class:`smb.smb_structs.UnsupportedFeature`.
+
+        :param string/unicode service_name: the name of the shared folder for the *path*
+        :param string/unicode path: path of the file on the remote server.
+        :param string local_path: local filesystem path where the completed file will be written.
+        :param bool show_progress: if True, show a tqdm progress bar.
+        :return: a 2-element tuple of ( file attributes, final file size in bytes ).
+        """
+        if not self.sock:
+            raise NotConnectedError('Not connected to server')
+
+        results = [ ]
+
+        def cb(r):
+            self.is_busy = False
+            results.append(r)
+
+        def eb(failure):
+            self.is_busy = False
+            raise failure
+
+        self.is_busy = True
+        try:
+            self._resumableRetrieveFile_SMB2(service_name, path, local_path, cb, eb,
+                                             timeout = timeout, show_progress = show_progress,
+                                             tqdm_kwargs = tqdm_kwargs)
+            while self.is_busy:
+                self._pollForNetBIOSPacket(timeout)
+        finally:
+            self.is_busy = False
+
+        return results[0]
+
     def storeFile(self, service_name, path, file_obj, timeout = 30, show_progress = False, tqdm_kwargs = {}):
         """
         Store the contents of the *file_obj* at *path* on the *service_name*.

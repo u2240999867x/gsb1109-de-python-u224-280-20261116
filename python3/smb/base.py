@@ -1,5 +1,5 @@
 
-import logging, binascii, time, hmac
+import logging, binascii, time, hmac, os
 from datetime import datetime
 from tqdm import tqdm
 
@@ -11,6 +11,7 @@ from .security_descriptors import SecurityDescriptor
 from nmb.base import NMBSession
 from .utils import convertFILETIMEtoEpoch, convertEpochToFILETIME
 from . import ntlm, securityblob
+from . import resume
 from .strategy import DataFaultToleranceStrategy
 
 try:
@@ -95,6 +96,8 @@ class SMB(NMBSession):
         self.max_write_size = 0     #: Similar to MaxWriteSize as described in [MS-SMB2] 2.2.4
         self.max_transact_size = 0  #: Similar to MaxTransactSize as described in [MS-SMB2] 2.2.4
         self.session_id = 0         #: Similar to SessionID as described in [MS-SMB2] 2.2.4. This will be set in _updateState_SMB2 method
+        self.dialect_revision = None  #: SMB2 dialect negotiated with the server (see smb2_constants.SMB2_DIALECT_*); None until SMB2 negotiation completes
+        self.server_guid = None      #: 16-byte SMB2 server GUID from the negotiate response, used to validate durable reconnects
 
         # tqdm attributes for tracking progress
         self.pbar = None            #: If not None, it means there is an active tqdm progress bar being shown
@@ -354,6 +357,8 @@ class SMB(NMBSession):
         self.max_read_size = payload.max_read_size
         self.max_write_size = payload.max_write_size
         self.use_plaintext_authentication = False   # SMB2 never allows plaintext authentication
+        self.dialect_revision = payload.dialect_revision
+        self.server_guid = getattr(payload, 'server_guid', None)
 
 
     def _handleNegotiateResponse_SMB2(self, message):
@@ -1047,6 +1052,390 @@ c8 4f 32 4b 70 16 d3 01 12 78 5a 47 bf 6e e1 88
             self._pushToArray(messages_history, m)
         else:
             sendCreate(self.connected_trees[service_name])
+
+    #
+    # SMB2 Resumable Retrieval (durable handles + resume tokens)
+    #
+
+    def _build_durable_read_create_context(self, create_guid):
+        """Build the standard read create contexts with an added durable request."""
+        return resume.chain_create_contexts([
+            resume.build_durable_create_context(create_guid),
+            resume.build_mxac_context(),
+            resume.build_qfid_context(),
+        ])
+
+    def _build_plain_read_create_context(self):
+        """Standard read create contexts without any durable-handle request."""
+        return resume.chain_create_contexts([
+            resume.build_mxac_context(),
+            resume.build_qfid_context(),
+        ])
+
+    def _reconnectDurableHandle_SMB2(self, service_name, path, persistent_file_id, create_guid, callback, errback, timeout):
+        """
+        Reopen *path* with an SMB2_CREATE_CONTEXT carrying the DHnQ reconnect blob
+        ([MS-SMB2] 2.2.13.2.13). *callback* receives ``(tid, fid)`` on success.
+        On refusal the errback receives a :class:`smb.resume.DurableReconnectFailed`.
+        """
+        expiry_time = time.time() + timeout
+        messages_history = [ ]
+        reconnect_context = resume.build_durable_reconnect_context(persistent_file_id, create_guid)
+
+        def sendCreate(tid):
+            m = SMB2Message(SMB2CreateRequest(path,
+                                              file_attributes = 0,
+                                              access_mask = FILE_READ_DATA | FILE_READ_EA | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE,
+                                              share_access = FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                              oplock = SMB2_OPLOCK_LEVEL_NONE,
+                                              impersonation = SEC_IMPERSONATE,
+                                              create_options = FILE_SEQUENTIAL_ONLY | FILE_NON_DIRECTORY_FILE,
+                                              create_disp = FILE_OPEN,
+                                              create_context_data = reconnect_context))
+            m.tid = tid
+            self._sendSMBMessage(m)
+            self.pending_requests[m.mid] = _PendingRequest(m.mid, expiry_time, createCB, errback, tid = tid)
+            self._pushToArray(messages_history, m)
+
+        def createCB(create_message, **kwargs):
+            self._pushToArray(messages_history, create_message)
+            if create_message.status == 0:
+                callback(( kwargs['tid'], create_message.payload.fid ))
+            else:
+                errback(resume.DurableReconnectFailed(create_message.status,
+                                                       'server refused durable reconnect for %s on %s' % ( path, service_name )))
+
+        if service_name not in self.connected_trees:
+            def connectCB(connect_message, **kwargs):
+                self._pushToArray(messages_history, connect_message)
+                if connect_message.status == 0:
+                    self.connected_trees[service_name] = connect_message.tid
+                    sendCreate(connect_message.tid)
+                else:
+                    errback(resume.DurableReconnectFailed(connect_message.status,
+                                                           'unable to connect to shared device %s' % service_name))
+
+            m = SMB2Message(SMB2TreeConnectRequest(r'\\%s\%s' % ( self.remote_name.upper(), service_name )))
+            self._sendSMBMessage(m)
+            self.pending_requests[m.mid] = _PendingRequest(m.mid, expiry_time, connectCB, errback, path = service_name)
+            self._pushToArray(messages_history, m)
+        else:
+            sendCreate(self.connected_trees[service_name])
+
+    def _resumableRetrieveFile_SMB2(self, service_name, path, local_path, callback, errback,
+                                    timeout = 30, show_progress = False, tqdm_kwargs = { }):
+        """
+        Reliably retrieve *path* into *local_path*, surviving connection drops.
+
+        Identity (share/path, durable ids), version evidence (size, mtime, change
+        time) and the confirmed byte range are persisted in a sidecar resume token
+        after every acknowledged read. A persistent handle reconnect and a plain
+        path-based reopen are handled as distinct recovery modes; when the version
+        cannot be re-established the old fragment is archived instead of spliced.
+        """
+        if not self.has_authenticated:
+            raise NotReadyError('SMB connection not authenticated')
+        if not self.is_using_smb2:
+            from .smb_structs import UnsupportedFeature
+            raise UnsupportedFeature('Resumable retrieval is only available over SMB2 connections')
+
+        normalized_path = path.replace('/', '\\')
+        if normalized_path.startswith('\\'):
+            normalized_path = normalized_path[1:]
+        if normalized_path.endswith('\\'):
+            normalized_path = normalized_path[:-1]
+
+        state = {
+            'plan': None,
+            'part_file': None,
+            'messages_history': [ ],
+            'expiry_time': time.time() + timeout,
+        }
+
+        def attrCB(remote_attrs):
+            plan = resume.decide_resume(True, self.dialect_revision, remote_attrs,
+                                        service_name, normalized_path, local_path)
+            self.log.info('Resume plan for %s on %s: %s', normalized_path, service_name, plan.reason)
+            state['plan'] = plan
+            if plan.mode == resume.ResumePlan.HANDLE_PENDING:
+                self._reconnectDurableHandle_SMB2(service_name, normalized_path,
+                                                   plan.token.durable_file_id,
+                                                   plan.token.durable_create_guid,
+                                                   durableConnectCB, durableConnectErrback, timeout)
+            elif plan.mode == resume.ResumePlan.FRESH:
+                # Durable handles (DHnQ) only exist from SMB 2.1 onward; older
+                # dialects get a plain open and resume by path only.
+                if self.dialect_revision is not None and self.dialect_revision >= resume.SMB2_DIALECT_21:
+                    create_guid = os.urandom(16)
+                else:
+                    create_guid = None
+                openForRead(None, create_guid)
+            else:
+                openForRead(None, None)
+
+        def durableConnectCB(handle):
+            plan = state['plan']
+            tid, fid = handle
+            resume.upgrade_handle_plan(plan, tid, fid,
+                                       'Durable handle reattached for %s on %s; continuing from confirmed offset %d.'
+                                       % ( normalized_path, service_name, plan.confirmed_offset ))
+            verifyReattachedSize(tid, fid)
+
+        def verifyReattachedSize(tid, fid):
+            # FileStandardInformation ([MS-FSCC] 2.4.40): EndOfFile is the second QWORD.
+            m = SMB2Message(SMB2QueryInfoRequest(fid,
+                                                  flags = 0,
+                                                  additional_info = 0,
+                                                  info_type = SMB2_INFO_FILE,
+                                                  file_info_class = 0x05,
+                                                  input_buf = b'',
+                                                  output_buf_len = 4096))
+            m.tid = tid
+            self._sendSMBMessage(m)
+            self.pending_requests[m.mid] = _PendingRequest(m.mid, int(time.time()) + timeout, sizeInfoCB, errback,
+                                                           tid = tid, fid = fid)
+
+        def sizeInfoCB(info_message, **kwargs):
+            plan = state['plan']
+            if info_message.status != 0:
+                # Without a size proof the reattached handle cannot be trusted to resume.
+                reason = ('Durable handle for %s on %s was reattached but its size could not be verified (status 0x%08x).'
+                          % ( normalized_path, service_name, info_message.status ))
+                closeFidQuietly(kwargs['tid'], kwargs['fid'])
+                resume.downgrade_handle_plan_to_path(plan, reason)
+                openForRead(None, None)
+                return
+
+            current_size = struct.unpack('<Q', info_message.payload.data[8:16])[0]
+            if current_size < plan.confirmed_offset:
+                reason = ('Reattached durable file %s on %s was truncated to %d bytes, smaller than the confirmed offset %d; '
+                          'archiving the fragment and requiring a full re-read.'
+                          % ( normalized_path, service_name, current_size, plan.confirmed_offset ))
+                closeFidQuietly(kwargs['tid'], kwargs['fid'])
+                archived = resume.archive_fragment(local_path, reason)
+                safe_abort(plan, reason + (' Archived at %s.' % archived if archived else ''))
+                return
+            if current_size != plan.token.file_size:
+                self.log.warning('Reattached durable file %s on %s grew from %d to %d bytes; extending the download and keeping the confirmed prefix.',
+                                 normalized_path, service_name, plan.token.file_size, current_size)
+                plan.token.file_size = current_size
+                resume.save_resume_token(plan.token)
+
+            state['part_file'] = open(plan.fragment_path, 'ab')
+            beginReads(kwargs['tid'], kwargs['fid'], plan.confirmed_offset,
+                       plan.token.file_size - plan.confirmed_offset, plan.token.file_attributes)
+
+        def durableConnectErrback(failure):
+            plan = state['plan']
+            reason = ('Durable handle for %s on %s could not be reattached (%s); reopening by path. '
+                      'Version evidence still matches, so the confirmed fragment is retained.'
+                      % ( normalized_path, service_name, failure ))
+            resume.downgrade_handle_plan_to_path(plan, reason)
+            self.log.warning(reason)
+            openForRead(None, None)
+
+        def openForRead(_ignored, create_guid):
+            expiry_time = time.time() + timeout
+            state['expiry_time'] = expiry_time
+            messages_history = state['messages_history']
+            if create_guid is not None:
+                create_context_data = self._build_durable_read_create_context(create_guid)
+            else:
+                create_context_data = self._build_plain_read_create_context()
+
+            def sendCreate(tid):
+                m = SMB2Message(SMB2CreateRequest(normalized_path,
+                                                  file_attributes = 0,
+                                                  access_mask = FILE_READ_DATA | FILE_READ_EA | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE,
+                                                  share_access = FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                                  oplock = SMB2_OPLOCK_LEVEL_NONE,
+                                                  impersonation = SEC_IMPERSONATE,
+                                                  create_options = FILE_SEQUENTIAL_ONLY | FILE_NON_DIRECTORY_FILE,
+                                                  create_disp = FILE_OPEN,
+                                                  create_context_data = create_context_data))
+                m.tid = tid
+                self._sendSMBMessage(m)
+                self.pending_requests[m.mid] = _PendingRequest(m.mid, expiry_time, createCB, errback,
+                                                               tid = tid, create_guid = create_guid)
+                self._pushToArray(messages_history, m)
+
+            def createCB(create_message, **kwargs):
+                self._pushToArray(messages_history, create_message)
+                if create_message.status != 0:
+                    errback(OperationFailure('Failed to retrieve %s on %s: Unable to open file' % ( normalized_path, service_name ), messages_history))
+                    return
+                onFileOpened(kwargs['tid'], create_message.payload, kwargs['create_guid'])
+
+            if service_name not in self.connected_trees:
+                def connectCB(connect_message, **kwargs):
+                    self._pushToArray(messages_history, connect_message)
+                    if connect_message.status == 0:
+                        self.connected_trees[service_name] = connect_message.tid
+                        sendCreate(connect_message.tid)
+                    else:
+                        errback(OperationFailure('Failed to retrieve %s on %s: Unable to connect to shared device' % ( normalized_path, service_name ), messages_history))
+
+                m = SMB2Message(SMB2TreeConnectRequest(r'\\%s\%s' % ( self.remote_name.upper(), service_name )))
+                self._sendSMBMessage(m)
+                self.pending_requests[m.mid] = _PendingRequest(m.mid, expiry_time, connectCB, errback, path = service_name)
+                self._pushToArray(messages_history, m)
+            else:
+                sendCreate(self.connected_trees[service_name])
+
+        def onFileOpened(tid, create_payload, create_guid):
+            plan = state['plan']
+            durable_file_id = create_payload.durable_file_id
+            if plan.mode == resume.ResumePlan.FRESH:
+                plan.token.file_attributes = create_payload.file_attributes
+                plan.token.file_size = create_payload.file_size
+                plan.token.durable_create_guid = create_guid
+                plan.token.durable_file_id = durable_file_id
+                plan.token.confirmed_offset = 0
+                resume.save_resume_token(plan.token)
+                state['part_file'] = open(plan.fragment_path, 'wb')
+                start_offset = 0
+                remaining_len = create_payload.file_size
+            else:
+                # PATH mode: the path may have been replaced between the
+                # attribute probe and the open. Re-validate both size and mtime
+                # before appending anything; on mismatch archive the fragment.
+                if (create_payload.file_size != plan.token.file_size
+                        or create_payload.lastwrite_time != plan.token.last_write_time):
+                    reason = ('File at %s on %s no longer matches the recorded version during path reopen '
+                              '(token: size=%d mtime=%s; reopened: size=%d mtime=%s). Archiving the old fragment.'
+                              % ( normalized_path, service_name, plan.token.file_size, plan.token.last_write_time,
+                                  create_payload.file_size, create_payload.lastwrite_time ))
+                    closeFidQuietly(tid, create_payload.fid)
+                    archived = resume.archive_fragment(local_path, reason)
+                    safe_abort(plan, reason + (' Archived at %s.' % archived if archived else ''))
+                    return
+                state['part_file'] = open(plan.fragment_path, 'ab')
+                start_offset = plan.confirmed_offset
+                remaining_len = plan.token.file_size - start_offset
+                if remaining_len < 0:
+                    reason = ('Remote file %s on %s is now shorter (%d bytes) than the confirmed fragment offset %d; '
+                              'archiving the fragment and requiring a full re-read.'
+                              % ( normalized_path, service_name, plan.token.file_size, start_offset ))
+                    closeFidQuietly(tid, create_payload.fid)
+                    archived = resume.archive_fragment(local_path, reason)
+                    safe_abort(plan, reason + (' Archived at %s.' % archived if archived else ''))
+                    return
+
+            if remaining_len <= 0:
+                closeFid(tid, create_payload.fid)
+            else:
+                beginReads(tid, create_payload.fid, start_offset, remaining_len, create_payload.file_attributes)
+
+        def beginReads(tid, fid, start_offset, remaining_len, file_attributes):
+            plan = state['plan']
+            if show_progress:
+                tqdm_kwargs.setdefault("total", remaining_len)
+                tqdm_kwargs.setdefault("unit", "B")
+                tqdm_kwargs.setdefault("unit_scale", True)
+                tqdm_kwargs.setdefault("unit_divisor", 1024)
+                tqdm_kwargs.setdefault("desc", f"Downloading {normalized_path}")
+                self.pbar = tqdm(**tqdm_kwargs)
+            sendRead(tid, fid, start_offset, remaining_len, 0, file_attributes)
+
+        def sendRead(tid, fid, offset, remaining_len, read_len, file_attributes):
+            read_count = min(self.max_read_size, remaining_len)
+            m = SMB2Message(SMB2ReadRequest(fid, offset, read_count))
+            m.tid = tid
+            self._sendSMBMessage(m)
+            self.pending_requests[m.mid] = _PendingRequest(m.mid, int(time.time()) + timeout, readCB, errback,
+                                                           tid = tid, fid = fid, offset = offset,
+                                                           remaining_len = remaining_len,
+                                                           read_len = read_len,
+                                                           file_attributes = file_attributes)
+
+        def readCB(read_message, **kwargs):
+            plan = state['plan']
+            if read_message.status != 0:
+                self._pushToArray(state['messages_history'], read_message)
+                safe_abort(plan, 'Read of %s on %s failed with status 0x%08x; fragment and resume token retained for the next attempt.'
+                           % ( normalized_path, service_name, read_message.status ))
+                return
+
+            data_len = read_message.payload.data_length
+            if data_len == 0 and kwargs['remaining_len'] > 0:
+                # Unexpected EOF: the remote file was likely truncated after the
+                # open. Stop instead of spinning on zero-length reads.
+                safe_abort(plan, 'Read of %s on %s returned no data at offset %d with %d bytes still expected; '
+                           'fragment retained and a full re-read will be forced if the file changed.'
+                           % ( normalized_path, service_name, kwargs['offset'], kwargs['remaining_len'] ))
+                return
+
+            part_file = state['part_file']
+            part_file.write(read_message.payload.data)
+            part_file.flush()
+            os.fsync(part_file.fileno())
+
+            plan.token.confirmed_offset = kwargs['offset'] + data_len
+            resume.save_resume_token(plan.token)
+
+            remaining_len = kwargs['remaining_len'] - data_len
+            if self.pbar:
+                self.pbar.update(data_len)
+
+            if remaining_len > 0:
+                sendRead(kwargs['tid'], kwargs['fid'], kwargs['offset'] + data_len, remaining_len,
+                         kwargs['read_len'] + data_len, kwargs['file_attributes'])
+            else:
+                if self.pbar:
+                    self.pbar.close()
+                    self.pbar = None
+                closeFid(kwargs['tid'], kwargs['fid'])
+
+        def closeFid(tid, fid):
+            m = SMB2Message(SMB2CloseRequest(fid))
+            m.tid = tid
+            self._sendSMBMessage(m)
+            self.pending_requests[m.mid] = _PendingRequest(m.mid, state['expiry_time'], closeCB, errback)
+
+        def closeFidQuietly(tid, fid):
+            # Best-effort CLOSE used on an abort path; its reply is deliberately ignored.
+            def noopCB(_close_message, **_kwargs):
+                pass
+            try:
+                m = SMB2Message(SMB2CloseRequest(fid))
+                m.tid = tid
+                self._sendSMBMessage(m)
+                self.pending_requests[m.mid] = _PendingRequest(m.mid, state['expiry_time'], noopCB, noopCB)
+            except Exception:
+                pass
+
+        def closeCB(close_message, **kwargs):
+            if close_message.status != 0:
+                errback(OperationFailure('Failed to retrieve %s on %s: Close failed' % ( normalized_path, service_name ), state['messages_history']))
+                return
+            finishSuccess()
+
+        def finishSuccess():
+            plan = state['plan']
+            if state['part_file'] is not None:
+                state['part_file'].close()
+                state['part_file'] = None
+            local_file_size = os.path.getsize(plan.fragment_path)
+            if local_file_size != plan.token.file_size:
+                safe_abort(plan, 'Completed fragment for %s on %s has %d bytes but token records %d; not promoting it.'
+                           % ( normalized_path, service_name, local_file_size, plan.token.file_size ))
+                return
+            resume.finalize_resume(local_path)
+            callback(( plan.token.file_attributes, plan.token.file_size ))
+
+        def safe_abort(plan, reason):
+            # The remote handle is deliberately left open: closing it would tear
+            # down the durable state that a later reconnect relies on.
+            if state['part_file'] is not None:
+                state['part_file'].close()
+                state['part_file'] = None
+            if self.pbar is not None:
+                self.pbar.close()
+                self.pbar = None
+            self.log.warning(reason)
+            errback(resume.ResumeError(reason))
+
+        self._getAttributes(service_name, path, attrCB, errback, timeout = timeout)
 
     def _storeFile_SMB2(self, service_name, path, file_obj, callback, errback, timeout = 30):
         self._storeFileFromOffset_SMB2(service_name, path, file_obj, callback, errback, 0, True, timeout)
