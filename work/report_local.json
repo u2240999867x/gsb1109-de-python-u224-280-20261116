@@ -1,0 +1,148 @@
+{
+  "ack_999": [
+    "ISA*00*          *00*          *ZZ*RECEIVER       *ZZ*SENDER         *261117*0118*^*00501*611170118*0*P*:~",
+    "GS*FA*RECEIVER*SENDER*20261117*011803*97855970*X*005010X231~",
+    "ST*999*0001*005010X231~",
+    "AK1*HC*92*005010X222A1~",
+    "AK2*837*0001*005010X222A1~",
+    "IK3*CLM*18**8~",
+    "IK4*6*1073*7*X~",
+    "IK3*DTP*22**8~",
+    "IK4*3*1251*8*20261310~",
+    "IK3*SV1*24**8~",
+    "IK4*3*355*7*XX~",
+    "IK5*R*5~",
+    "AK9*R*1*1*0~",
+    "SE*12*0001~",
+    "GE*1*97855970~",
+    "IEA*1*611170118~"
+  ],
+  "transactions": [
+    {
+      "trn_set_id": "837",
+      "st_control_num": "0001",
+      "ack_code_emitted": "R",
+      "disposition": "local_errors",
+      "disposition_reason": "structure complete; segment/element findings only (spec IK501=E accepted with errors; pyx12 emits R*5)",
+      "findings": [
+        {
+          "reported_seg_id": "CLM",
+          "ik302_position": 18,
+          "map_name": "Claim Information",
+          "segment_errors": [
+            {
+              "code": "SEG_8_has_data_element_errors",
+              "meaning": "Segment Has Data Element Errors (8)"
+            }
+          ],
+          "element_findings": [
+            {
+              "refdes": "CLM06",
+              "element_position": 6,
+              "component_position": null,
+              "element_ref_num": "1073",
+              "element_name": "Provider or Supplier Signature Indicator",
+              "claim_id": "PC-20261117-001",
+              "service_line_id": null,
+              "errors": [
+                {
+                  "code": "ELE_7_invalid_code",
+                  "meaning": "Invalid Code Value (7)"
+                }
+              ],
+              "actual_value": "X",
+              "conflict": null
+            }
+          ],
+          "conflict": null,
+          "source": {
+            "seg_id": "CLM",
+            "position": 18,
+            "line_no": 20,
+            "claim_id": "PC-20261117-001",
+            "service_line_id": null,
+            "raw_segment": "CLM*PC-20261117-001*150***11:B:1*X*A*Y*Y~"
+          }
+        },
+        {
+          "reported_seg_id": "DTP",
+          "ik302_position": 22,
+          "map_name": "Date - Service Date",
+          "segment_errors": [
+            {
+              "code": "SEG_8_has_data_element_errors",
+              "meaning": "Segment Has Data Element Errors (8)"
+            }
+          ],
+          "element_findings": [
+            {
+              "refdes": "DTP03",
+              "element_position": 3,
+              "component_position": null,
+              "element_ref_num": "1251",
+              "element_name": "Service Date",
+              "claim_id": "PC-20261117-001",
+              "service_line_id": "1",
+              "errors": [
+                {
+                  "code": "ELE_8_invalid_date_range",
+                  "meaning": "Invalid Date (8)"
+                }
+              ],
+              "actual_value": "20261310",
+              "conflict": null
+            }
+          ],
+          "conflict": null,
+          "source": {
+            "seg_id": "DTP",
+            "position": 22,
+            "line_no": 24,
+            "claim_id": "PC-20261117-001",
+            "service_line_id": "1",
+            "raw_segment": "DTP*472*D8*20261310~"
+          }
+        },
+        {
+          "reported_seg_id": "SV1",
+          "ik302_position": 24,
+          "map_name": "Professional Service",
+          "segment_errors": [
+            {
+              "code": "SEG_8_has_data_element_errors",
+              "meaning": "Segment Has Data Element Errors (8)"
+            }
+          ],
+          "element_findings": [
+            {
+              "refdes": "SV103",
+              "element_position": 3,
+              "component_position": null,
+              "element_ref_num": "355",
+              "element_name": "Unit or Basis for Measurement Code",
+              "claim_id": "PC-20261117-001",
+              "service_line_id": "2",
+              "errors": [
+                {
+                  "code": "ELE_7_invalid_code",
+                  "meaning": "Invalid Code Value (7)"
+                }
+              ],
+              "actual_value": "XX",
+              "conflict": null
+            }
+          ],
+          "conflict": null,
+          "source": {
+            "seg_id": "SV1",
+            "position": 24,
+            "line_no": 26,
+            "claim_id": "PC-20261117-001",
+            "service_line_id": "2",
+            "raw_segment": "SV1*HC:80053*50*XX*1***1~"
+          }
+        }
+      ]
+    }
+  ]
+}
