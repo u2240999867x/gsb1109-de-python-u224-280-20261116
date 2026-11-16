@@ -110,6 +110,7 @@ to be bound by the terms and conditions of this License Agreement.
 import re,sys
 from . import StarFile
 from .StarFile import StarList, StarPacket  # put in global scope for exec statement
+from .StarFile import StarUnknown, StarInapplicable, is_unknown_value, is_inapplicable_value
 from . import CifSyntaxError
 try:
     import numpy                   #put in global scope for exec statement
@@ -1154,16 +1155,28 @@ class CifDic(StarFile.StarFile):
     #                                                                         
     # <Parse DDLm validity information>=                                      
     def ddlm_parse_valid(self):
-        if "_dictionary_valid.scope" not in self.master_block:
-            return
-        for scope_pack in self.master_block.GetLoop("_dictionary_valid.scope"):
-            scope = getattr(scope_pack,"_dictionary_valid.scope")
-            stance = getattr(scope_pack, "_dictionary_valid.option")
-            valid_info = getattr(scope_pack,"_dictionary_valid.attributes")
-            if stance == "Mandatory":
-                self.scopes_mandatory[scope] = self.expand_category_opt(valid_info)
-            elif stance == "Prohibited":
-                self.scopes_naughty[scope] = self.expand_category_opt(valid_info)
+        if "_dictionary_valid.application" in self.master_block:
+            # Current DDLm dictionaries provide the scope and the validity
+            # option together as a two-element list.
+            for scope_pack in self.master_block.GetLoop("_dictionary_valid.application"):
+                application = listify(getattr(scope_pack,"_dictionary_valid.application"))
+                scope = application[0]
+                stance = application[-1]
+                valid_info = getattr(scope_pack,"_dictionary_valid.attributes")
+                self.record_validity_info(scope,stance,valid_info)
+        elif "_dictionary_valid.scope" in self.master_block:
+            # Older arrangement with scope and option in separate columns
+            for scope_pack in self.master_block.GetLoop("_dictionary_valid.scope"):
+                scope = getattr(scope_pack,"_dictionary_valid.scope")
+                stance = getattr(scope_pack, "_dictionary_valid.option")
+                valid_info = getattr(scope_pack,"_dictionary_valid.attributes")
+                self.record_validity_info(scope,stance,valid_info)
+
+    def record_validity_info(self,scope,stance,valid_info):
+        if stance == "Mandatory":
+            self.scopes_mandatory[scope] = self.expand_category_opt(valid_info)
+        elif stance == "Prohibited":
+            self.scopes_naughty[scope] = self.expand_category_opt(valid_info)
 
     # Section{DDLm functionality}                                             
     #                                                                         
@@ -3828,18 +3841,37 @@ class CifDic(StarFile.StarFile):
     #                                                                         
     # <Process DDLm mandatory information>=                                   
     def check_mandatory_items(self,whole_block,default_scope='Item'):
-        """Return an error if any mandatory items are missing"""
+        """Return an error if any mandatory items are missing.  A mandatory
+        item that is present but whose values are all unknown (`?') has not
+        been submitted and is reported as such; an item whose value is
+        inapplicable (`.') has been explicitly declared and is not reported."""
         if len(self.scopes_mandatory)== 0: return {"result":True}
         if default_scope == 'Datablock':
             return {"result":True}     #is a data file
         scope = whole_block.get('_definition.scope',default_scope)
         if '_dictionary.title' in whole_block:
            scope = 'Dictionary'
-        missing = list([a for a in self.scopes_mandatory[scope] if a not in whole_block])
-        if len(missing)==0:
+        mandatory_items = self.scopes_mandatory[scope]
+        missing = list([a for a in mandatory_items if a not in whole_block])
+        # Check the declared values of those mandatory items that are
+        # present.  Only genuinely unknown (unquoted `?') values mark the
+        # item as not submitted; inapplicable (`.') values and quoted text
+        # are explicit declarations and so are accepted.
+        not_submitted = []
+        for item_name in mandatory_items:
+            if item_name in missing:
+                continue
+            try:
+                item_value = whole_block.GetFullItemValue(item_name)[0]
+            except (KeyError,AttributeError):
+                continue
+            value_list = listify(item_value)
+            if len(value_list) > 0 and all([is_unknown_value(v) for v in value_list]):
+                not_submitted.append(item_name)
+        if len(missing)==0 and len(not_submitted)==0:
             return {"result":True}
         else:
-            return {"result":False,"bad_items":missing}
+            return {"result":False,"bad_items":missing,"not_submitted":not_submitted}
 
     # <Process DDLm prohibited information>=                                  
     def check_prohibited_items(self,whole_block,default_scope='Item'):

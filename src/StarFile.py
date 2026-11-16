@@ -151,7 +151,59 @@ class StarDict(dict):
     pass
 
 
-# \section{Loop Block class}                                              
+# \section{Special CIF data values}
+#
+# CIF assigns special meanings to the unquoted data values `?' (the
+# value is unknown) and `.' (the value is not applicable).  These must be
+# distinguished from the genuine text values `?' and `.' that appear
+# inside quotes, as well as from empty text values (`'' or `""').  We
+# therefore represent unquoted `?' and `.' using the following string
+# subclasses.  As they inherit from `str' and hold the same characters,
+# all existing comparisons (e.g. `value == "?"') continue to work,
+# while the distinct types allow output routines to reproduce the
+# original unquoted form and validation routines to treat unknown and
+# inapplicable values differently.
+#
+# <Special CIF data values>=
+class StarUnknown(unicode):
+    """An unquoted `?' data value: the value is unknown."""
+    def __new__(cls,value=None):
+        return super(StarUnknown,cls).__new__(cls,"?")
+    def __repr__(self):
+        return "StarUnknown()"
+
+class StarInapplicable(unicode):
+    """An unquoted `.' data value: the value is not applicable."""
+    def __new__(cls,value=None):
+        return super(StarInapplicable,cls).__new__(cls,".")
+    def __repr__(self):
+        return "StarInapplicable()"
+
+def is_unknown_value(value):
+    """True if `value' is an unquoted `?' (unknown) CIF data value"""
+    return isinstance(value,StarUnknown)
+
+def is_inapplicable_value(value):
+    """True if `value' is an unquoted `.' (not applicable) CIF data value"""
+    return isinstance(value,StarInapplicable)
+
+def cif_value_from_token(raw_token):
+    """Convert a raw scanned token into a Python value, preserving the CIF
+    value kind.  Unquoted `?' and `.' become StarUnknown and StarInapplicable
+    respectively, quoted tokens become ordinary (unicode) strings with the
+    delimiters removed, and anything else is returned unchanged."""
+    if raw_token and raw_token[0] not in '\'"':
+        if raw_token == "?":
+            return StarUnknown()
+        if raw_token == ".":
+            return StarInapplicable()
+        return raw_token
+    if len(raw_token) >= 2 and raw_token[0] in '\'"' and raw_token[-1] == raw_token[0]:
+        return raw_token[1:-1]
+    return raw_token
+
+
+# \section{Loop Block class}
 #                                                                         
 # A LoopBlock is provided as a row-based interface to a collection of     
 # columns, so that iteration over packets is possible.  It is             
@@ -993,6 +1045,8 @@ class StarBlock(object):
     def regularise_data(self,dataitem):
         """Place dataitem into a list if necessary"""
         from numbers import Number
+        if isinstance(dataitem,(StarUnknown,StarInapplicable)):
+            return dataitem,None   #preserve the special CIF value kind
         if isinstance(dataitem,str):
             return unicode(dataitem),None
         if isinstance(dataitem,(Number,unicode,StarList,StarDict)):
@@ -1705,10 +1759,20 @@ class StarBlock(object):
     def _formatstring(self, instring, delimiter=None, standard='CIF1', indent=0, hints=None):
         if hints is None:
             hints = {}
+        # Unquoted `?' and `.' values are output verbatim: they carry the
+        # special CIF meanings of `unknown' and `not applicable'.
+        if isinstance(instring,StarUnknown):
+            return "?"
+        if isinstance(instring,StarInapplicable):
+            return "."
         if hints.get("reformat",False) and "\n" in instring:
             instring = "\n"+self.do_wrapping(instring,hints["reformat_indent"])
         allowed_delimiters = set(self.string_delimiters)
         if len(instring)==0: allowed_delimiters.difference_update([None])
+        # A genuine text value of `?' or `.' must be quoted, otherwise it
+        # would be read back as the special unknown/inapplicable values.
+        if instring == "?" or instring == ".":
+            allowed_delimiters.difference_update([None])
         if len(instring) > (self.maxoutlength-2) or '\n' in instring:
                 allowed_delimiters.intersection_update(["\n;","'''",'"""'])
         [allowed_delimiters.difference_update([None]) for k in '[]{}\v\t ,' if k in instring]

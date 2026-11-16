@@ -11,5 +11,7 @@ from .CifFile_module import get_number_with_esd,convert_type,validate_report
 from .CifFile_module import print_cif_syntax_error
 from .StarFile import remove_line_prefix,remove_line_folding
 from .StarFile import check_stringiness
+from .StarFile import StarUnknown,StarInapplicable,cif_value_from_token
+from .StarFile import is_unknown_value,is_inapplicable_value
 
 __all__ = [ReadCif, CifFile, CifBlock, CifDic, CifError, ValidCifError, get_number_with_esd]

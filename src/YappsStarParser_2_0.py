@@ -14,6 +14,7 @@ from __future__ import division
 from __future__ import absolute_import
 
 from .StarFile import StarBlock,StarFile,StarList,StarDict
+from .StarFile import cif_value_from_token
 from . import CifSyntaxError
 from io import StringIO
 #   Helper functions.                                                     
@@ -247,7 +248,7 @@ class StarParser(yappsrt.Parser):
         _token = self._peek('data_value_1', 'triple_quote_data_value', 'single_quote_data_value', 'start_sc_line', 'o_s_b', 'o_c_b')
         if _token == 'data_value_1':
             data_value_1 = self._scan('data_value_1')
-            thisval = data_value_1
+            thisval = cif_value_from_token(data_value_1)
         elif _token not in ['start_sc_line', 'o_s_b', 'o_c_b']:
             delimited_data_value = self.delimited_data_value(_context)
             thisval = delimited_data_value

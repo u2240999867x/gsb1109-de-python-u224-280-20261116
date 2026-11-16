@@ -1,3 +1,20 @@
+Unreleased
+==========
+
+* Unquoted CIF data values `?' (unknown) and `.' (not applicable) are now
+represented by the `str' subclasses `StarUnknown' and `StarInapplicable'
+(exported from the CifFile module), so they can be distinguished from quoted
+text values of `?' and `.' and from empty text.  Output routines reproduce
+the original form (bare `?'/`.' for the special values, quoted otherwise),
+so a read-write-read round trip restores each value exactly, in both
+dataname-value pairs and loops.
+
+* DDLm mandatory-item checking (`check_mandatory_items') now treats a
+mandatory item whose values are all unknown (`?') as not submitted, while
+an inapplicable (`.') value counts as an explicit declaration and is not
+reported as missing.  DDLm validity information is now also read from
+`_dictionary_valid.application', matching current DDLm dictionaries.
+
 Release Notes for version 5.0.1
 ===============================
 

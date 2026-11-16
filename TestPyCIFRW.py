@@ -144,6 +144,152 @@ class BasicUtilitiesTestCase(unittest.TestCase):
         p = StarList([StarList([1,2,3]),StarList([4,5,6])])
         self.assertTrue(p[1,0]==4)
 
+# Test preservation of special CIF data values: unknown (`?'), inapplicable
+# (`.'), empty text and genuine punctuation characters must remain
+# distinguishable through parsing and output.
+
+class SpecialValueTestCase(unittest.TestCase):
+    test_string = """data_special
+_unknown      ?
+_inapplicable .
+_empty        ''
+_quoted_dot   '.'
+_quoted_qm    '?'
+loop_
+_l_unknown
+_l_inapplicable
+_l_text
+?   .   ordinary
+'.' '?' ''
+"""
+
+    def setUp(self):
+        self.test_file = 'tests/special_value_test.cif'
+        f = open(self.test_file,'w')
+        f.write(self.test_string)
+        f.close()
+        self.cf = CifFile.CifFile(self.test_file)
+        self.block = self.cf['special']
+
+    def tearDown(self):
+        os.remove(self.test_file)
+
+    def testUnknownRecognised(self):
+        """An unquoted question mark is an unknown value"""
+        self.assertTrue(isinstance(self.block['_unknown'],CifFile.StarUnknown))
+        self.assertTrue(self.block['_unknown']=='?')   #still string-like
+
+    def testInapplicableRecognised(self):
+        """An unquoted full stop is an inapplicable value"""
+        self.assertTrue(isinstance(self.block['_inapplicable'],CifFile.StarInapplicable))
+        self.assertTrue(self.block['_inapplicable']=='.')
+
+    def testEmptyTextRecognised(self):
+        """Empty text is a genuine empty string"""
+        self.assertEqual(self.block['_empty'],'')
+        self.assertFalse(isinstance(self.block['_empty'],
+                                    (CifFile.StarUnknown,CifFile.StarInapplicable)))
+
+    def testQuotedValuesAreText(self):
+        """Quoted question marks and full stops are genuine text"""
+        self.assertEqual(self.block['_quoted_qm'],'?')
+        self.assertEqual(self.block['_quoted_dot'],'.')
+        self.assertFalse(isinstance(self.block['_quoted_qm'],CifFile.StarUnknown))
+        self.assertFalse(isinstance(self.block['_quoted_dot'],CifFile.StarInapplicable))
+
+    def testLoopValueKinds(self):
+        """Columnar (looped) values keep their kinds as well"""
+        self.assertTrue(isinstance(self.block['_l_unknown'][0],CifFile.StarUnknown))
+        self.assertTrue(isinstance(self.block['_l_inapplicable'][0],CifFile.StarInapplicable))
+        self.assertEqual(self.block['_l_unknown'][1],'.')
+        self.assertFalse(isinstance(self.block['_l_unknown'][1],CifFile.StarInapplicable))
+        self.assertEqual(self.block['_l_inapplicable'][1],'?')
+        self.assertFalse(isinstance(self.block['_l_inapplicable'][1],CifFile.StarUnknown))
+        self.assertEqual(self.block['_l_text'][1],'')
+
+    def testQuotedQuestionMarkNotMissing(self):
+        """A quoted question mark is output as quoted text, not a bare ?"""
+        outstring = str(self.cf)
+        line = [a for a in outstring.split('\n') if a.strip().startswith('_quoted_qm')][0]
+        value = line.split(None,1)[1].strip()
+        self.assertNotEqual(value,'?')
+        self.assertTrue(value in ("'?'",'"?"'))
+
+    def testRoundTrip(self):
+        """A write-read round trip restores every value kind exactly"""
+        outstring = str(self.cf)
+        rt_file = 'tests/special_value_rt.cif'
+        f = open(rt_file,'w')
+        f.write(outstring)
+        f.close()
+        try:
+            reread = CifFile.CifFile(rt_file)['special']
+        finally:
+            os.remove(rt_file)
+        for name in ['_unknown','_inapplicable','_empty','_quoted_dot','_quoted_qm']:
+            self.assertEqual(type(reread[name]),type(self.block[name]))
+            self.assertEqual(reread[name],self.block[name])
+        for name in ['_l_unknown','_l_inapplicable','_l_text']:
+            self.assertEqual([type(a) for a in reread[name]],
+                             [type(a) for a in self.block[name]])
+            self.assertEqual(list(reread[name]),list(self.block[name]))
+
+# Test that mandatory-item validation distinguishes unknown (`?') from
+# inapplicable (`.') values: the former counts as not submitted, the latter
+# is an explicit declaration and must not be reported as missing.
+
+class MandatoryValueTestCase(unittest.TestCase):
+    def setUp(self):
+        self.dic = CifFile.CifDic('tests/dictionaries/ddl.dic',grammar='auto')
+        self.mandatory = dict([
+            ('_definition.id','testframe'),
+            ('_definition.update','2020-01-01'),
+            ('_name.object_id','testobj'),
+            ('_name.category_id','testcat'),
+            ('_type.container','Single'),
+            ('_type.contents','Text')])
+
+    def make_block(self,**vals):
+        block = CifFile.CifBlock()
+        for key,value in vals.items():
+            block[key] = value
+        return block
+
+    def testAllPresent(self):
+        """All mandatory items present with real values"""
+        result = self.dic.check_mandatory_items(self.make_block(**self.mandatory))
+        self.assertTrue(result['result']==True)
+
+    def testAbsentReported(self):
+        """A missing mandatory item is reported"""
+        vals = dict(self.mandatory)
+        del vals['_type.contents']
+        result = self.dic.check_mandatory_items(self.make_block(**vals))
+        self.assertTrue(result['result']==False)
+        self.assertTrue('_type.contents' in result['bad_items'])
+
+    def testInapplicableNotMissing(self):
+        """An inapplicable mandatory item is not reported as missing"""
+        vals = dict(self.mandatory)
+        vals['_type.contents'] = CifFile.StarInapplicable()
+        result = self.dic.check_mandatory_items(self.make_block(**vals))
+        self.assertTrue(result['result']==True)
+
+    def testUnknownNotSubmitted(self):
+        """An unknown (`?') mandatory item is reported as not submitted"""
+        vals = dict(self.mandatory)
+        vals['_type.contents'] = CifFile.StarUnknown()
+        result = self.dic.check_mandatory_items(self.make_block(**vals))
+        self.assertTrue(result['result']==False)
+        self.assertTrue('_type.contents' in result['not_submitted'])
+
+    def testQuotedQuestionMarkSubmitted(self):
+        """A quoted question mark is genuine text, not a missing value"""
+        vals = dict(self.mandatory)
+        vals['_type.contents'] = '?'
+        result = self.dic.check_mandatory_items(self.make_block(**vals))
+        self.assertTrue(result['result']==True)
+
 # Test basic setting and reading of the CifBlock
 
 class BlockRWTestCase(unittest.TestCase):
