@@ -85,6 +85,14 @@ fastkml.config
    :undoc-members:
    :show-inheritance:
 
+fastkml.contracts
+---------------------
+
+.. automodule:: fastkml.contracts
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 fastkml.containers
 -------------------------
 

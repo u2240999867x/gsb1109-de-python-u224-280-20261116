@@ -31,6 +31,10 @@ from fastkml.atom import Contributor as AtomContributor
 from fastkml.atom import Link as AtomLink
 from fastkml.containers import Document
 from fastkml.containers import Folder
+from fastkml.contracts import ColumnContract
+from fastkml.contracts import ColumnValue
+from fastkml.contracts import column_contracts
+from fastkml.contracts import column_values
 from fastkml.data import Data
 from fastkml.data import ExtendedData
 from fastkml.data import Schema
@@ -102,6 +106,8 @@ __all__ = [
     "BalloonStyle",
     "Camera",
     "Change",
+    "ColumnContract",
+    "ColumnValue",
     "Coordinates",
     "Create",
     "Data",
@@ -155,6 +161,8 @@ __all__ = [
     "TimeStamp",
     "Update",
     "ViewVolume",
+    "column_contracts",
+    "column_values",
     "create_kml_geometry",
     "find",
     "find_all",

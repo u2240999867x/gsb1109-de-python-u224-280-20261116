@@ -124,6 +124,75 @@ workflows. Use ``SchemaData`` when you need explicit field declarations, array v
 contract that other systems can rely on. The extra ceremony is worthwhile when the KML file
 is part of a data pipeline rather than just a display artifact.
 
+Named column contracts
+----------------------
+
+The same field name can appear in several documents through different mechanisms: one
+document may declare ``temperature`` in a ``Schema`` as a ``double`` and reach it through
+``schemaUrl``, while another only carries it as free-text ``Data``. The helper functions in
+``fastkml.contracts`` flatten those values into :class:`fastkml.ColumnContract` objects that
+keep the namespace, the verbatim ``schemaUrl``, the declared
+:class:`fastkml.enums.DataType`, and the raw value together instead of merging columns by
+name alone.
+
+Schema references are resolved per document. A ``schemaUrl`` that points at a schema which
+is not declared in the same document keeps its URL but reports no declared type; the field
+is never explained by a same-named ``Schema`` living in another document.
+
+.. code-block:: pycon
+
+    >>> from fastkml import KML, column_contracts, column_values
+    >>> kml_doc = '''<kml xmlns="http://www.opengis.net/kml/2.2">
+    ... <Document>
+    ...   <Schema id="weather">
+    ...     <SimpleField name="temperature" type="double"/>
+    ...   </Schema>
+    ...   <Placemark>
+    ...     <ExtendedData>
+    ...       <SchemaData schemaUrl="#weather">
+    ...         <SimpleData name="temperature">21.5</SimpleData>
+    ...       </SchemaData>
+    ...       <Data name="temperature"><value>warm</value></Data>
+    ...     </ExtendedData>
+    ...   </Placemark>
+    ... </Document>
+    ... </kml>'''
+    >>> document = KML.from_string(kml_doc, ns=None).features[0]
+    >>> [(c.name, c.schema_url, c.declared_type, c.array)
+    ...  for c in column_contracts(document)]
+    [('temperature', None, None, False), ('temperature', '#weather', <DataType.double: 'double'>, False)]
+    >>> [(v.raw, v.value, v.error) for v in column_values(document)]
+    [('warm', 'warm', None), ('21.5', 21.5, None)]
+
+Values are converted according to the declared type one at a time. If a conversion fails,
+only that value is isolated: its raw text is retained, ``value`` is ``None``, and ``error``
+explains the failure, while sibling values (including the other elements of a ``gx`` array)
+are still converted.
+
+.. code-block:: pycon
+
+    >>> bad_doc = '''<kml xmlns="http://www.opengis.net/kml/2.2">
+    ... <Document>
+    ...   <Schema id="weather">
+    ...     <SimpleField name="temperature" type="double"/>
+    ...   </Schema>
+    ...   <Placemark>
+    ...     <ExtendedData>
+    ...       <SchemaData schemaUrl="#weather">
+    ...         <SimpleData name="temperature">oops</SimpleData>
+    ...       </SchemaData>
+    ...     </ExtendedData>
+    ...   </Placemark>
+    ... </Document>
+    ... </kml>'''
+    >>> bad = column_values(KML.from_string(bad_doc, ns=None).features[0])[0]
+    >>> bad.raw
+    'oops'
+    >>> bad.value is None
+    True
+    >>> bad.error is not None
+    True
+
 Why gx array fields are separate classes
 --------------------------------------------
 
