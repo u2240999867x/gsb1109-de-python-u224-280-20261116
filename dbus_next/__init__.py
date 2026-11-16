@@ -6,7 +6,8 @@ from .errors import (SignatureBodyMismatchError, InvalidSignatureError, InvalidA
                      AuthError, InvalidMessageError, InvalidIntrospectionError,
                      InterfaceNotFoundError, SignalDisabledError, InvalidBusNameError,
                      InvalidObjectPathError, InvalidInterfaceNameError, InvalidMemberNameError,
-                     DBusError)
+                     InvalidMatchRuleError, DBusError)
+from ._private.match_rule import MatchRule
 from . import introspection
 from .message import Message
 from . import message_bus

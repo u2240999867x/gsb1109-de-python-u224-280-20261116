@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+* Match rules are compared semantically so consumers sharing one connection
+  register each actual rule with the daemon once while still receiving only
+  their own matching signals.  Quoting, escaping, key order, path namespace
+  and argument conditions follow the bus semantics.
+* Add and remove confirmations are serialized: a removal is never sent before
+  a pending add is confirmed, new demand during a removal keeps the old
+  registration valid, and a failed removal is not reported as gone.
+* Subscriptions are reference counted per consumer; one consumer leaving does
+  not affect the others.
+* Connections are tracked by generation so confirmations from an old
+  connection cannot modify registrations on a reconnect, where wanted rules
+  are re-verified.
+* Add `MessageBus.subscribe()`, `MatchRule`, and `MessageBus.get_match_rules()`
+  to query the actual registrations and per-consumer status.  Duplicate copies
+  of a signal are only dispatched once.
+
 ## Version 0.2.3
 
 This version contains some bugfixes and new features.

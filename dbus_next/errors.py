@@ -22,6 +22,10 @@ class InvalidIntrospectionError(ValueError):
     pass
 
 
+class InvalidMatchRuleError(ValueError):
+    pass
+
+
 class InterfaceNotFoundError(Exception):
     pass
 

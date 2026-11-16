@@ -138,6 +138,10 @@ class MessageBus(BaseMessageBus):
 
         This method must be called before the message bus can be used.
 
+        Calling this again after a connection was lost opens a new connection.
+        Match rule subscriptions are kept and re-verified against the new
+        connection; confirmations from the old connection are ignored.
+
         :returns: This message bus for convenience.
         :rtype: :class:`MessageBus <dbus_next.aio.MessageBus>`
 
@@ -146,6 +150,20 @@ class MessageBus(BaseMessageBus):
               the DBus daemon failed.
             - :class:`Exception` - If there was a connection error.
         """
+        if self.connected:
+            return self
+
+        if self._disconnected:
+            # Reconnect: build a new socket, writer and unmarshaller while
+            # preserving consumer state (match rule subscriptions and the
+            # handlers they own).
+            self._disconnected = False
+            self._user_disconnect = False
+            self._setup_socket()
+            self._unmarshaller = self._create_unmarshaller()
+            self._writer = _MessageWriter(self)
+            self._disconnect_future = self._loop.create_future()
+
         await self._authenticate()
 
         future = self._loop.create_future()
@@ -158,6 +176,7 @@ class MessageBus(BaseMessageBus):
                     raise err
                 self.unique_name = reply.body[0]
                 self._writer.schedule_write()
+                self._on_connection_ready()
                 _future_set_result(future, self)
             except Exception as e:
                 _future_set_exception(future, e)

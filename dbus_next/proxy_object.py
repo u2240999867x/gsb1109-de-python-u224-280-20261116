@@ -5,6 +5,7 @@ from .constants import MessageType, ErrorType
 from . import introspection as intr
 from .errors import DBusError, InterfaceNotFoundError
 from ._private.util import replace_idx_with_fds
+from ._private.match_rule import MatchRule
 
 from typing import Type, Union, List, Coroutine
 import logging
@@ -46,7 +47,15 @@ class BaseProxyInterface:
         self.introspection = introspection
         self.bus = bus
         self._signal_handlers = {}
-        self._signal_match_rule = f"type='signal',sender={bus_name},interface={introspection.name},path={path}"
+        self._signal_match_rule = MatchRule(type=MessageType.SIGNAL,
+                                            sender=bus_name,
+                                            interface=introspection.name,
+                                            path=path)
+        # The subscription is shared by every handler on this proxy interface.
+        self._match_subscription = None
+        # Each proxy interface instance is its own consumer.  Two interfaces
+        # for the same name/path must be able to withdraw independently.
+        self._match_consumer = self
 
     _underscorer1 = re.compile(r'(.)([A-Z][a-z]+)')
     _underscorer2 = re.compile(r'([a-z0-9])([A-Z])')
@@ -72,11 +81,16 @@ class BaseProxyInterface:
     def _add_property(self, intr_property):
         raise NotImplementedError('this must be implemented in the inheriting class')
 
-    def _message_handler(self, msg):
+    def handle_message(self, msg) -> bool:
+        """Dispatch a message to this interface's handlers.
+
+        Returns whether the message was handled.  This is exposed so a message
+        handler installed for this interface remains valid across reconnects.
+        """
         if not msg._matches(message_type=MessageType.SIGNAL,
                             interface=self.introspection.name,
                             path=self.path) or msg.member not in self._signal_handlers:
-            return
+            return False
 
         if msg.sender != self.bus_name and self.bus._name_owners.get(self.bus_name,
                                                                      '') != msg.sender:
@@ -84,23 +98,30 @@ class BaseProxyInterface:
             # be a well known name. If the sender isn't an exact match, check
             # to see if it owns the bus_name we were given from the cache kept
             # on the bus for this purpose.
-            return
+            return False
 
         match = [s for s in self.introspection.signals if s.name == msg.member]
         if not len(match):
-            return
+            return False
         intr_signal = match[0]
         if intr_signal.signature != msg.signature:
             logging.warning(
                 f'got signal "{self.introspection.name}.{msg.member}" with unexpected signature "{msg.signature}"'
             )
-            return
+            return False
 
         body = replace_idx_with_fds(msg.signature, msg.body, msg.unix_fds)
         for handler in self._signal_handlers[msg.member]:
             cb_result = handler(*body)
             if isinstance(cb_result, Coroutine):
                 asyncio.create_task(cb_result)
+        return True
+
+    def _handle_signal_message(self, msg):
+        # Returning None keeps the bus dispatching the message to other
+        # handlers: a signal belongs to every interface that subscribed.
+        self.handle_message(msg)
+        return None
 
     def _add_signal(self, intr_signal, interface):
         def on_signal_fn(fn):
@@ -110,8 +131,11 @@ class BaseProxyInterface:
                     f'reply_notify must be a function with {len(intr_signal.args)} parameters')
 
             if not self._signal_handlers:
-                self.bus._add_match_rule(self._signal_match_rule)
-                self.bus.add_message_handler(self._message_handler)
+                subscription = self.bus._match_registry.subscribe(
+                    self._signal_match_rule, self._match_consumer, self._handle_signal_message)
+                self._match_subscription = subscription
+                if self._handle_signal_message not in self.bus._user_message_handlers:
+                    self.bus.add_message_handler(self._handle_signal_message)
 
             if intr_signal.name not in self._signal_handlers:
                 self._signal_handlers[intr_signal.name] = []
@@ -128,8 +152,12 @@ class BaseProxyInterface:
                 return
 
             if not self._signal_handlers:
-                self.bus._remove_match_rule(self._signal_match_rule)
-                self.bus.remove_message_handler(self._message_handler)
+                subscription = self._match_subscription
+                if subscription is not None:
+                    subscription.cancel()
+                self._match_subscription = None
+                if self._handle_signal_message in self.bus._user_message_handlers:
+                    self.bus.remove_message_handler(self._handle_signal_message)
 
         snake_case = BaseProxyInterface._to_snake_case(intr_signal.name)
         setattr(interface, f'on_{snake_case}', on_signal_fn)

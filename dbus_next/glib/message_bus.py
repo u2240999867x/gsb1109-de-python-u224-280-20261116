@@ -198,6 +198,8 @@ class MessageBus(BaseMessageBus):
                 for m in self._buffered_messages:
                     self.send(m)
 
+                self._on_connection_ready()
+
                 if connect_notify:
                     connect_notify(self, err)
 

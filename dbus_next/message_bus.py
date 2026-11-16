@@ -1,5 +1,7 @@
 from ._private.address import get_bus_address, parse_address
 from ._private.util import replace_fds_with_idx, replace_idx_with_fds
+from ._private.match_rule import MatchRule
+from ._private.match_registry import MatchRuleRegistry
 from .message import Message
 from .constants import BusType, MessageFlag, MessageType, ErrorType, NameFlag, RequestNameReply, ReleaseNameReply
 from .service import ServiceInterface
@@ -15,7 +17,7 @@ import logging
 import xml.etree.ElementTree as ET
 import traceback
 
-from typing import Type, Callable, Optional, Union
+from typing import Type, Callable, Dict, List, Optional, Union
 
 
 class BaseMessageBus:
@@ -70,13 +72,22 @@ class BaseMessageBus:
         self._path_exports = {}
         self._bus_address = parse_address(bus_address) if bus_address else parse_address(
             get_bus_address(bus_type))
-        # the bus implementations need this rule for the high level client to
-        # work correctly.
-        self._name_owner_match_rule = "sender='org.freedesktop.DBus',interface='org.freedesktop.DBus',path='/org/freedesktop/DBus',member='NameOwnerChanged'"
-        # _match_rules: the keys are match rules and the values are ref counts
-        # (used for the high level client only)
+        # _match_rules: compatibility view of the daemon registrations.  The
+        # semantic registry below owns the actual state; this dict maps the
+        # canonical rule string to the number of consumers that want it.
         self._match_rules = {}
+        # Generation of the current connection.  Incremented on every
+        # disconnect so confirmations from an old connection can be ignored.
+        self._connection_generation = 0
+        # True once Hello has completed for the current connection.
+        self._connection_ready = False
+        self._match_registry = MatchRuleRegistry(self)
+        # Maps an opaque consumer token to its MatchSubscription.
+        self._match_subscriptions = {}
+        # Consumer tokens used by the internal _add_match_rule API.
+        self._internal_match_consumers = {}
         self._high_level_client_initialized = False
+        self._high_level_client_match_subscription = None
         self._ProxyObject = ProxyObject
 
         # machine id is lazy loaded
@@ -436,6 +447,159 @@ class BaseMessageBus:
                 del self._user_message_handlers[i]
                 break
 
+    # ------------------------------------------------------------------
+    # Match rule management
+    # ------------------------------------------------------------------
+    def add_match_rule(self,
+                       rule: Union[str, MatchRule],
+                       handler: Optional[Callable[[Message], None]] = None) -> MatchRule:
+        """Subscribe to messages matching a D-Bus match rule.
+
+        Rules are compared semantically, so several consumers can share one
+        registration with the message bus even if they wrote the same rule
+        with different key order, quoting, or escaping.  The rule is
+        registered with the daemon exactly once while at least one consumer
+        wants it.
+
+        If ``handler`` is given it is called with every incoming message that
+        matches the rule.
+
+        :param rule: The match rule.
+        :type rule: str or :class:`MatchRule <dbus_next.MatchRule>`
+        :param handler: An optional handler called for matching messages.
+        :type handler: :class:`Callable` or None
+
+        :returns: The semantic match rule that was added.  It can be passed to
+            :func:`remove_match_rule() <dbus_next.message_bus.BaseMessageBus.remove_match_rule>`.
+        :rtype: :class:`MatchRule <dbus_next.MatchRule>`
+
+        :raises:
+            - :class:`InvalidMatchRuleError <dbus_next.InvalidMatchRuleError>` - If the rule is not a valid match rule.
+        """
+        parsed = MatchRule.from_string(rule)
+        # Each call is one independent demand, even when the caller reuses the
+        # same handler object.
+        consumer = object()
+        wrapped = self._wrap_match_handler(parsed, handler)
+        subscription = self._match_registry.subscribe(parsed, consumer, wrapped,
+                                                      original_handler=handler)
+        if wrapped is not None:
+            self.add_message_handler(wrapped)
+        self._match_subscriptions[consumer] = subscription
+        return parsed
+
+    def remove_match_rule(self, rule: Union[str, MatchRule], handler=None) -> None:
+        """Withdraw one subscription added by
+        :func:`add_match_rule() <dbus_next.message_bus.BaseMessageBus.add_match_rule>`.
+
+        Other consumers of the same semantic rule are unaffected.  The rule is
+        removed from the daemon only when the last consumer withdraws it, and
+        never before a pending AddMatch has been confirmed.
+
+        :param rule: The match rule to remove.
+        :type rule: str or :class:`MatchRule <dbus_next.MatchRule>`
+        :param handler: If given, identify the subscription that used this
+            handler.
+        """
+        parsed = MatchRule.from_string(rule)
+        consumer = None
+        for candidate, subscription in self._match_subscriptions.items():
+            if subscription.rule != parsed:
+                continue
+            if handler is not None and subscription._original_handler is not handler:
+                continue
+            consumer = candidate
+            break
+
+        if consumer is None:
+            return
+
+        subscription = self._match_subscriptions.pop(consumer)
+        subscription.cancel()
+
+    def subscribe(self,
+                  rule: Union[str, MatchRule],
+                  handler: Optional[Callable[[Message], None]] = None):
+        """Subscribe to a match rule and return a cancellable subscription.
+
+        This is the preferred form when a consumer needs a precise handle:
+
+        .. code-block:: python3
+
+            subscription = bus.subscribe("type='signal',path='/com/example'",
+                                         handler)
+            ...
+            subscription.cancel()
+
+        :param rule: The match rule.
+        :type rule: str or :class:`MatchRule <dbus_next.MatchRule>`
+        :param handler: An optional handler called for matching messages.
+        :returns: A subscription object with a ``cancel()`` method.
+        """
+        parsed = MatchRule.from_string(rule)
+        consumer = object()
+        wrapped = self._wrap_match_handler(parsed, handler)
+        subscription = self._match_registry.subscribe(parsed, consumer, wrapped,
+                                                      original_handler=handler)
+        if wrapped is not None:
+            self.add_message_handler(wrapped)
+        self._match_subscriptions[consumer] = subscription
+        return subscription
+
+    def _wrap_match_handler(self, rule: MatchRule, handler):
+        """Wrap a user handler so only messages matched by ``rule`` reach it."""
+        if handler is None:
+            return None
+
+        name_owners = self._name_owners
+
+        def wrapped(msg):
+            if not rule.matches(msg, name_owners=name_owners):
+                return None
+            handler(msg)
+            return None
+
+        return wrapped
+
+    def get_match_rule_status(self, rule: Union[str, MatchRule]) -> Optional[dict]:
+        """Get the registration status for a semantic match rule.
+
+        The returned dictionary contains the canonical rule string, the
+        daemon registration ``state``, whether the rule is reported as
+        ``registered``, the connection ``generation`` the state belongs to,
+        serials of in-flight requests, and per-consumer status.
+
+        :param rule: The rule to query.
+        :returns: The status, or ``None`` if the rule is unknown.
+        :rtype: dict or None
+        """
+        return self._match_registry.status(rule)
+
+    def get_match_rules(self) -> Dict[str, dict]:
+        """Get every known registration keyed by its canonical rule string."""
+        return self._match_registry.registrations()
+
+    def get_registered_match_rules(self) -> List[str]:
+        """Get the canonical strings of rules believed to be registered."""
+        return self._match_registry.registered_rules()
+
+    def get_match_rule_consumers(self, rule: Union[str, MatchRule]) -> List[dict]:
+        """Get the consumers of a semantic match rule and their status."""
+        return self._match_registry.consumers(rule)
+
+    def get_consumer_match_rules(self, consumer) -> List[dict]:
+        """Get the rules a consumer is subscribed to.
+
+        :param consumer: The consumer handle returned by the registry or the
+            proxy interface object that owns the subscription.
+        """
+        return self._match_registry.consumer_rules(consumer)
+
+    @property
+    def match_rules(self) -> Dict[str, dict]:
+        """A read-only view of the actual match rule registrations."""
+        return self._match_registry.registrations()
+
     def send(self, msg: Message) -> None:
         """Asynchronously send a message on the message bus.
 
@@ -451,6 +615,7 @@ class BaseMessageBus:
             return
 
         self._disconnected = True
+        self._on_connection_lost()
 
         for handler in self._method_return_handlers.values():
             try:
@@ -464,6 +629,8 @@ class BaseMessageBus:
             self.unexport(path)
 
         self._user_message_handlers.clear()
+        # Keep _match_subscriptions so consumers can still cancel after a
+        # disconnect and so their handlers are restored on reconnect.
 
     def _has_interface(self, interface: ServiceInterface) -> bool:
         for _, exports in self._path_exports.items():
@@ -662,6 +829,10 @@ class BaseMessageBus:
 
     def _process_message(self, msg):
         handled = False
+
+        if msg.message_type == MessageType.SIGNAL and self._match_registry.is_duplicate_signal(msg):
+            # A duplicate copy of a signal occurrence is not dispatched again.
+            return
 
         for handler in self._user_message_handlers:
             try:
@@ -962,77 +1133,73 @@ class BaseMessageBus:
         if self._high_level_client_initialized:
             return
         self._high_level_client_initialized = True
+        self._high_level_client_match_subscription = self.subscribe(
+            MatchRule(type=MessageType.SIGNAL,
+                      sender='org.freedesktop.DBus',
+                      interface='org.freedesktop.DBus',
+                      path='/org/freedesktop/DBus',
+                      member='NameOwnerChanged'))
+        self._sync_match_rule_view()
 
-        def add_match_notify(msg, err):
-            if err:
-                logging.error(
-                    f'add match request failed. match="{self._name_owner_match_rule}", {err}')
-            if msg.message_type == MessageType.ERROR:
-                logging.error(
-                    f'add match request failed. match="{self._name_owner_match_rule}", {msg.body[0]}'
-                )
+    def _add_match_rule(self, match_rule) -> MatchRule:
+        '''Add a semantic match rule demand. Match rules added by this function
+        are refcounted and must be removed by _remove_match_rule(). This is for
+        internal use.'''
+        rule = MatchRule.from_string(match_rule)
+        if rule == self._name_owner_match_rule():
+            return rule
+        consumer = ('internal', rule.to_string())
+        # Repeated internal adds are independent demands, mirroring the old
+        # reference counting API.
+        token = object()
+        self._internal_match_consumers.setdefault(consumer, []).append(token)
+        self._match_registry.subscribe(rule, (consumer, token))
+        return rule
 
-        self._call(
-            Message(destination='org.freedesktop.DBus',
-                    interface='org.freedesktop.DBus',
-                    path='/org/freedesktop/DBus',
-                    member='AddMatch',
-                    signature='s',
-                    body=[self._name_owner_match_rule]), add_match_notify)
-
-    def _add_match_rule(self, match_rule):
-        '''Add a match rule. Match rules added by this function are refcounted
-        and must be removed by _remove_match_rule(). This is for use in the
-        high level client only.'''
-        if match_rule == self._name_owner_match_rule:
+    def _remove_match_rule(self, match_rule) -> None:
+        '''Remove one internal match rule demand added with _add_match_rule().'''
+        rule = MatchRule.from_string(match_rule)
+        if rule == self._name_owner_match_rule():
             return
-
-        if match_rule in self._match_rules:
-            self._match_rules[match_rule] += 1
+        consumer = ('internal', rule.to_string())
+        tokens = self._internal_match_consumers.get(consumer)
+        if not tokens:
             return
+        token = tokens.pop()
+        if not tokens:
+            del self._internal_match_consumers[consumer]
+        self._match_registry.unsubscribe(rule, (consumer, token))
 
-        self._match_rules[match_rule] = 1
+    def _name_owner_match_rule(self) -> MatchRule:
+        return MatchRule(type=MessageType.SIGNAL,
+                         sender='org.freedesktop.DBus',
+                         interface='org.freedesktop.DBus',
+                         path='/org/freedesktop/DBus',
+                         member='NameOwnerChanged')
 
-        def add_match_notify(msg, err):
-            if err:
-                logging.error(f'add match request failed. match="{match_rule}", {err}')
-            if msg.message_type == MessageType.ERROR:
-                logging.error(f'add match request failed. match="{match_rule}", {msg.body[0]}')
+    def _on_connection_ready(self):
+        '''Called by the concrete bus implementation after Hello completes.
 
-        self._call(
-            Message(destination='org.freedesktop.DBus',
-                    interface='org.freedesktop.DBus',
-                    path='/org/freedesktop/DBus',
-                    member='AddMatch',
-                    signature='s',
-                    body=[match_rule]), add_match_notify)
+        Re-verifies the daemon registration of every rule a consumer still
+        wants.  Pending confirmations from an older connection were already
+        invalidated in :meth:`_on_connection_lost`.'''
+        self._connection_ready = True
+        self._match_registry.on_connection_established()
+        self._sync_match_rule_view()
 
-    def _remove_match_rule(self, match_rule):
-        '''Remove a match rule added with _add_match_rule(). This is for use in
-        the high level client only.'''
-        if match_rule == self._name_owner_match_rule:
-            return
+    def _on_connection_lost(self):
+        '''Called before finalizing a disconnected bus connection.'''
+        self._connection_ready = False
+        self._connection_generation += 1
+        self.unique_name = None
+        self._name_owners.clear()
+        self._match_registry.on_connection_lost()
+        self._match_rules.clear()
 
-        if match_rule in self._match_rules:
-            self._match_rules[match_rule] -= 1
-            if self._match_rules[match_rule] > 0:
-                return
-
-        del self._match_rules[match_rule]
-
-        def remove_match_notify(msg, err):
-            if self._disconnected:
-                return
-
-            if err:
-                logging.error(f'remove match request failed. match="{match_rule}", {err}')
-            if msg.message_type == MessageType.ERROR:
-                logging.error(f'remove match request failed. match="{match_rule}", {msg.body[0]}')
-
-        self._call(
-            Message(destination='org.freedesktop.DBus',
-                    interface='org.freedesktop.DBus',
-                    path='/org/freedesktop/DBus',
-                    member='RemoveMatch',
-                    signature='s',
-                    body=[match_rule]), remove_match_notify)
+    def _sync_match_rule_view(self):
+        '''Update the legacy ``_match_rules`` ref count view from the registry.'''
+        self._match_rules.clear()
+        for rule_string, status in self._match_registry.registrations().items():
+            demand = sum(consumer['demand'] for consumer in status['consumers'])
+            if demand:
+                self._match_rules[rule_string] = demand
