@@ -9,6 +9,14 @@ import warnings
 from typing import AsyncGenerator
 
 from pysnmp.hlapi import varbinds
+from pysnmp.hlapi.isolation import (
+    IsolationPlan,
+    IsolationPlanner,
+    IsolationResult,
+    Receipt,
+    RetryBudget,
+    snmp_version,
+)
 from pysnmp.hlapi.transport import AbstractTransportTarget
 from pysnmp.hlapi.v1arch.asyncio.auth import CommunityData
 from pysnmp.hlapi.v1arch.asyncio.dispatch import SnmpDispatcher
@@ -20,6 +28,7 @@ from pysnmp.smi.rfc1902 import ObjectType
 
 __all__ = [
     "get_cmd",
+    "get_cmd_isolated",
     "next_cmd",
     "set_cmd",
     "bulk_cmd",
@@ -168,6 +177,194 @@ async def get_cmd(
     )
 
     return await future
+
+
+async def _get_cmd_receipt(
+    snmpDispatcher: SnmpDispatcher,
+    authData: CommunityData,
+    transportTarget: AbstractTransportTarget,
+    varBinds,
+):
+    """Send one GET and return its PDU fields without clamping.
+
+    The raw ``error-index`` is preserved so an index beyond the response
+    binding list can be treated as a conflict instead of silently clamped.
+    """
+    pMod = api.PROTOCOL_MODULES[authData.mpModel]
+
+    reqPdu = pMod.GetRequestPDU()
+    pMod.apiPDU.set_defaults(reqPdu)
+    pMod.apiPDU.set_varbinds(reqPdu, varBinds)
+    request_id = int(pMod.apiPDU.get_request_id(reqPdu))
+
+    future = asyncio.Future()
+
+    def __receipt_callback(snmpDispatcher, stateHandle, errorIndication, rspPdu, cbCtx):
+        if future.cancelled():
+            return
+        if isinstance(errorIndication, errind.RequestTimedOut):
+            future.set_result(
+                {
+                    "error_indication": errorIndication,
+                    "error_status": 0,
+                    "error_index": 0,
+                    "values": (),
+                    "request_id": request_id,
+                    "response_request_id": None,
+                    "matched": True,
+                }
+            )
+            return
+        if rspPdu is None:
+            future.set_result(
+                {
+                    "error_indication": errorIndication,
+                    "error_status": 0,
+                    "error_index": 0,
+                    "values": (),
+                    "request_id": request_id,
+                    "response_request_id": None,
+                    "matched": False,
+                }
+            )
+            return
+        future.set_result(
+            {
+                "error_indication": errorIndication,
+                "error_status": int(pMod.apiPDU.get_error_status(rspPdu)),
+                "error_index": int(rspPdu.getComponentByPosition(2)),
+                "values": tuple(
+                    value for _, value in pMod.apiPDU.get_varbinds(rspPdu)
+                ),
+                "request_id": request_id,
+                "response_request_id": int(
+                    pMod.apiPDU.get_request_id(rspPdu)
+                ),
+                "matched": True,
+            }
+        )
+
+    snmpDispatcher.send_pdu(
+        authData, transportTarget, reqPdu, cbFun=__receipt_callback, cbCtx=None
+    )
+    return await future
+
+
+async def get_cmd_isolated(
+    snmpDispatcher: SnmpDispatcher,
+    authData: CommunityData,
+    transportTarget: AbstractTransportTarget,
+    *varBinds: ObjectType,
+    **options,
+) -> IsolationResult:
+    r"""Perform a multi-binding GET with error isolation.
+
+    The SNMP version comes from ``authData.mpModel``, so SNMPv1
+    ``noSuchName`` is interpreted through ``error-index`` while SNMPv2c
+    ``noSuchObject``/``noSuchInstance`` values are recognised per binding.
+
+    Parameters
+    ----------
+    snmpDispatcher: :py:class:`~pysnmp.hlapi.v1arch.asyncio.SnmpDispatcher`
+        Class instance representing the asynchronous dispatcher.
+
+    authData: :py:class:`~pysnmp.hlapi.v1arch.asyncio.CommunityData`
+        Class instance representing SNMPv1/v2c credentials.
+
+    transportTarget: :py:class:`~pysnmp.hlapi.v1arch.asyncio.UdpTransportTarget`
+        Class instance representing transport type and peer address.
+
+    \*varBinds:
+        One or more bindings from the original request.
+
+    Other Parameters
+    ----------------
+    \*\*options:
+        * `requestSize` - maximum bindings per request.
+        * `budget` - :class:`~pysnmp.hlapi.isolation.RetryBudget` instance.
+        * `maxRequests`, `maxAttemptsPerBinding` - budget shortcuts.
+        * `samplingWindow` - sampling window token used when merging.
+        * `reused` - previously confirmed binding outcomes.
+        * `onPlan` - callable invoked with every plan before it is sent.
+
+    Returns
+    -------
+    :class:`~pysnmp.hlapi.isolation.IsolationResult`
+        Per-binding outcomes in the original request order.
+    """
+    lookup_mib = options.get("lookupMib")
+    if not lookup_mib and any(isinstance(x, ObjectType) for x in varBinds):
+        lookup_mib = True
+
+    requested = (
+        VB_PROCESSOR.make_varbinds(snmpDispatcher.cache, varBinds)
+        if lookup_mib
+        else tuple(varBinds)
+    )
+    version = snmp_version(authData)
+
+    budget = options.get("budget")
+    if budget is None:
+        budget = RetryBudget(
+            max_requests=options.get("maxRequests", 8),
+            max_bindings_per_request=options.get("requestSize", 16),
+            max_attempts_per_binding=options.get("maxAttemptsPerBinding", 3),
+        )
+
+    async def send(plan: IsolationPlan) -> Receipt:
+        raw = await _get_cmd_receipt(
+            snmpDispatcher,
+            authData,
+            transportTarget,
+            plan.bindings,
+        )
+        values = raw["values"]
+        if raw["error_indication"] is None and values and lookup_mib:
+            try:
+                values = VB_PROCESSOR.unmake_varbinds(
+                    snmpDispatcher.cache,
+                    tuple(
+                        (binding[0], value)
+                        for binding, value in zip(plan.bindings, values)
+                    ),
+                    True,
+                )
+                values = tuple(binding[1] for binding in values)
+            except Exception:
+                # Keep the raw values; MIB lookup is a presentation concern.
+                pass
+        return Receipt(
+            request_bindings=plan.bindings,
+            error_status=raw["error_status"],
+            error_index=raw["error_index"],
+            values=values,
+            error_indication=raw["error_indication"],
+            version=version,
+            positions=plan.positions,
+            request_id=raw["request_id"],
+            response_request_id=raw["response_request_id"],
+            matched=raw["matched"],
+            row=plan.row,
+        )
+
+    planner = IsolationPlanner(
+        requested,
+        version=version,
+        budget=budget,
+        request_size=options.get("requestSize"),
+        sampling_window=options.get("samplingWindow"),
+        reused=options.get("reused", ()),
+    )
+    on_plan = options.get("onPlan")
+
+    while True:
+        plan = planner.next_plan()
+        if plan is None:
+            return planner.result()
+        if on_plan is not None:
+            on_plan(plan)
+        receipt = await send(plan)
+        planner.record(receipt, positions=plan.positions)
 
 
 async def set_cmd(

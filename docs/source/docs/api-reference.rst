@@ -45,11 +45,31 @@ Command Generator
    :maxdepth: 2
 
    /docs/hlapi/v3arch/asyncio/manager/cmdgen/getcmd
+   /docs/hlapi/v3arch/asyncio/manager/cmdgen/getcmd-isolated
    /docs/hlapi/v3arch/asyncio/manager/cmdgen/setcmd
    /docs/hlapi/v3arch/asyncio/manager/cmdgen/nextcmd
    /docs/hlapi/v3arch/asyncio/manager/cmdgen/bulkcmd
    /docs/hlapi/v3arch/asyncio/manager/cmdgen/walkcmd
    /docs/hlapi/v3arch/asyncio/manager/cmdgen/bulkwalkcmd
+
+Error-Isolation Planning
+++++++++++++++++++++++++
+
+.. autofunction:: pysnmp.hlapi.isolation.isolation_plan
+
+.. autoclass:: pysnmp.hlapi.isolation.RetryBudget
+
+.. autoclass:: pysnmp.hlapi.isolation.Receipt
+
+.. autoclass:: pysnmp.hlapi.isolation.IsolationResult
+   :members: confirmed, absent, unconfirmed, conflicts, settled
+
+.. autoclass:: pysnmp.hlapi.isolation.IsolationPlanner
+   :members: next_plan, record, result
+
+.. autoclass:: pysnmp.hlapi.isolation.SamplingWindow
+
+.. autofunction:: pysnmp.hlapi.isolation.merge_isolation_results
 
 Notification Originator
 
@@ -202,6 +222,7 @@ Command Generator
    :maxdepth: 2
 
    /docs/hlapi/v1arch/asyncio/manager/cmdgen/getcmd
+   /docs/hlapi/v1arch/asyncio/manager/cmdgen/getcmd-isolated
    /docs/hlapi/v1arch/asyncio/manager/cmdgen/setcmd
    /docs/hlapi/v1arch/asyncio/manager/cmdgen/nextcmd
    /docs/hlapi/v1arch/asyncio/manager/cmdgen/bulkcmd

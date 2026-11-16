@@ -6,7 +6,7 @@
 #
 import sys
 import warnings
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from pyasn1.error import PyAsn1Error
 from pyasn1.type.base import AbstractSimpleAsn1Item, SimpleAsn1Type
@@ -1109,6 +1109,20 @@ class ObjectType:
             )
         else:
             raise SmiError("%s object not fully initialized" % self.__class__.__name__)
+
+    def with_value(self, value: Any) -> "ObjectType":
+        """Return a resolved copy of this binding carrying a new value.
+
+        The object identity is reused as-is, so no MIB resolution is needed
+        for the returned binding.  This is useful when a value obtained from
+        one response has to be assembled into a fresh result.
+        """
+        if not self.__state & self.ST_CLEAN:
+            raise SmiError("%s object not fully initialized" % self.__class__.__name__)
+        binding = ObjectType(self.__args[0], value)
+        if self.__args[0].is_fully_resolved():
+            binding.__state |= self.ST_CLEAN
+        return binding
 
     # Compatibility with PySNMP older versions
     deprecated_attributes = {

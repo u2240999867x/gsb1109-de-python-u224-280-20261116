@@ -1,5 +1,21 @@
 .. current-version: 7.1.33 (managed by bump2version)
 
+Unreleased
+----------
+
+- Added `get_cmd_isolated` to the v3arch and v1arch asyncio APIs. A
+  multi-binding GET that fails on one variable is re-queried in rounds,
+  splitting the batch according to the real `error-status` and
+  `error-index` of each SNMP version, so readable OIDs are preserved.
+- Added `pysnmp.hlapi.isolation` with `isolation_plan`,
+  `IsolationPlanner`, `RetryBudget`, `Receipt` and
+  `merge_isolation_results`. Confirmed, explicitly absent, still
+  unconfirmed and conflicting bindings are reported separately; no
+  binding is ever filled with an invented empty value. Sampling windows
+  gate whether follow-up receipts may be merged into one result.
+- Added `ObjectType.with_value` for assembling resolved bindings from a
+  fresh value.
+
 Revision 7.1.33, released on Nov 15, 2026
 -----------------------------------------
 

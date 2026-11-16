@@ -40,11 +40,20 @@ from typing import AsyncGenerator
 from pysnmp.entity.engine import SnmpEngine
 from pysnmp.entity.rfc3413 import cmdgen
 from pysnmp.hlapi import varbinds
+from pysnmp.hlapi.isolation import (
+    IsolationPlan,
+    IsolationPlanner,
+    IsolationResult,
+    Receipt,
+    RetryBudget,
+    snmp_version,
+)
 from pysnmp.hlapi.v3arch.asyncio.auth import CommunityData, UsmUserData
 from pysnmp.hlapi.v3arch.asyncio.context import ContextData
 from pysnmp.hlapi.v3arch.asyncio.lcd import CommandGeneratorLcdConfigurator
 from pysnmp.hlapi.v3arch.asyncio.transport import AbstractTransportTarget
 from pysnmp.proto import errind
+from pysnmp.proto.api import v2c
 from pysnmp.proto.rfc1902 import Integer32, Null
 from pysnmp.proto.rfc1905 import EndOfMibView, endOfMibView
 from pysnmp.smi.rfc1902 import ObjectType
@@ -52,6 +61,7 @@ from pysnmp.smi.rfc1902 import ObjectType
 
 __all__ = [
     "get_cmd",
+    "get_cmd_isolated",
     "next_cmd",
     "set_cmd",
     "bulk_cmd",
@@ -187,6 +197,211 @@ async def get_cmd(
         (options.get("lookupMib", True), future),
     )
     return await future
+
+
+async def _get_cmd_receipt(
+    snmpEngine: SnmpEngine,
+    authData: "CommunityData | UsmUserData",
+    transportTarget: AbstractTransportTarget,
+    contextData: ContextData,
+    varBinds,
+):
+    """Send one GET and return its PDU fields without clamping.
+
+    Unlike :func:`get_cmd`, this keeps the raw ``error-index`` so callers can
+    detect an index outside the response binding range, and it reports the
+    request/response identity separately.
+    """
+    addrName, paramsName = LCD.configure(
+        snmpEngine, authData, transportTarget, contextData.contextName
+    )
+
+    reqPDU = v2c.GetRequestPDU()
+    v2c.apiPDU.set_defaults(reqPDU)
+    v2c.apiPDU.set_varbinds(reqPDU, varBinds)
+    request_id = int(v2c.apiPDU.get_request_id(reqPDU))
+
+    future = asyncio.get_running_loop().create_future()
+
+    def __receipt_callback(
+        snmpEngine: SnmpEngine, sendRequestHandle, errorIndication, PDU, cbCtx
+    ):
+        if future.cancelled():
+            return
+        if PDU is None:
+            future.set_result(
+                {
+                    "error_indication": errorIndication,
+                    "error_status": 0,
+                    "error_index": 0,
+                    "values": (),
+                    "request_id": request_id,
+                    "response_request_id": None,
+                    "matched": errorIndication != "badResponse",
+                }
+            )
+            return
+        future.set_result(
+            {
+                "error_indication": None,
+                "error_status": int(v2c.apiPDU.get_error_status(PDU)),
+                # Read the raw component: apiPDU.get_error_index() clamps
+                # values outside the binding list, which would hide a
+                # malformed response.
+                "error_index": int(PDU.getComponentByPosition(2)),
+                "values": tuple(
+                    value for _, value in v2c.apiPDU.get_varbinds(PDU)
+                ),
+                "request_id": request_id,
+                "response_request_id": int(v2c.apiPDU.get_request_id(PDU)),
+                "matched": errorIndication != "badResponse",
+            }
+        )
+
+    cmdgen.GetCommandGenerator().send_pdu(
+        snmpEngine,
+        addrName,
+        contextData.contextEngineId,
+        contextData.contextName,
+        reqPDU,
+        __receipt_callback,
+        None,
+    )
+    return await future
+
+
+async def get_cmd_isolated(
+    snmpEngine: SnmpEngine,
+    authData: "CommunityData | UsmUserData",
+    transportTarget: AbstractTransportTarget,
+    contextData: ContextData,
+    *varBinds: ObjectType,
+    **options,
+) -> IsolationResult:
+    r"""Perform a multi-binding GET with error isolation.
+
+    The first request carries at most ``requestSize`` bindings.  When the
+    agent reports an error, the planner re-queries only the bindings that
+    the real response left unresolved.  Bindings confirmed by an earlier
+    round are reused; bindings the agent explicitly declared missing are
+    reported as absent.  No binding is ever filled with an empty value.
+
+    Parameters
+    ----------
+    snmpEngine : :py:class:`~pysnmp.hlapi.v3arch.asyncio.SnmpEngine`
+        Class instance representing SNMP engine.
+
+    authData : :py:class:`~pysnmp.hlapi.v3arch.asyncio.CommunityData` or :py:class:`~pysnmp.hlapi.v3arch.asyncio.UsmUserData`
+        Class instance representing SNMP credentials.  Its message
+        processing model selects the SNMP version used to interpret
+        ``error-status``, ``error-index`` and exception values.
+
+    transportTarget : :py:class:`~pysnmp.hlapi.v3arch.asyncio.UdpTransportTarget` or :py:class:`~pysnmp.hlapi.v3arch.asyncio.Udp6TransportTarget`
+        Class instance representing transport type along with SNMP peer
+        address.
+
+    contextData : :py:class:`~pysnmp.hlapi.v3arch.asyncio.ContextData`
+        Class instance representing SNMP ContextEngineId and ContextName
+        values.
+
+    \*varBinds : :py:class:`~pysnmp.smi.rfc1902.ObjectType`
+        One or more class instances representing MIB variables to place
+        into SNMP request.
+
+    Other Parameters
+    ----------------
+    \*\*options :
+        Request options:
+
+        * `lookupMib` - resolve response MIB variables.  Default is `True`.
+        * `requestSize` - maximum bindings in one request.  Defaults to the
+          budget's ``max_bindings_per_request``.
+        * `budget` - :class:`~pysnmp.hlapi.isolation.RetryBudget` instance.
+        * `maxRequests`, `maxAttemptsPerBinding` - shortcuts for budget
+          fields.
+        * `samplingWindow` - sampling window token; receipts from
+          incompatible windows are not merged into the result.
+        * `reused` - previously confirmed
+          :class:`~pysnmp.hlapi.isolation.BindingOutcome` objects.
+        * `onPlan` - callable invoked with every
+          :class:`~pysnmp.hlapi.isolation.IsolationPlan` before it is sent.
+
+    Returns
+    -------
+    :class:`~pysnmp.hlapi.isolation.IsolationResult`
+        Per-binding outcomes in the original request order.  Use
+        ``confirmed``, ``absent``, ``unconfirmed`` and ``conflicts`` to see
+        the three groups separately.
+    """
+    requested = VB_PROCESSOR.make_varbinds(snmpEngine.cache, varBinds)
+    version = snmp_version(authData)
+
+    budget = options.get("budget")
+    if budget is None:
+        budget = RetryBudget(
+            max_requests=options.get("maxRequests", 8),
+            max_bindings_per_request=options.get("requestSize", 16),
+            max_attempts_per_binding=options.get("maxAttemptsPerBinding", 3),
+        )
+
+    request_size = options.get("requestSize")
+    lookup_mib = options.get("lookupMib", True)
+
+    async def send(plan: IsolationPlan) -> Receipt:
+        raw = await _get_cmd_receipt(
+            snmpEngine,
+            authData,
+            transportTarget,
+            contextData,
+            plan.bindings,
+        )
+        values = raw["values"]
+        if raw["error_indication"] is None and values and lookup_mib:
+            try:
+                values = VB_PROCESSOR.unmake_varbinds(
+                    snmpEngine.cache,
+                    tuple(
+                        (binding[0], value)
+                        for binding, value in zip(plan.bindings, values)
+                    ),
+                    True,
+                )
+                values = tuple(binding[1] for binding in values)
+            except Exception:
+                # Keep the raw values; MIB lookup is a presentation concern.
+                pass
+        return Receipt(
+            request_bindings=plan.bindings,
+            error_status=raw["error_status"],
+            error_index=raw["error_index"],
+            values=values,
+            error_indication=raw["error_indication"],
+            version=version,
+            positions=plan.positions,
+            request_id=raw["request_id"],
+            response_request_id=raw["response_request_id"],
+            matched=raw["matched"],
+            row=plan.row,
+        )
+
+    planner = IsolationPlanner(
+        requested,
+        version=version,
+        budget=budget,
+        request_size=request_size,
+        sampling_window=options.get("samplingWindow"),
+        reused=options.get("reused", ()),
+    )
+    on_plan = options.get("onPlan")
+
+    while True:
+        plan = planner.next_plan()
+        if plan is None:
+            return planner.result()
+        if on_plan is not None:
+            on_plan(plan)
+        receipt = await send(plan)
+        planner.record(receipt, positions=plan.positions)
 
 
 async def set_cmd(
