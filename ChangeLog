@@ -2,6 +2,20 @@ Version 0.28 (June 2022)
 
     * BaseDirectory: Add support for $XDG_STATE_DIR
 
+Unreleased
+
+    * Menu: Record why entries are absent from a menu
+      (Menu.getExcludedEntries / getExclusionReason), including matching
+      Exclude rules and their XML source.
+    * Menu: Preserve every menu in which an application appears
+      (MenuEntry.Parents, Menu.getEntryAppearances).
+    * Menu: Follow MergeFile per branch so one file can be merged into
+      several menus while cycles still terminate.
+    * Menu: A missing MergeFile no longer affects the rest of the tree, and
+      is reported in Menu.MissingMergeFiles.
+    * Menu: Honour layouts with a single element.
+
+
 Version 0.27 (October 2020)
 
     * Fix some ResourceWarnings

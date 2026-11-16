@@ -63,6 +63,67 @@ HIDDEN = "Hidden"
 EMPTY = "Empty"
 NOT_SHOW_IN = "NotShowIn"
 NO_EXEC = "NoExec"
+EXCLUDED = "Excluded"
+NOT_INCLUDED = "NotIncluded"
+ALLOCATED = "Allocated"
+NOT_IN_LAYOUT = "NotInLayout"
+MISSING_MERGE_FILE = "MissingMergeFile"
+
+
+class ExclusionReason:
+    """A record explaining why an item is absent from a menu.
+
+    ``Reason`` is one of the module level constants (``EXCLUDED``,
+    ``NOT_INCLUDED``, ``NOT_IN_LAYOUT``, ``ALLOCATED``,
+    ``MISSING_MERGE_FILE``, ``NO_DISPLAY``, ``HIDDEN``, ``DELETED``,
+    ``EMPTY``, ``NOT_SHOW_IN`` or ``NO_EXEC``).  When the reason is an
+    ``<Exclude>`` rule, ``Rule`` points at the matching :class:`Rule` and
+    ``Detail`` contains its XML source.
+    """
+
+    def __init__(self, menu, entry, reason, rule=None, detail=""):
+        self.Menu = menu
+        self.Entry = entry
+        self.Reason = reason
+        self.Rule = rule
+        self.Detail = detail
+        self.DesktopFileID = getattr(entry, "DesktopFileID", None)
+        if hasattr(entry, "ExclusionReasons"):
+            already = any(old.Menu is menu and old.Reason == reason
+                          for old in entry.ExclusionReasons)
+            if not already:
+                entry.ExclusionReasons.append(self)
+        if hasattr(entry, "ExcludedFrom") and menu not in entry.ExcludedFrom:
+            entry.ExcludedFrom.append(menu)
+
+    def __str__(self):
+        return "%s: %s" % (self.Reason, self.DesktopFileID)
+
+    def __repr__(self):
+        return "<ExclusionReason %r for %r>" % (self.Reason,
+                                                self.DesktopFileID)
+
+    # Lowercase aliases are convenient for callers that do not use the
+    # historical CamelCase style of this module.
+    @property
+    def menu(self):
+        return self.Menu
+
+    @property
+    def entry(self):
+        return self.Entry
+
+    @property
+    def reason(self):
+        return self.Reason
+
+    @property
+    def rule(self):
+        return self.Rule
+
+    @property
+    def detail(self):
+        return self.Detail
 
 
 class Menu:
@@ -98,6 +159,26 @@ class Menu:
         self.Rules = []
         self.Submenus = []
 
+        # Entries which were not shown in this menu, with the reason why.
+        # Every entry which was considered for this menu but not added to it
+        # is recorded here, so the decision can be inspected later.
+        self.ExcludedEntries = []
+        self.ExcludedSubmenus = []
+        # Exclusion records produced while applying Include/Exclude rules.
+        # sort() combines these with visibility/layout records.
+        self._generation_exclusions = []
+        self._layout_exclusions = []
+        self._visibility_exclusions = []
+        # The merged menu files which contributed to this menu, in order.
+        self.MergeFiles = []
+        # Merge files which could not be read, and cycles which were cut.
+        self.MissingMergeFiles = []
+        self.MergeCycles = []
+        self.InvalidMergeFiles = []
+        # Stable identity for merge bookkeeping (menu names may be changed by
+        # moves, and equal names are merged into one Menu object).
+        self._identity = object()
+
     def __str__(self):
         return self.Name
 
@@ -131,6 +212,28 @@ class Menu:
 
         for submenu in other.Submenus:
             self.addSubmenu(submenu)
+
+        for filename in other.MergeFiles:
+            if filename not in self.MergeFiles:
+                self.MergeFiles.append(filename)
+        for filename in other.MissingMergeFiles:
+            if filename not in self.MissingMergeFiles:
+                self.MissingMergeFiles.append(filename)
+        for filename in other.MergeCycles:
+            if filename not in self.MergeCycles:
+                self.MergeCycles.append(filename)
+        for filename in other.InvalidMergeFiles:
+            if filename not in self.InvalidMergeFiles:
+                self.InvalidMergeFiles.append(filename)
+        for record in other._generation_exclusions:
+            record.Menu = self
+            if (record.Entry in self.MenuEntries or
+                    not isinstance(record.Entry, MenuEntry)):
+                self._generation_exclusions.append(record)
+        for record in other._layout_exclusions:
+            record.Menu = self
+        for record in other._visibility_exclusions:
+            record.Menu = self
 
         return self
 
@@ -236,9 +339,83 @@ class Menu:
         except AttributeError:
             return ""
 
+    def getExcludedEntries(self, deep=False):
+        """Returns records for entries which this menu did not show.
+
+        Each record is an :class:`ExclusionReason` explaining whether the
+        entry matched an ``<Exclude>`` rule, was not matched by any
+        ``<Include>`` rule, is hidden, was excluded by the layout, and so on.
+        With ``deep=True`` records from submenus are included as well.
+        """
+        records = list(self.ExcludedEntries)
+        if deep:
+            for submenu in self.Submenus:
+                records.extend(submenu.getExcludedEntries(True))
+        return records
+
+    def getExclusionReason(self, desktopfileid, deep=False):
+        """Return the exclusion records for one DesktopFileID in this menu."""
+        return [record for record in self.getExcludedEntries(deep)
+                if record.DesktopFileID == desktopfileid]
+
+    def getExclusionReasons(self, deep=False):
+        """Return all exclusion records for this menu."""
+        return self.getExcludedEntries(deep)
+
+    def getExcludedSubmenus(self, deep=False):
+        """Return exclusion records for submenus which are not visible."""
+        if deep:
+            return [record for record in self.getExcludedEntries(True)
+                    if isinstance(record.Entry, Menu)]
+        return list(self.ExcludedSubmenus)
+
+    def getAppearances(self, deep=False, visible=True):
+        """Return a mapping of DesktopFileID to the menus showing it.
+
+        An application may legitimately be shown in more than one menu; this
+        method makes those relationships explicit.  With ``deep=True`` the
+        submenus are traversed as well.  By default only entries which are
+        actually visible are reported; pass ``visible=False`` to include
+        allocated entries hidden by the layout or visibility checks.
+        """
+        appearances = {}
+        for entry in self.MenuEntries:
+            if visible and self not in entry.Appearances:
+                continue
+            appearances.setdefault(entry.DesktopFileID, []).append(self)
+        if deep:
+            for submenu in self.Submenus:
+                for desktopfileid, menus in submenu.getAppearances(
+                        True, visible).items():
+                    target = appearances.setdefault(desktopfileid, [])
+                    for menu in menus:
+                        if menu not in target:
+                            target.append(menu)
+        return appearances
+
+    def getEntryAppearances(self, desktopfileid, deep=True, visible=True):
+        """Return the menus in which ``desktopfileid`` is shown."""
+        result = [menu for menu in [self] if any(
+            entry.DesktopFileID == desktopfileid and
+            (not visible or self in entry.Appearances)
+            for entry in self.MenuEntries)]
+        if deep:
+            for submenu in self.Submenus:
+                for menu in submenu.getEntryAppearances(
+                        desktopfileid, True, visible):
+                    if menu not in result:
+                        result.append(menu)
+        return result
+
     def sort(self):
         self.Entries = []
         self.Visible = 0
+        self._layout_exclusions = []
+        self._visibility_exclusions = []
+
+        for menuentry in self.MenuEntries:
+            if self in menuentry.Appearances:
+                menuentry.Appearances.remove(self)
 
         for submenu in self.Submenus:
             submenu.sort()
@@ -261,54 +438,78 @@ class Menu:
             elif order[0] == "Filename":
                 menuentry = self.getMenuEntry(order[1])
                 if menuentry:
-                    self.Entries.append(menuentry)
+                    if menuentry not in self.Entries:
+                        self.Entries.append(menuentry)
+                else:
+                    self._layout_exclusions.append(
+                        ExclusionReason(self, _NamedEntry(order[1]),
+                                        NOT_IN_LAYOUT,
+                                        detail=order[1]))
             elif order[0] == "Menuname":
                 submenu = self.getMenu(order[1])
                 if submenu:
                     if submenu.Layout.inline:
                         self.merge_inline(submenu)
-                    else:
+                    elif submenu not in self.Entries:
                         self.Entries.append(submenu)
+                else:
+                    self._layout_exclusions.append(
+                        ExclusionReason(self, _NamedEntry(order[1]),
+                                        NOT_IN_LAYOUT,
+                                        detail=order[1]))
             elif order[0] == "Merge":
                 if order[1] == "files" or order[1] == "all":
                     self.MenuEntries.sort()
                     for menuentry in self.MenuEntries:
                         if menuentry.DesktopFileID not in _entries:
-                            self.Entries.append(menuentry)
-                elif order[1] == "menus" or order[1] == "all":
+                            if menuentry not in self.Entries:
+                                self.Entries.append(menuentry)
+                if order[1] == "menus" or order[1] == "all":
                     self.Submenus.sort()
                     for submenu in self.Submenus:
                         if submenu.Name not in _submenus:
                             if submenu.Layout.inline:
                                 self.merge_inline(submenu)
-                            else:
+                            elif submenu not in self.Entries:
                                 self.Entries.append(submenu)
+
+        # Entries explicitly named in the layout are the only ones which may
+        # appear when the layout has no <Merge> element.  Record the rest so
+        # callers can see why they are absent.  An explicit but empty <Layout>
+        # intentionally shows nothing.
+        layout_has_merge = any(order[0] == "Merge" for order in self.Layout.order)
+        if self.Layout.explicit and not layout_has_merge:
+            for menuentry in self.MenuEntries:
+                if menuentry not in self.Entries:
+                    self._layout_exclusions.append(
+                        ExclusionReason(self, menuentry, NOT_IN_LAYOUT,
+                                        detail=menuentry.DesktopFileID))
+            for submenu in self.Submenus:
+                if submenu not in self.Entries:
+                    self._layout_exclusions.append(
+                        ExclusionReason(self, submenu, NOT_IN_LAYOUT,
+                                        detail=submenu.Name))
 
         # getHidden / NoDisplay / OnlyShowIn / NotOnlyShowIn / Deleted / NoExec
         for entry in self.Entries:
             entry.Show = True
             self.Visible += 1
+            reason = None
             if isinstance(entry, Menu):
                 if entry.Deleted is True:
-                    entry.Show = DELETED
-                    self.Visible -= 1
+                    reason = DELETED
                 elif isinstance(entry.Directory, MenuEntry):
                     if entry.Directory.DesktopEntry.getNoDisplay():
-                        entry.Show = NO_DISPLAY
-                        self.Visible -= 1
+                        reason = NO_DISPLAY
                     elif entry.Directory.DesktopEntry.getHidden():
-                        entry.Show = HIDDEN
-                        self.Visible -= 1
+                        reason = HIDDEN
             elif isinstance(entry, MenuEntry):
                 if entry.DesktopEntry.getNoDisplay():
-                    entry.Show = NO_DISPLAY
-                    self.Visible -= 1
+                    reason = NO_DISPLAY
                 elif entry.DesktopEntry.getHidden():
-                    entry.Show = HIDDEN
-                    self.Visible -= 1
+                    reason = HIDDEN
                 elif entry.DesktopEntry.getTryExec() and not entry.DesktopEntry.findTryExec():
-                    entry.Show = NO_EXEC
-                    self.Visible -= 1
+                    reason = NO_EXEC
                 elif xdg.Config.windowmanager:
                     if (entry.DesktopEntry.getOnlyShowIn() != [] and (
                             xdg.Config.windowmanager not in entry.DesktopEntry.getOnlyShowIn()
@@ -316,10 +517,14 @@ class Menu:
                     ) or (
                         xdg.Config.windowmanager in entry.DesktopEntry.getNotShowIn()
                     ):
-                        entry.Show = NOT_SHOW_IN
-                        self.Visible -= 1
+                        reason = NOT_SHOW_IN
             elif isinstance(entry, Separator):
                 self.Visible -= 1
+            if reason is not None:
+                entry.Show = reason
+                self.Visible -= 1
+                self._visibility_exclusions.append(
+                    ExclusionReason(self, entry, reason))
         # remove separators at the beginning and at the end
         if len(self.Entries) > 0:
             if isinstance(self.Entries[0], Separator):
@@ -333,8 +538,24 @@ class Menu:
             if isinstance(entry, Menu) and not entry.Layout.show_empty and entry.Visible == 0:
                 entry.Show = EMPTY
                 self.Visible -= 1
+                self._visibility_exclusions.append(
+                    ExclusionReason(self, entry, EMPTY))
                 if entry.NotInXml is True:
                     self.Entries.remove(entry)
+
+        self.ExcludedEntries = (list(self._generation_exclusions) +
+                                list(self._layout_exclusions) +
+                                list(self._visibility_exclusions))
+        self.ExcludedSubmenus = [r for r in self.ExcludedEntries
+                                 if isinstance(r.Entry, Menu)]
+
+        # Record where this menu's entries are actually visible.  Unlike
+        # MenuEntry.Parents, this excludes entries hidden by the layout or by
+        # NoDisplay/Hidden/Deleted/etc.
+        for entry in self.Entries:
+            if isinstance(entry, MenuEntry) and entry.Show is True:
+                if self not in entry.Appearances:
+                    entry.Appearances.append(self)
 
     """ PRIVATE STUFF """
     def addSubmenu(self, newmenu):
@@ -381,12 +602,13 @@ class Move:
 class Layout:
     "Menu Layout class"
     def __init__(self, show_empty=False, inline=False, inline_limit=4,
-                 inline_header=True, inline_alias=False):
+                 inline_header=True, inline_alias=False, explicit=False):
         self.show_empty = show_empty
         self.inline = inline
         self.inline_limit = inline_limit
         self.inline_header = inline_header
         self.inline_alias = inline_alias
+        self.explicit = explicit
         self._order = []
         self._default_order = [
             ['Merge', 'menus'],
@@ -395,7 +617,9 @@ class Layout:
 
     @property
     def order(self):
-        return self._order if self._order else self._default_order
+        if self._order or self.explicit:
+            return self._order
+        return self._default_order
 
     @order.setter
     def order(self, order):
@@ -425,27 +649,36 @@ class Rule:
         rule = Rule(type, tree)
         return rule
 
-    def __init__(self, type, expression):
+    def __init__(self, type, expression, source=None, filename=None):
         # Type is TYPE_INCLUDE or TYPE_EXCLUDE
         self.Type = type
         # expression is ast.Expression
         self.expression = expression
         self.code = compile(self.expression, '<compiled-menu-rule>', 'eval')
+        # The XML that produced the rule, for diagnostics and exclusion records.
+        self.Source = source
+        self.Filename = filename
 
     def __str__(self):
         return ast.dump(self.expression)
+
+    def matches(self, menuentry):
+        """Return True if the rule applies to ``menuentry``."""
+        return bool(eval(self.code))
 
     def apply(self, menuentries, run):
         for menuentry in menuentries:
             if run == 2 and (menuentry.MatchedInclude is True or
                              menuentry.Allocated is True):
                 continue
-            if eval(self.code):
+            if self.matches(menuentry):
                 if self.Type is Rule.TYPE_INCLUDE:
                     menuentry.Add = True
                     menuentry.MatchedInclude = True
+                    menuentry.IncludeRule = self
                 else:
                     menuentry.Add = False
+                    menuentry.ExcludeRule = self
         return menuentries
 
 
@@ -466,12 +699,22 @@ class MenuEntry:
 
         # Semi-Private
         self.Original = None
+        # Menus in which this entry is allocated (selected by the menu rules).
         self.Parents = []
+        # Menus in which this entry is actually visible after layout and
+        # visibility checks.
+        self.Appearances = []
+        # Every menu which considered this entry and the reason it was not
+        # shown there.
+        self.ExclusionReasons = []
+        self.ExcludedFrom = []
 
         # Private Stuff
         self.Allocated = False
         self.Add = False
         self.MatchedInclude = False
+        self.IncludeRule = None
+        self.ExcludeRule = None
 
         # Caching
         self.Categories = self.DesktopEntry.getCategories()
@@ -565,6 +808,17 @@ class Header:
         return self.Name
 
 
+class _NamedEntry:
+    """Placeholder for a layout item which could not be resolved."""
+
+    def __init__(self, desktopfileid):
+        self.DesktopFileID = desktopfileid
+        self.Name = desktopfileid
+
+    def __str__(self):
+        return self.DesktopFileID
+
+
 TYPE_DIR, TYPE_FILE = 0, 1
 
 
@@ -607,10 +861,45 @@ def _dedupe(_list):
     return _list
 
 
+class MergeContext:
+    """State used while following one chain of <MergeFile> elements.
+
+    A menu file may legitimately be merged into several different menus, so
+    merged files must not be tracked globally.  A file which is already on the
+    current chain, however, would recurse forever.  Keeping the chain on the
+    context makes merges finite without preventing the same file from being
+    reused in sibling branches.
+    """
+
+    def __init__(self, root=None):
+        self.stack = []
+        if root:
+            self.stack.append(os.path.abspath(root))
+
+    def push(self, filename):
+        self.stack.append(os.path.abspath(filename))
+
+    def pop(self):
+        self.stack.pop()
+
+    def contains(self, filename):
+        return os.path.abspath(filename) in self.stack
+
+    def resolve(self, value, filename):
+        if os.path.isabs(value):
+            return os.path.abspath(value)
+        return os.path.abspath(os.path.join(os.path.dirname(filename), value))
+
+
 class XMLMenuBuilder(object):
 
     def __init__(self, debug=False):
         self.debug = debug
+        self._merge_context = MergeContext()
+        self._missing_merge_files = []
+        self._invalid_merge_files = []
+        self._merge_cycles = []
+        self._merged_targets = set()
 
     def parse(self, filename=None):
         """Load an applications.menu file.
@@ -627,6 +916,7 @@ class XMLMenuBuilder(object):
             filename = _get_menu_file_path(candidate)
         if not filename:
             raise ParsingError('File not found', "/etc/xdg/menus/%s" % candidate)
+        filename = os.path.abspath(filename)
         # check if it is a .menu file
         if not filename.endswith(".menu"):
             raise ParsingError('Not a .menu file', filename)
@@ -637,13 +927,19 @@ class XMLMenuBuilder(object):
             raise ParsingError('Not a valid .menu file', filename)
 
         # parse menufile
-        self._merged_files = set()
         self._directory_dirs = set()
+        self._merge_context = MergeContext(filename)
+        self._missing_merge_files = []
+        self._invalid_merge_files = []
+        self._merge_cycles = []
+        self._merged_targets = set()
         self.cache = MenuEntryCache()
 
         menu = self.parse_menu(tree.getroot(), filename)
         menu.tree = tree
         menu.filename = filename
+        menu.Filename = filename
+        menu.MergeFiles = [filename]
 
         self.handle_moves(menu)
         self.post_parse(menu)
@@ -657,13 +953,39 @@ class XMLMenuBuilder(object):
 
         return menu
 
+    def get_merge_files(self, menu):
+        """Return every menu file merged into ``menu`` or its submenus."""
+        filenames = []
+        if menu.Filename:
+            filenames.append(menu.Filename)
+        for filename in menu.MergeFiles:
+            if filename not in filenames:
+                filenames.append(filename)
+        for submenu in menu.Submenus:
+            for filename in self.get_merge_files(submenu):
+                if filename not in filenames:
+                    filenames.append(filename)
+        return filenames
+
+    def get_missing_merge_files(self):
+        """Return records for merge files which could not be found."""
+        return list(self._missing_merge_files)
+
+    def get_merge_cycles(self):
+        """Return records for merge files skipped to break a cycle."""
+        return list(self._merge_cycles)
+
+    def get_invalid_merge_files(self):
+        """Return records for merge files which could not be parsed."""
+        return list(self._invalid_merge_files)
+
     def parse_menu(self, node, filename):
         menu = Menu()
+        menu.Filename = filename
         self.parse_node(node, filename, menu)
         return menu
 
-    def parse_node(self, node, filename, parent=None):
-        num_children = len(node)
+    def parse_node(self, node, filename, parent=None, merged_root=False):
         for child in node:
             tag, text = child.tag, child.text
             text = text.strip() if text else None
@@ -679,7 +1001,10 @@ class XMLMenuBuilder(object):
             elif tag == 'DefaultDirectoryDirs':
                 self.parse_default_directory_dir(filename, parent)
             elif tag == 'Name' and text:
-                parent.Name = text
+                # The root <Name> of a merge file names the file's own menu,
+                # not the menu it is merged into.
+                if not merged_root:
+                    parent.Name = text
             elif tag == 'Directory' and text:
                 parent.Directories.append(text)
             elif tag == 'OnlyUnallocated':
@@ -691,7 +1016,7 @@ class XMLMenuBuilder(object):
             elif tag == 'NotDeleted':
                 parent.Deleted = False
             elif tag == 'Include' or tag == 'Exclude':
-                parent.Rules.append(self.parse_rule(child))
+                parent.Rules.append(self.parse_rule(child, filename))
             elif tag == 'MergeFile':
                 if child.attrib.get("type", None) == "parent":
                     self.parse_merge_file("applications.menu", child, filename, parent)
@@ -704,11 +1029,9 @@ class XMLMenuBuilder(object):
             elif tag == 'Move':
                 parent.Moves.append(self.parse_move(child))
             elif tag == 'Layout':
-                if num_children > 1:
-                    parent.Layout = self.parse_layout(child)
+                parent.Layout = self.parse_layout(child)
             elif tag == 'DefaultLayout':
-                if num_children > 1:
-                    parent.DefaultLayout = self.parse_layout(child)
+                parent.DefaultLayout = self.parse_layout(child)
             elif tag == 'LegacyDir' and text:
                 self.parse_legacy_dir(text, child.attrib.get("prefix", ""), filename, parent)
             elif tag == 'KDELegacyDirs':
@@ -720,7 +1043,8 @@ class XMLMenuBuilder(object):
             inline=_to_bool(node.attrib.get("inline", False)),
             inline_limit=int(node.attrib.get("inline_limit", 4)),
             inline_header=_to_bool(node.attrib.get("inline_header", True)),
-            inline_alias=_to_bool(node.attrib.get("inline_alias", False))
+            inline_alias=_to_bool(node.attrib.get("inline_alias", False)),
+            explicit=True
         )
         order = []
         for child in node:
@@ -761,7 +1085,7 @@ class XMLMenuBuilder(object):
 
     # ---------- <Rule> parsing
 
-    def parse_rule(self, node):
+    def parse_rule(self, node, filename=None):
         type = Rule.TYPE_INCLUDE if node.tag == 'Include' else Rule.TYPE_EXCLUDE
         tree = ast.Expression(lineno=1, col_offset=0)
         expr = self.parse_bool_op(node, ast.Or())
@@ -770,7 +1094,16 @@ class XMLMenuBuilder(object):
         else:
             tree.body = _ast_const('False')
         ast.fix_missing_locations(tree)
-        return Rule(type, tree)
+        return Rule(type, tree, source=self._rule_source(node), filename=filename)
+
+    def _rule_source(self, node):
+        try:
+            return etree.tostring(node, encoding="unicode")
+        except (AttributeError, TypeError):
+            try:
+                return etree.tostring(node).decode("utf-8", "replace")
+            except (AttributeError, TypeError):
+                return ""
 
     def parse_bool_op(self, node, operator):
         values = []
@@ -841,6 +1174,11 @@ class XMLMenuBuilder(object):
 
     # ---------- Merge Stuff
 
+    def _record_merge_file(self, filename, parent):
+        filename = os.path.abspath(filename)
+        if filename not in parent.MergeFiles:
+            parent.MergeFiles.append(filename)
+
     def parse_merge_file(self, value, child, filename, parent):
         if child.attrib.get("type", None) == "parent":
             for d in xdg_config_dirs:
@@ -849,18 +1187,21 @@ class XMLMenuBuilder(object):
                     for p in xdg_config_dirs:
                         if d == p:
                             continue
-                        if os.path.isfile(os.path.join(p, rel_file)):
-                            self.merge_file(os.path.join(p, rel_file), child, parent)
+                        candidate = os.path.join(p, rel_file)
+                        if os.path.isfile(candidate):
+                            self.merge_file(candidate, child, parent)
                             break
         else:
-            value = _check_file_path(value, filename, TYPE_FILE)
-            if value:
+            value = self._merge_context.resolve(value, filename)
+            if os.path.isfile(value):
                 self.merge_file(value, child, parent)
+            else:
+                self._record_missing_merge_file(value, parent)
 
     def parse_merge_dir(self, value, child, filename, parent):
         value = _check_file_path(value, filename, TYPE_DIR)
         if value:
-            for item in os.listdir(value):
+            for item in sorted(os.listdir(value)):
                 try:
                     if item.endswith(".menu"):
                         self.merge_file(os.path.join(value, item), child, parent)
@@ -872,29 +1213,73 @@ class XMLMenuBuilder(object):
         for d in reversed(xdg_config_dirs):
             self.parse_merge_dir(os.path.join(d, "menus", basename + "-merged"), child, filename, parent)
 
+    def _record_missing_merge_file(self, filename, parent):
+        record = {
+            "Filename": filename,
+            "Menu": parent,
+        }
+        self._missing_merge_files.append(record)
+        if filename not in parent.MissingMergeFiles:
+            parent.MissingMergeFiles.append(filename)
+        placeholder = _NamedEntry(os.path.basename(filename))
+        detail = "Merge file not found: %s" % filename
+        parent._generation_exclusions.append(
+            ExclusionReason(parent, placeholder, MISSING_MERGE_FILE,
+                            detail=detail))
+
     def merge_file(self, filename, child, parent):
-        # check for infinite loops
-        if filename in self._merged_files:
+        filename = os.path.abspath(filename)
+        # A file which is already in the current merge chain would recurse
+        # forever.  The same file in another branch is fine, so the chain is
+        # tracked per merge branch instead of globally.
+        if self._merge_context.contains(filename):
+            record = {
+                "Filename": filename,
+                "Menu": parent,
+            }
+            self._merge_cycles.append(record)
+            if filename not in parent.MergeCycles:
+                parent.MergeCycles.append(filename)
             if self.debug:
                 raise ParsingError('Infinite MergeFile loop detected', filename)
-            else:
-                return
-        self._merged_files.add(filename)
+            return
+        # Merging one file into the same menu more than once cannot add
+        # anything new, and in a densely connected merge graph it is the
+        # difference between linear work and exponential traversal.  The key
+        # includes the receiving menu, so the same file may still be merged
+        # into separate sibling menus.
+        target_key = (filename, id(parent._identity))
+        if target_key in self._merged_targets:
+            return
+        self._merged_targets.add(target_key)
         # load file
         try:
             tree = etree.parse(filename)
         except IOError:
+            self._record_missing_merge_file(filename, parent)
             if self.debug:
                 raise ParsingError('File not found', filename)
-            else:
-                return
-        except:
+            return
+        except Exception as exc:
+            record = {
+                "Filename": filename,
+                "Menu": parent,
+                "Error": exc,
+            }
+            self._invalid_merge_files.append(record)
+            if filename not in parent.InvalidMergeFiles:
+                parent.InvalidMergeFiles.append(filename)
             if self.debug:
                 raise ParsingError('Not a valid .menu file', filename)
-            else:
-                return
-        root = tree.getroot()
-        self.parse_node(root, filename, parent)
+            return
+
+        self._record_merge_file(filename, parent)
+        self._merge_context.push(filename)
+        try:
+            root = tree.getroot()
+            self.parse_node(root, filename, parent, merged_root=True)
+        finally:
+            self._merge_context.pop()
 
     # ---------- Legacy Dir Stuff
 
@@ -1015,21 +1400,65 @@ class XMLMenuBuilder(object):
                 break
 
     # Finally generate the menu
+    def _apply_rules(self, menu, menuentries, run):
+        """Apply the menu's rules and say why each entry was kept or dropped.
+
+        Returns the list of entries which are included in this menu.  A record
+        is added to the menu for every entry which was considered but left out,
+        including entries which no Include rule matched at all.
+
+        Rules are evaluated in document order and the last matching rule wins,
+        as required by the menu specification.
+        """
+        excluded = []
+        has_include = any(rule.Type is Rule.TYPE_INCLUDE
+                          for rule in menu.Rules)
+        for menuentry in menuentries:
+            menuentry.Add = False
+            menuentry.MatchedInclude = False
+            menuentry.ExcludeRule = None
+            menuentry.IncludeRule = None
+
+            matched_rule = None
+            for rule in menu.Rules:
+                if rule.matches(menuentry):
+                    matched_rule = rule
+                    if rule.Type is Rule.TYPE_INCLUDE:
+                        menuentry.Add = True
+                        menuentry.MatchedInclude = True
+                        menuentry.IncludeRule = rule
+                    else:
+                        menuentry.Add = False
+                        menuentry.ExcludeRule = rule
+
+            if menuentry.Add:
+                continue
+            if matched_rule is not None and matched_rule.Type is Rule.TYPE_EXCLUDE:
+                excluded.append((menuentry, EXCLUDED, matched_rule))
+            elif has_include:
+                # The entry was a candidate, but no Include rule selected it.
+                excluded.append((menuentry, NOT_INCLUDED, matched_rule))
+
+        menu._generation_exclusions.extend(
+            ExclusionReason(menu, entry, reason, rule,
+                            rule.Source if rule is not None else "")
+            for entry, reason, rule in excluded
+        )
+        return [entry for entry in menuentries if entry.Add is True]
+
     def generate_not_only_allocated(self, menu):
         for submenu in menu.Submenus:
             self.generate_not_only_allocated(submenu)
 
         if menu.OnlyUnallocated is False:
             self.cache.add_menu_entries(menu.AppDirs)
-            menuentries = []
-            for rule in menu.Rules:
-                menuentries = rule.apply(self.cache.get_menu_entries(menu.AppDirs), 1)
-
-            for menuentry in menuentries:
-                if menuentry.Add is True:
+            candidates = self.cache.get_menu_entries(menu.AppDirs)
+            for menuentry in self._apply_rules(menu, candidates, 1):
+                if menu not in menuentry.Parents:
                     menuentry.Parents.append(menu)
-                    menuentry.Add = False
-                    menuentry.Allocated = True
+                menuentry.Add = False
+                menuentry.Allocated = True
+                if menuentry not in menu.MenuEntries:
                     menu.MenuEntries.append(menuentry)
 
     def generate_only_allocated(self, menu):
@@ -1038,14 +1467,20 @@ class XMLMenuBuilder(object):
 
         if menu.OnlyUnallocated is True:
             self.cache.add_menu_entries(menu.AppDirs)
-            menuentries = []
-            for rule in menu.Rules:
-                menuentries = rule.apply(self.cache.get_menu_entries(menu.AppDirs), 2)
-            for menuentry in menuentries:
-                if menuentry.Add is True:
+            candidates = self.cache.get_menu_entries(menu.AppDirs)
+            unallocated = []
+            allocated = []
+            for entry in candidates:
+                if entry.Allocated:
+                    allocated.append(entry)
+                else:
+                    unallocated.append(entry)
+            menu._generation_exclusions.extend(
+                ExclusionReason(menu, entry, ALLOCATED) for entry in allocated)
+            for menuentry in self._apply_rules(menu, unallocated, 2):
+                if menu not in menuentry.Parents:
                     menuentry.Parents.append(menu)
-                #   menuentry.Add = False
-                #   menuentry.Allocated = True
+                if menuentry not in menu.MenuEntries:
                     menu.MenuEntries.append(menuentry)
 
     def handle_moves(self, menu):
