@@ -8,6 +8,7 @@ from .errors import (SignatureBodyMismatchError, InvalidSignatureError, InvalidA
                      InvalidObjectPathError, InvalidInterfaceNameError, InvalidMemberNameError,
                      DBusError)
 from . import introspection
+from . import archive
 from .message import Message
 from . import message_bus
 from . import proxy_object
