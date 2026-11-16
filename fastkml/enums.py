@@ -35,6 +35,7 @@ __all__ = [
     "GridOrigin",
     "PairKey",
     "RefreshMode",
+    "RegionState",
     "RelaxedEnum",
     "Shape",
     "Units",
@@ -98,6 +99,22 @@ class Verbosity(Enum):
     terse = 0
     normal = 1
     verbose = 2
+
+
+@unique
+class RegionState(Enum):
+    """
+    Tri-state result of a Region activation evaluation.
+
+    - ``active``: sufficient evidence proves the region is active.
+    - ``inactive``: sufficient evidence proves the region is not active.
+    - ``undetermined``: required evidence (for example an altitude interval or a
+      level-of-detail bound) is missing, so the state must not be guessed.
+    """
+
+    active = "active"
+    inactive = "inactive"
+    undetermined = "undetermined"
 
 
 @unique

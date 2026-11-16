@@ -16,10 +16,13 @@
 """KML Views."""
 
 import logging
+from collections.abc import Iterable
+from dataclasses import dataclass
 from typing import Any
 
 from fastkml import config
 from fastkml.enums import AltitudeMode
+from fastkml.enums import RegionState
 from fastkml.helpers import enum_subelement
 from fastkml.helpers import float_subelement
 from fastkml.helpers import int_subelement
@@ -33,7 +36,15 @@ from fastkml.mixins import TimeMixin
 from fastkml.registry import RegistryItem
 from fastkml.registry import registry
 
-__all__ = ["Camera", "LatLonAltBox", "Lod", "LookAt", "Region"]
+__all__ = [
+    "Camera",
+    "LatLonAltBox",
+    "Lod",
+    "LookAt",
+    "Region",
+    "RegionState",
+    "Viewport",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -454,6 +465,61 @@ registry.register(
 )
 
 
+def _longitude_spans(
+    west: float | None,
+    east: float | None,
+) -> tuple[tuple[float, float], ...] | None:
+    """
+    Return the longitude spans covered by a west/east bounding pair.
+
+    When ``east`` is smaller than ``west`` the box crosses the antimeridian
+    (180th meridian). It is then interpreted as the real area it covers:
+    one span from ``west`` to +180 and a second one from -180 to ``east``.
+
+    Returns
+    -------
+        tuple of (west, east) longitude spans, or None for incomplete input.
+
+    """
+    if west is None or east is None:
+        return None
+    if west <= east:
+        return ((west, east),)
+    return ((west, 180.0), (-180.0, east))
+
+
+@dataclass(frozen=True)
+class Viewport:
+    """
+    The current geographic viewport and zoom evidence.
+
+    ``north``, ``south``, ``east`` and ``west`` describe the visible geographic
+    bounding box in decimal degrees; an ``east`` smaller than ``west`` denotes a
+    viewport crossing the antimeridian. ``lod_pixels`` is the projected size of
+    a region on screen (the zoom/level-of-detail evidence). ``altitude`` is the
+    camera altitude in meters, interpreted according to ``altitude_mode``.
+    """
+
+    north: float
+    south: float
+    east: float
+    west: float
+    lod_pixels: float | None = None
+    altitude: float | None = None
+    altitude_mode: AltitudeMode | None = None
+
+    def __bool__(self) -> bool:
+        """Return True once all four geographic bounds are provided."""
+        return all(
+            (
+                self.north is not None,
+                self.south is not None,
+                self.east is not None,
+                self.west is not None,
+            ),
+        )
+
+
 class LatLonAltBox(_BaseObject):
     """
     A bounding box defined by geographic coordinates and altitudes.
@@ -562,6 +628,76 @@ class LatLonAltBox(_BaseObject):
                 self.west is not None,
             ),
         )
+
+    def intersects(self, viewport: "Viewport") -> bool | None:
+        """
+        Check whether the box geographically intersects the given viewport.
+
+        Longitude boxes crossing the antimeridian are interpreted by their real
+        covered area rather than as an empty or inverted box.
+
+        Args:
+        ----
+            viewport: The viewport (geographic bounding box) to test against.
+
+        Returns:
+        -------
+            True if the boxes intersect, False if they are disjoint, or None if
+            the available evidence is insufficient to decide.
+
+        """
+        if not self or not viewport:
+            return None
+        box_spans = _longitude_spans(self.west, self.east)
+        view_spans = _longitude_spans(viewport.west, viewport.east)
+        if box_spans is None or view_spans is None:
+            return None
+        longitude_overlap = any(
+            box_west <= view_east and box_east >= view_west
+            for box_west, box_east in box_spans
+            for view_west, view_east in view_spans
+        )
+        if not longitude_overlap:
+            return False
+        assert self.north is not None  # noqa: S101
+        assert self.south is not None  # noqa: S101
+        assert viewport.north is not None  # noqa: S101
+        assert viewport.south is not None  # noqa: S101
+        return self.south <= viewport.north and self.north >= viewport.south
+
+    def altitude_state(self, viewport: "Viewport") -> RegionState:
+        """
+        Evaluate the altitude portion of the box against the viewport.
+
+        A clamp-to-ground box (the KML default) carries no altitude restriction
+        and always passes. For relative-to-ground or absolute boxes the altitude
+        interval must contain the viewport altitude. Missing altitude evidence,
+        or incompatible altitude reference frames, yields ``undetermined``
+        instead of assuming coverage.
+
+        Args:
+        ----
+            viewport: The viewport providing the camera altitude evidence.
+
+        Returns:
+        -------
+            RegionState.active, RegionState.inactive or RegionState.undetermined.
+
+        """
+        if self.altitude_mode in (None, AltitudeMode.clamp_to_ground):
+            return RegionState.active
+        if self.min_altitude is None or self.max_altitude is None:
+            return RegionState.undetermined
+        if viewport.altitude is None:
+            return RegionState.undetermined
+        view_mode = viewport.altitude_mode
+        if view_mode == AltitudeMode.clamp_to_ground:
+            view_mode = AltitudeMode.relative_to_ground
+        if view_mode is not None and view_mode != self.altitude_mode:
+            return RegionState.undetermined
+        if self.min_altitude <= viewport.altitude <= self.max_altitude:
+            return RegionState.active
+        return RegionState.inactive
 
 
 registry.register(
@@ -738,6 +874,35 @@ class Lod(_BaseObject):
         """
         return self.min_lod_pixels is not None
 
+    def state(self, lod_pixels: float | None) -> RegionState:
+        """
+        Evaluate the level-of-detail (zoom) condition for the projected region.
+
+        ``min_lod_pixels`` defaults to 0 and a ``max_lod_pixels`` of -1 (or None)
+        means there is no upper bound. When the projected pixel size cannot be
+        provided (``lod_pixels`` is None) the condition is undetermined rather
+        than assumed to be covered. A Region without any Lod element imposes no
+        zoom constraint and is handled by :meth:`Region.state`.
+
+        Args:
+        ----
+            lod_pixels: The projected size of the region on screen in pixels.
+
+        Returns:
+        -------
+            RegionState.active, RegionState.inactive or RegionState.undetermined.
+
+        """
+        if lod_pixels is None:
+            return RegionState.undetermined
+        minimum = self.min_lod_pixels if self.min_lod_pixels is not None else 0
+        if lod_pixels < minimum:
+            return RegionState.inactive
+        maximum = self.max_lod_pixels
+        if maximum is not None and maximum >= 0 and lod_pixels > maximum:
+            return RegionState.inactive
+        return RegionState.active
+
 
 registry.register(
     Lod,
@@ -874,6 +1039,58 @@ class Region(_BaseObject):
 
         """
         return bool(self.lat_lon_alt_box)
+
+    @staticmethod
+    def _combine(states: Iterable[RegionState]) -> RegionState:
+        """Combine evidence states: any inactive wins, then undetermined."""
+        states = tuple(states)
+        if RegionState.inactive in states:
+            return RegionState.inactive
+        if RegionState.undetermined in states:
+            return RegionState.undetermined
+        return RegionState.active
+
+    def state(self, viewport: Viewport) -> RegionState:
+        """
+        Determine whether this region is active for the given viewport.
+
+        A region is active only when its LatLonAltBox intersects the viewport,
+        its altitude interval (if any) contains the viewport altitude and its
+        Lod pixel bounds contain the projected region size. Missing evidence
+        never defaults to coverage: it yields ``undetermined``.
+
+        Args:
+        ----
+            viewport: The current viewport with geographic, zoom and altitude data.
+
+        Returns:
+        -------
+            RegionState.active, RegionState.inactive or RegionState.undetermined.
+
+        """
+        if self.lat_lon_alt_box is None:
+            return RegionState.undetermined
+        intersection = self.lat_lon_alt_box.intersects(viewport)
+        if intersection is None:
+            return RegionState.undetermined
+        if not intersection:
+            return RegionState.inactive
+        states = [self.lat_lon_alt_box.altitude_state(viewport)]
+        if self.lod is not None:
+            states.append(self.lod.state(viewport.lod_pixels))
+        return self._combine(states)
+
+    def is_active(self, viewport: Viewport) -> bool | None:
+        """
+        Return True when the region is provably active, False when provably
+        inactive, and None when the available evidence is insufficient.
+        """
+        result = self.state(viewport)
+        if result == RegionState.active:
+            return True
+        if result == RegionState.inactive:
+            return False
+        return None
 
 
 registry.register(

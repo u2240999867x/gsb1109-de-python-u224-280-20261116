@@ -18,6 +18,7 @@
 
 from fastkml import views
 from fastkml.enums import AltitudeMode
+from fastkml.enums import RegionState
 from fastkml.enums import Verbosity
 from tests.base import Lxml
 from tests.base import StdLibrary
@@ -209,6 +210,256 @@ class TestStdLibrary(StdLibrary):
         assert "minLodPixels>256</" not in xml
         assert "maxLodPixels>0</" in xml
         assert not views.Lod.from_string(xml)
+
+    def test_box_intersects_viewport(self) -> None:
+        """Overlapping geographic boxes intersect."""
+        box = views.LatLonAltBox(north=40, south=30, east=-70, west=-80)
+        viewport = views.Viewport(north=35, south=32, east=-72, west=-78)
+
+        assert box.intersects(viewport) is True
+
+    def test_box_misses_viewport(self) -> None:
+        """Disjoint geographic boxes do not intersect."""
+        box = views.LatLonAltBox(north=40, south=30, east=-70, west=-80)
+        viewport = views.Viewport(north=10, south=0, east=20, west=10)
+
+        assert box.intersects(viewport) is False
+
+    def test_box_misses_viewport_latitude(self) -> None:
+        """Overlapping longitude but disjoint latitude is not an intersection."""
+        box = views.LatLonAltBox(north=40, south=30, east=-70, west=-80)
+        viewport = views.Viewport(north=20, south=10, east=-72, west=-78)
+
+        assert box.intersects(viewport) is False
+
+    def test_antimeridian_crossing_box_intersects_real_area(self) -> None:
+        """A box crossing the antimeridian covers area on both sides of ±180."""
+        box = views.LatLonAltBox(north=20, south=-10, east=-175, west=175)
+        viewport = views.Viewport(north=10, south=0, east=-170, west=170)
+
+        assert box.intersects(viewport) is True
+
+    def test_antimeridian_box_does_not_match_far_longitude(self) -> None:
+        """The antimeridian box must not be read as spanning the whole globe."""
+        box = views.LatLonAltBox(north=20, south=-10, east=-175, west=175)
+        viewport = views.Viewport(north=10, south=0, east=10, west=0)
+
+        assert box.intersects(viewport) is False
+
+    def test_antimeridian_viewport_matches_eastern_span(self) -> None:
+        """A crossing viewport intersects a box sitting in its eastern span."""
+        box = views.LatLonAltBox(north=20, south=-10, east=-176, west=178)
+        viewport = views.Viewport(north=10, south=0, east=-170, west=170)
+
+        assert box.intersects(viewport) is True
+
+    def test_intersects_undetermined_without_bounds(self) -> None:
+        """Incomplete boxes or viewports yield None rather than a guess."""
+        box = views.LatLonAltBox(north=40, south=30)
+
+        assert box.intersects(
+            views.Viewport(north=35, south=32, east=-72, west=-78),
+        ) is None
+
+    def test_clamp_to_ground_box_has_no_altitude_restriction(self) -> None:
+        """The default clamp-to-ground mode always passes the altitude gate."""
+        box = views.LatLonAltBox(north=40, south=30, east=-70, west=-80)
+        viewport = views.Viewport(
+            north=35,
+            south=32,
+            east=-72,
+            west=-78,
+        )
+
+        assert box.altitude_state(viewport) == RegionState.active
+
+    def test_altitude_without_viewport_evidence_is_undetermined(self) -> None:
+        """An altitude interval cannot be evaluated without camera altitude."""
+        box = views.LatLonAltBox(
+            north=40,
+            south=30,
+            east=-70,
+            west=-80,
+            min_altitude=100.0,
+            max_altitude=500.0,
+            altitude_mode=AltitudeMode.absolute,
+        )
+        viewport = views.Viewport(north=35, south=32, east=-72, west=-78)
+
+        assert box.altitude_state(viewport) == RegionState.undetermined
+
+    def test_altitude_inside_interval_is_active(self) -> None:
+        box = views.LatLonAltBox(
+            north=40,
+            south=30,
+            east=-70,
+            west=-80,
+            min_altitude=100.0,
+            max_altitude=500.0,
+            altitude_mode=AltitudeMode.absolute,
+        )
+        viewport = views.Viewport(
+            north=35,
+            south=32,
+            east=-72,
+            west=-78,
+            altitude=200.0,
+            altitude_mode=AltitudeMode.absolute,
+        )
+
+        assert box.altitude_state(viewport) == RegionState.active
+
+    def test_altitude_outside_interval_is_inactive(self) -> None:
+        box = views.LatLonAltBox(
+            north=40,
+            south=30,
+            east=-70,
+            west=-80,
+            min_altitude=100.0,
+            max_altitude=500.0,
+            altitude_mode=AltitudeMode.absolute,
+        )
+        viewport = views.Viewport(
+            north=35,
+            south=32,
+            east=-72,
+            west=-78,
+            altitude=900.0,
+            altitude_mode=AltitudeMode.absolute,
+        )
+
+        assert box.altitude_state(viewport) == RegionState.inactive
+
+    def test_altitude_mode_mismatch_is_undetermined(self) -> None:
+        """Incompatible altitude reference frames cannot be compared directly."""
+        box = views.LatLonAltBox(
+            north=40,
+            south=30,
+            east=-70,
+            west=-80,
+            min_altitude=100.0,
+            max_altitude=500.0,
+            altitude_mode=AltitudeMode.absolute,
+        )
+        viewport = views.Viewport(
+            north=35,
+            south=32,
+            east=-72,
+            west=-78,
+            altitude=200.0,
+            altitude_mode=AltitudeMode.relative_to_ground,
+        )
+
+        assert box.altitude_state(viewport) == RegionState.undetermined
+
+    def test_lod_state_inside_pixel_range(self) -> None:
+        lod = views.Lod(min_lod_pixels=256, max_lod_pixels=1024)
+
+        assert lod.state(512) == RegionState.active
+
+    def test_lod_state_below_minimum_is_inactive(self) -> None:
+        lod = views.Lod(min_lod_pixels=256, max_lod_pixels=1024)
+
+        assert lod.state(100) == RegionState.inactive
+
+    def test_lod_state_above_maximum_is_inactive(self) -> None:
+        lod = views.Lod(min_lod_pixels=256, max_lod_pixels=1024)
+
+        assert lod.state(2048) == RegionState.inactive
+
+    def test_lod_negative_maximum_means_unbounded(self) -> None:
+        lod = views.Lod(min_lod_pixels=256, max_lod_pixels=-1)
+
+        assert lod.state(10_000) == RegionState.active
+
+    def test_lod_state_without_pixel_evidence_is_undetermined(self) -> None:
+        lod = views.Lod(min_lod_pixels=256, max_lod_pixels=1024)
+
+        assert lod.state(None) == RegionState.undetermined
+
+    @staticmethod
+    def _region(
+        *,
+        north: float = 40,
+        south: float = 30,
+        east: float = -70,
+        west: float = -80,
+        lod: views.Lod | None = None,
+    ) -> views.Region:
+        return views.Region(
+            lat_lon_alt_box=views.LatLonAltBox(
+                north=north,
+                south=south,
+                east=east,
+                west=west,
+            ),
+            lod=lod,
+        )
+
+    def test_region_active_with_all_evidence(self) -> None:
+        region = self._region(lod=views.Lod(min_lod_pixels=256, max_lod_pixels=1024))
+        viewport = views.Viewport(
+            north=35,
+            south=32,
+            east=-72,
+            west=-78,
+            lod_pixels=512,
+        )
+
+        assert region.state(viewport) == RegionState.active
+        assert region.is_active(viewport) is True
+
+    def test_region_inactive_on_geographic_miss(self) -> None:
+        region = self._region(lod=views.Lod(min_lod_pixels=256))
+        viewport = views.Viewport(
+            north=10,
+            south=0,
+            east=20,
+            west=10,
+            lod_pixels=512,
+        )
+
+        assert region.state(viewport) == RegionState.inactive
+        assert region.is_active(viewport) is False
+
+    def test_region_undetermined_when_zoom_evidence_missing(self) -> None:
+        region = self._region(lod=views.Lod(min_lod_pixels=256))
+        viewport = views.Viewport(north=35, south=32, east=-72, west=-78)
+
+        assert region.state(viewport) == RegionState.undetermined
+        assert region.is_active(viewport) is None
+
+    def test_region_without_lod_needs_no_zoom_evidence(self) -> None:
+        """A Region without a Lod element imposes no zoom constraint."""
+        region = self._region()
+        viewport = views.Viewport(north=35, south=32, east=-72, west=-78)
+
+        assert region.state(viewport) == RegionState.active
+
+    def test_region_undetermined_without_box(self) -> None:
+        region = views.Region(lod=views.Lod(min_lod_pixels=256))
+
+        assert region.state(
+            views.Viewport(
+                north=35,
+                south=32,
+                east=-72,
+                west=-78,
+                lod_pixels=512,
+            ),
+        ) == RegionState.undetermined
+
+    def test_antimeridian_region_activation(self) -> None:
+        region = self._region(north=20, south=-10, east=-175, west=175)
+        viewport = views.Viewport(
+            north=10,
+            south=0,
+            east=-170,
+            west=170,
+            lod_pixels=512,
+        )
+
+        assert region.state(viewport) == RegionState.active
 
 
 class TestLxml(Lxml, TestStdLibrary):

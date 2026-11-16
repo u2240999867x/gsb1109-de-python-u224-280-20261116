@@ -73,6 +73,9 @@ from fastkml.overlays import ScreenOverlay
 from fastkml.overlays import ScreenXY
 from fastkml.overlays import Size
 from fastkml.overlays import ViewVolume
+from fastkml.regions import ActiveFeature
+from fastkml.regions import active_features
+from fastkml.regions import evaluate_features
 from fastkml.styles import BalloonStyle
 from fastkml.styles import HotSpot
 from fastkml.styles import IconStyle
@@ -92,9 +95,12 @@ from fastkml.validator import get_schema_parser
 from fastkml.validator import validate
 from fastkml.views import Camera
 from fastkml.views import LookAt
+from fastkml.views import RegionState
+from fastkml.views import Viewport
 
 __all__ = [
     "KML",
+    "ActiveFeature",
     "Alias",
     "AtomAuthor",
     "AtomContributor",
@@ -137,6 +143,7 @@ __all__ = [
     "Point",
     "PolyStyle",
     "Polygon",
+    "RegionState",
     "ResourceMap",
     "RotationXY",
     "Scale",
@@ -154,8 +161,11 @@ __all__ = [
     "TimeSpan",
     "TimeStamp",
     "Update",
+    "Viewport",
     "ViewVolume",
+    "active_features",
     "create_kml_geometry",
+    "evaluate_features",
     "find",
     "find_all",
     "get_schema_parser",

@@ -183,6 +183,15 @@ fastkml.overlays
    :show-inheritance:
 
 
+fastkml.regions
+----------------
+
+.. automodule:: fastkml.regions
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+
 fastkml.styles
 ---------------------
 
