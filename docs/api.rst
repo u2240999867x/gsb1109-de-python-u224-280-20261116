@@ -31,6 +31,7 @@ Map interface
 - :doc:`api/pyx12/map_if/index` — load and traverse an X12N implementation guide map
 - :doc:`api/pyx12/map_index/index` — locate the correct map XML for a given transaction
 - :doc:`api/pyx12/map_walker/index` — walk a map tree to find the node matching the next segment
+- :doc:`api/pyx12/companion/index` — payer companion-guide pass run alongside the base map, with separate verdicts
 
 XML rendering
 -------------

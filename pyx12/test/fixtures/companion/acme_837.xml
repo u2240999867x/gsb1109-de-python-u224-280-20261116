@@ -1,0 +1,19 @@
+<companion_guide>
+  <name>Acme Payer Companion Guide</name>
+  <payer>ACME</payer>
+  <rule id="ACME-NM108-XX" applies_to="837">
+    <location>/ISA_LOOP/GS_LOOP/ST_LOOP/DETAIL/2000A/2010AA/NM1</location>
+    <element>NM108</element>
+    <expect><allow><code>XX</code></allow></expect>
+  </rule>
+  <rule id="ACME-NM108-NO24" applies_to="837">
+    <location>/ISA_LOOP/GS_LOOP/ST_LOOP/DETAIL/2000A/2010AA/NM1</location>
+    <element>NM108</element>
+    <expect><disallow><code>24</code></disallow></expect>
+  </rule>
+  <rule id="ACME-NM109-REQ" applies_to="837">
+    <location>/ISA_LOOP/GS_LOOP/ST_LOOP/DETAIL/2000A/2010AA/NM1</location>
+    <element>NM109</element>
+    <expect><require/></expect>
+  </rule>
+</companion_guide>

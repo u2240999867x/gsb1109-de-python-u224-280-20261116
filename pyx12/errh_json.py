@@ -48,16 +48,23 @@ class errh_json_visitor(pyx12.error_visitor.error_visitor):
     _stack: list[dict[str, Any]]
     _cur_seg: dict[str, Any] | None
 
-    def __init__(self, fd: TextIO, indent: int | None = 2) -> None:
+    def __init__(
+        self, fd: TextIO, indent: int | None = 2, companion_report: Any | None = None
+    ) -> None:
         """
         :param fd: target file
         :type fd: file descriptor
         :param indent: json.dump indent argument; pass None for compact output
         :type indent: int | None
+        :param companion_report: optional CompanionReport from the payer
+            companion pass. When set, its dict is emitted under a separate
+            ``companion_validation`` key; it never alters the base tree.
         """
         self.fd = fd
         self.indent = indent
         self.doc = {"interchanges": []}
+        if companion_report is not None:
+            self.doc["companion_validation"] = companion_report.to_dict()
         self._stack = []
         self._cur_seg = None
 

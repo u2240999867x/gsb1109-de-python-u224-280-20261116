@@ -32,6 +32,7 @@ import pyx12.map_index
 import pyx12.params
 import pyx12.x12file
 import pyx12.x12xml_simple
+from pyx12.companion import CompanionEngine, load_companion
 from pyx12.error_codes import ISA_022_INVALID_CONTROL_STRUCTURE
 from pyx12.map_if._segment import apply_segment_errors
 from pyx12.map_walker import apply_walk_errors, walk_tree
@@ -86,6 +87,12 @@ def x12n_document(
     suppress = param.get("suppress_error_codes")
     if suppress:
         errh.suppress_error_codes = set(suppress)
+
+    companion_file = param.get("companion_file")
+    companion: CompanionEngine | None = None
+    if companion_file:
+        rules, guide_name, payer, source_name = load_companion(companion_file)
+        companion = CompanionEngine(rules, guide_name, payer, source_name)
 
     # Get X12 DATA file
     try:
@@ -230,6 +237,9 @@ def x12n_document(
             # errh.set_cur_line(src.get_cur_line())
             assert isinstance(node, pyx12.map_if.segment_if)
             valid &= apply_segment_errors(node, seg, errh)
+            if companion is not None:
+                companion.bind_map(node.root, map_file)
+                companion.evaluate(node.root, node, seg, src.get_seg_count(), src.get_cur_line())
             # erx.handleErrors(src.pop_errors())
             # erx.handleErrors(errh.get_errors())
             # errh.reset()
@@ -292,14 +302,16 @@ def x12n_document(
 
     if fd_json:
         try:
-            visit_json = pyx12.errh_json.errh_json_visitor(fd_json)
+            report = companion.report if companion is not None else None
+            visit_json = pyx12.errh_json.errh_json_visitor(fd_json, companion_report=report)
             errh.accept(visit_json)
             del visit_json
         except Exception:
             logger.exception("Failed to write JSON error output")
     src.close()
     try:
-        if not valid or errh.get_error_count() > 0:
+        companion_failed = bool(companion and companion.report.findings)
+        if not valid or errh.get_error_count() > 0 or companion_failed:
             return False
         else:
             return True

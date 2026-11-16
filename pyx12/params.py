@@ -59,6 +59,9 @@ class ParamsBase:
         # Error log records carry only line, level, code and reference designator
         # unless this is on: the messages embed input data values (PHI).
         self.params["log_data_values"] = False
+        # Path to a payer companion guide XML. None disables the second
+        # validation pass, so default output is identical to the base-only run.
+        self.params["companion_file"] = None
 
     def get(self, option: str) -> Any:
         """

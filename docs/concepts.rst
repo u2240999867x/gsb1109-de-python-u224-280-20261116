@@ -188,6 +188,69 @@ through to readers, writers, and the walker. Common settings:
 home-dir lookup on Windows). See ``bin/pyx12.conf.xml.sample`` in the
 source tree for the schema.
 
+Payer companion guides
+----------------------
+
+A claim has to satisfy **two** independent rule sets: the HIPAA
+implementation guide (the base map shipped in ``pyx12/map``) and the
+payer's own companion guide. These are not alternatives — the same
+transaction is evaluated against both, and each verdict is kept.
+
+Enable the second pass with ``--companion guide.xml`` on ``x12valid`` or
+by setting ``params.set("companion_file", path)``. The companion file is
+a small XML document whose ``rule`` elements target a base-map location:
+
+.. code-block:: xml
+
+   <companion_guide>
+     <name>Acme Payer Companion Guide</name>
+     <payer>ACME</payer>
+     <rule id="ACME-NM108-XX" applies_to="837">
+       <location>/ISA_LOOP/GS_LOOP/ST_LOOP/DETAIL/2000A/2010AA/NM1</location>
+       <element>NM108</element>
+       <expect><allow><code>XX</code></allow></expect>
+     </rule>
+   </companion_guide>
+
+``applies_to`` selects the transaction (the map's ``xid``); ``location``
+is an absolute map path to a segment and ``element`` names one of its
+children (use ``subelement`` for a composite component). ``expect`` is
+exactly one of:
+
+* ``allow`` — the present value must be in the listed codes;
+* ``disallow`` — the present value must not be in the listed codes;
+* ``require`` — the element must be present and non-empty.
+
+The companion pass is **read-only**. It re-runs the element validators to
+obtain the base verdict and applies the payer rule separately, so neither
+rule set can overwrite the other regardless of evaluation order, and the
+source data and base map are never modified. Each finding records both
+sources (the base map file plus any base error codes, and the companion
+file plus rule id) and the applicable loop — its path and the
+1-based occurrence of that loop in the transaction.
+
+Two verdicts that disagree fall into one of three mutually exclusive
+buckets:
+
+* **base_invalid** — the base guide rejects the position. A payer rule
+  can never legalize a base-illegal value, so this dominates even when
+  the payer would have accepted it. The base pyx12 error codes are
+  preserved on the finding.
+* **payer_rejected** — the base guide accepts the value but the
+  companion rule rejects it (a payer-only tightening).
+* **rule_conflict** — the two rule sets themselves contradict at the
+  same position, independent of the data. Reported once per rule under
+  ``rule_conflicts`` (for example, the companion disallows a code the
+  base code list includes, or requires an element the base marks
+  ``usage="N"``). A self-contradictory rule does not also emit
+  per-data findings.
+
+Findings and rule conflicts are emitted under a separate
+``companion_validation`` key in the JSON output. The 997/999
+acknowledgement and the base ``interchanges`` error tree are byte-for-byte
+identical to a companion-free run — companion verdicts never leak into an
+X12 ack, and when no companion is configured the output is unchanged.
+
 Putting it together
 -------------------
 

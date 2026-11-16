@@ -110,6 +110,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--charset", "-s", choices=("b", "e"), help="Specify X12 character set: b=basic, e=extended"
     )
     parser.add_argument(
+        "--companion",
+        action="store",
+        dest="companion",
+        default=None,
+        metavar="FILE",
+        help=(
+            "Payer companion guide XML. Each transaction is also validated "
+            "against these rules; base-guide and companion verdicts are kept "
+            "separately and reported under companion_validation in the JSON "
+            "output. The source data and base map are never modified."
+        ),
+    )
+    parser.add_argument(
         "--version",
         action="version",
         version=f"{parser.prog} {__version__}",
@@ -156,6 +169,8 @@ def main():
         param.set("map_path", args.map_path)
     if args.log_data_values:
         param.set("log_data_values", True)
+    if args.companion:
+        param.set("companion_file", args.companion)
 
     if args.logfile:
         try:
