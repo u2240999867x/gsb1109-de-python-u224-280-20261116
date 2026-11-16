@@ -4,7 +4,6 @@ http://standards.freedesktop.org/desktop-entry-spec/
 
 Not supported:
 - Encoding: Legacy Mixed
-- Does not check exec parameters
 - Does not check URL's
 - Does not completly validate deprecated/kde items
 - Does not completly check categories
@@ -12,11 +11,201 @@ Not supported:
 
 from xdg.IniFile import IniFile, is_ascii
 import xdg.Locale
-from xdg.Exceptions import ParsingError
+from xdg.Exceptions import (ParsingError, NoKeyError, NoGroupError, ExecError)
 from xdg.util import which
 import os.path
 import re
 import warnings
+
+# Field codes recognized by the Exec key, see "Exec variables" in the spec.
+_EXEC_SIMPLE_CODES = frozenset(('c', 'i', 'k'))
+_EXEC_SINGLE_RESOURCE_CODES = frozenset(('f', 'u'))
+_EXEC_MULTI_RESOURCE_CODES = frozenset(('F', 'U'))
+_EXEC_RESOURCE_CODES = (_EXEC_SINGLE_RESOURCE_CODES
+                        | _EXEC_MULTI_RESOURCE_CODES)
+_EXEC_FIELD_CODES = _EXEC_SIMPLE_CODES | _EXEC_RESOURCE_CODES
+_EXEC_ESCAPABLE = ('"', '\\', '`', '$')
+
+
+def _tokenize_exec(exec_string):
+    """Split an Exec value into tokens made of ('text'|'code', value) parts.
+
+    Quoting rules of the desktop entry spec are applied here; substituted
+    resource values never pass through this function, so quotes and backslashes
+    inside user supplied file names are never treated as Exec syntax.
+    """
+    tokens = []
+    parts = None
+    in_quotes = False
+    index = 0
+    length = len(exec_string)
+
+    while index < length:
+        char = exec_string[index]
+
+        if in_quotes:
+            if char == '"':
+                in_quotes = False
+                index += 1
+            elif char == '\\':
+                if index + 1 == length:
+                    raise ExecError(
+                        "Text ended just after a '\\' character")
+                next_char = exec_string[index + 1]
+                if next_char in _EXEC_ESCAPABLE:
+                    parts.append(('text', next_char))
+                else:
+                    # An unrecognized escape keeps the backslash verbatim.
+                    parts.append(('text', char))
+                    parts.append(('text', next_char))
+                index += 2
+            elif char == '%':
+                # The spec states that field codes inside a quoted argument
+                # are not expanded, so '%' is just an ordinary character here.
+                parts.append(('text', char))
+                index += 1
+            else:
+                parts.append(('text', char))
+                index += 1
+            continue
+
+        if char in ' \t\n':
+            if parts is not None:
+                tokens.append(parts)
+                parts = None
+            index += 1
+        elif char == '"':
+            if parts is None:
+                parts = []
+            in_quotes = True
+            index += 1
+        elif char == '\\':
+            if index + 1 == length:
+                raise ExecError(
+                    "Text ended just after a '\\' character")
+            next_char = exec_string[index + 1]
+            if next_char in _EXEC_ESCAPABLE:
+                if parts is None:
+                    parts = []
+                parts.append(('text', next_char))
+                index += 2
+            else:
+                raise ExecError(
+                    "Escape character '\\' can only be used to insert "
+                    "\" \\ ` $ characters")
+        elif char == '%':
+            if index + 1 == length:
+                raise ExecError(
+                    "Text ended just after a '%' character")
+            code = exec_string[index + 1]
+            if code == '%':
+                if parts is None:
+                    parts = []
+                parts.append(('text', '%'))
+            elif code in _EXEC_FIELD_CODES:
+                if parts is None:
+                    parts = []
+                parts.append(('code', code))
+            else:
+                raise ExecError(
+                    "Unrecognised or reserved field code: %%%s" % code)
+            index += 2
+        else:
+            if parts is None:
+                parts = []
+            parts.append(('text', char))
+            index += 1
+
+    if in_quotes:
+        raise ExecError("Text ended before the closing quote was found")
+    if parts is not None:
+        tokens.append(parts)
+    return tokens
+
+
+def _exec_resource_code(tokens):
+    """Return the resource field code used, validating the code combination."""
+    resource_codes = []
+    for parts in tokens:
+        for kind, value in parts:
+            if kind == 'code' and value in _EXEC_RESOURCE_CODES:
+                resource_codes.append(value)
+    if len(set(resource_codes)) > 1:
+        joined = ', '.join('%%%s' % code for code in resource_codes)
+        raise ExecError(
+            "Exec value combines mutually exclusive resource field "
+            "codes: %s" % joined)
+    return resource_codes[0] if resource_codes else None
+
+
+def _expand_exec_token(parts, icon, display_name, location, resource):
+    """Expand one pre-parsed Exec token into zero or more argv elements."""
+    arguments = []
+    buffer = []
+
+    def flush():
+        if buffer:
+            arguments.append(''.join(buffer))
+            del buffer[:]
+
+    for kind, value in parts:
+        if kind == 'text':
+            buffer.append(value)
+        elif value == 'i':
+            if icon:
+                flush()
+                arguments.append('--icon')
+                arguments.append(icon)
+        elif value == 'c':
+            if display_name:
+                buffer.append(display_name)
+        elif value == 'k':
+            if location:
+                buffer.append(location)
+        elif value in _EXEC_SINGLE_RESOURCE_CODES:
+            if resource is not None:
+                buffer.append(resource)
+        else:
+            # Multi-resource codes (%F, %U): each resource is its own argv
+            # element. Any text accumulated next to the code is flushed first
+            # as a separate element rather than joined to the resources.
+            if resource is not None:
+                flush()
+                arguments.extend(resource)
+    flush()
+    return arguments
+
+
+def _expand_exec(exec_string, icon='', display_name='', location='',
+                 resources=()):
+    """Expand an Exec string into one argv list per planned launch."""
+    tokens = _tokenize_exec(exec_string)
+    resource_code = _exec_resource_code(tokens)
+
+    if resource_code is None:
+        # No resource code: the optional resources never reach the command
+        # line and there is exactly one launch.
+        planned_resources = [None]
+    elif resource_code in _EXEC_SINGLE_RESOURCE_CODES:
+        # Single-resource codes cannot share a command line, so one launch is
+        # planned per resource instead of stuffing them into one command.
+        planned_resources = list(resources) if resources else [None]
+    else:
+        # Multi-resource codes collect every resource into a single launch.
+        planned_resources = [list(resources) if resources else None]
+
+    launches = []
+    for resource in planned_resources:
+        argv = []
+        for parts in tokens:
+            argv.extend(_expand_exec_token(
+                parts, icon, display_name, location, resource))
+        if not argv:
+            raise ExecError(
+                "Exec value %r does not produce any arguments" % exec_string)
+        launches.append(argv)
+    return launches
+
 
 class DesktopEntry(IniFile):
     "Class to parse and validate Desktop Entries"
@@ -49,12 +238,55 @@ class DesktopEntry(IniFile):
     
     def findTryExec(self):
         """Looks in the PATH for the executable given in the TryExec field.
-        
+
         Returns the full path to the executable if it is found, None if not.
         Raises :class:`~xdg.Exceptions.NoKeyError` if TryExec is not present.
         """
         tryexec = self.get('TryExec', strict=True)
         return which(tryexec)
+
+    def parseExec(self, resources=(), action=None):
+        """Expand the Exec key into the argv lists of every planned launch.
+
+        No process is started: this only builds argument lists. Each returned
+        inner list is one complete command line (program plus arguments); the
+        number of lists depends on the resource field code used in Exec:
+
+        * no resource code, or a multi-resource code (``%F``/``%U``): one
+          list, with every resource collected together;
+        * a single-resource code (``%f``/``%u``): one list per resource.
+
+        :param resources: local file names and/or URLs to open. The strings
+            are substituted verbatim, so quotes, ``%`` and backslashes they
+            contain are never interpreted as Exec syntax.
+        :param action: name of a ``Desktop Action`` to expand instead of the
+            main entry. Pass either the bare action id (``"Window"``) or the
+            full group name (``"Desktop Action Window"``).
+        :raises ~xdg.Exceptions.NoKeyError: if the selected group has no
+            Exec key.
+        :raises ~xdg.Exceptions.NoGroupError: if the named action does not
+            exist.
+        :raises ~xdg.Exceptions.ExecError: if the Exec value is malformed or
+            uses an illegal field code combination.
+        """
+        if action is None:
+            group = self.defaultGroup
+        elif action.startswith("Desktop Action "):
+            group = action
+        else:
+            group = "Desktop Action %s" % action
+
+        if group not in self.content:
+            raise NoGroupError(group, self.filename)
+
+        exec_string = self.get('Exec', group=group, strict=True)
+        icon = self.get('Icon', group=group, locale=True)
+        display_name = self.get('Name', group=group, locale=True)
+        return _expand_exec(exec_string,
+                            icon=icon,
+                            display_name=display_name,
+                            location=self.filename,
+                            resources=list(resources))
 
     # start standard keys
     def getType(self):

@@ -82,3 +82,11 @@ class NoThemeError(Error):
     def __init__(self, theme):
         Error.__init__(self, "No such icon-theme: %s" % theme)
         self.theme = theme
+
+class ExecError(Error):
+    """Raised when an Exec key cannot be expanded.
+
+    This covers malformed quoting or escaping, unknown or reserved field
+    codes, and mutually exclusive resource field codes in the same Exec
+    value.
+    """

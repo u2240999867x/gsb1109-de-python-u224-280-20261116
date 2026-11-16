@@ -16,8 +16,10 @@ Desktop Entries
    .. automethod:: validate
    
    .. automethod:: findTryExec
-   
+
       .. versionadded:: 0.26
+
+   .. automethod:: parseExec
    
    .. method:: getCategories
                getComment
