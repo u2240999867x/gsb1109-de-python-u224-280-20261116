@@ -1,0 +1,39 @@
+# Mac tracking files
+*.DS_Store*
+
+# Temporary editor files
+*~
+.#*
+\#*#
+
+# IDE / editor configuration
+.idea
+.spyder*
+.ropeproject
+.vscode
+
+# Environment / package manager directories
+.pixi/
+
+# Python generates numerous files when byte compiling / installing packages
+__pycache__/
+*.py[cod]
+*.pyx
+*.egg-info/
+
+# Results from pytest --with-coverage
+.coverage
+*.cover
+
+# Jupyterhub/Jupyterlab checkpoints
+.ipynb_checkpoints
+
+# Documentation builds
+doc/OnlineDocs/api
+doc/OnlineDocs/_build
+doc/OnlineDocs/**/*.spy
+
+# Running pyomo / tests / solvers occasionally leaves extra files
+*.out
+gurobi.log
+cplex.log
