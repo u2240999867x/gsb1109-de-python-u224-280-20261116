@@ -52,6 +52,7 @@ Key Features
    architecture
    kml_document_model
    geometry_bridge
+   altitude_catalog
    extended_data
    registry_and_serialization
    time_and_views

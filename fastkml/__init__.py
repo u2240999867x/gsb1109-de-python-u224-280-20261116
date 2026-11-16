@@ -26,6 +26,16 @@ functionality that KML on google earth provides.
 """
 
 from fastkml.about import __version__  # noqa: F401
+from fastkml.altitude import AltitudeCatalog
+from fastkml.altitude import AltitudeResolution
+from fastkml.altitude import AltitudeSource
+from fastkml.altitude import AltitudeSourceKind
+from fastkml.altitude import Position
+from fastkml.altitude import PositionCatalog
+from fastkml.altitude import PositionSource
+from fastkml.altitude import SeaSurfaceExtension
+from fastkml.altitude import TerrainCoverage
+from fastkml.altitude import TerrainSample
 from fastkml.atom import Author as AtomAuthor
 from fastkml.atom import Contributor as AtomContributor
 from fastkml.atom import Link as AtomLink
@@ -96,6 +106,10 @@ from fastkml.views import LookAt
 __all__ = [
     "KML",
     "Alias",
+    "AltitudeCatalog",
+    "AltitudeResolution",
+    "AltitudeSource",
+    "AltitudeSourceKind",
     "AtomAuthor",
     "AtomContributor",
     "AtomLink",
@@ -137,6 +151,9 @@ __all__ = [
     "Point",
     "PolyStyle",
     "Polygon",
+    "Position",
+    "PositionCatalog",
+    "PositionSource",
     "ResourceMap",
     "RotationXY",
     "Scale",
@@ -144,6 +161,7 @@ __all__ = [
     "SchemaData",
     "ScreenOverlay",
     "ScreenXY",
+    "SeaSurfaceExtension",
     "SimpleData",
     "SimpleField",
     "Size",
@@ -151,6 +169,8 @@ __all__ = [
     "Style",
     "StyleMap",
     "StyleUrl",
+    "TerrainCoverage",
+    "TerrainSample",
     "TimeSpan",
     "TimeStamp",
     "Update",

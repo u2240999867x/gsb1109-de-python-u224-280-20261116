@@ -77,6 +77,14 @@ fastkml.atom
    :undoc-members:
    :show-inheritance:
 
+fastkml.altitude
+-----------------------
+
+.. automodule:: fastkml.altitude
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 fastkml.config
 ---------------------
 

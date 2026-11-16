@@ -4,6 +4,12 @@ Changelog
 1.5.0 (unreleased)
 ------------------
 
+- Add ``fastkml.altitude`` for collecting KML geometry positions into one
+  catalogue while preserving each coordinate's original altitude and altitude
+  mode. Absolute, relative-to-ground, clamped, sea-floor, and sea-surface
+  evidence are resolved separately, with explicit provenance. Missing terrain
+  is never replaced with ``0.0``.
+
 - Drop support for Python 3.9.
 - Add ``Update``, ``Create``, ``Change``, and ``Delete`` element support to
   ``NetworkLinkControl``.
