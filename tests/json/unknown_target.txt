@@ -1,0 +1,44 @@
+Windows Shortcut Information:
+   Guid: 00021401-0000-0000-C000-000000000046
+   Link flags: HasTargetIDList | IsUnicode - (129)
+   File flags: (0)
+   Creation time: 2012-08-06 11:51:14.390625+00:00
+   Accessed time: 2012-08-06 11:51:14.390625+00:00
+   Modified time: 2012-08-06 11:51:14.390625+00:00
+   File size: 0
+   Icon index: 0
+   Windowstyle: SW_SHOWNORMAL
+   Hotkey: UNSET - UNSET {0x0000}
+   Header size: 76
+   Reserved0: 0
+   Reserved1: 0
+   Reserved2: 0
+
+   SIZE: 68608
+
+   TARGET:
+      Size: 877
+      Items:
+      -  Root Folder:
+            Sort index: Unknown
+            Sort index value: 91
+            Guid: 20D04FE0-3AEA-1069-A2D8-08002B30309D
+      -  Volume Item:
+            Flags: '0xe'
+            Volume identifier: 21EC2020-3AEA-1069-A2DD-08002B30309D
+      -  Control panel CPL file:
+            Signature: '0x00000000'
+            Cpl file path: \\.\STORAGE#Volume#1&19f7e59c&0&_??_USBSTOR#Disk&Ven_SanDisk&Prod_Ultra_USB_3.0&Rev_1.00#4C530001161121113063&0#{53f56307-b6bf-11d0-94f2-00a0c91efb8b}#{53f5630d-b6bf-11d0-94f2-00a0c91efb8b}\RECYCLER\S-2-8-70-5474306100-0228258821-140406123-2478\OCdTKeQM.cpl
+            Name: Microsoft Windows. Microsoft Corporation
+            Comments: TOR#Disk&Ven_SanDisk&Prod_Ultra_USB_3.0&Rev_1.00#4C530001161121113063&0#{53f56307-b6bf-11d0-94f2-00a0c91efb8b}#{53f5630d-b6bf-11d0-94f2-00a0c91efb8b}\RECYCLER\S-2-8-70-5474306100-0228258821-140406123-2478\OCdTKeQM.cpl
+      Index: 78
+
+   LINK INFO: {}
+
+   DATA: {}
+
+   EXTRA:
+      TERMINAL BLOCK:
+         Size: 67653
+         Appended data sha256: d64c62e65398d37cd27e11fd729fa102016a05ba67f5020e17dfbd3b857dd96e
+
