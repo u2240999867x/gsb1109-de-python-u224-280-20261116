@@ -58,3 +58,31 @@ Miscellaneous
 .. autofunction:: get_extensions
 
 .. autofunction:: is_text_file
+
+Finding applications for a MIME type
+------------------------------------
+
+Association data is read from ``mimeapps.list`` and ``mimeinfo.cache`` files
+following the `XDG MIME Applications specification
+<https://specifications.freedesktop.org/mime-apps-spec/latest/>`_.
+
+.. autofunction:: get_applications
+
+.. autofunction:: get_default_application
+
+.. autofunction:: get_optional_applications
+
+.. autofunction:: get_applications_for_file
+
+.. autofunction:: get_default_application_for_file
+
+.. autofunction:: get_associations
+
+.. autoclass:: MimeApps
+   :members: get_applications, get_default_application,
+             get_optional_applications, get_associations, reload
+
+.. autoclass:: Application
+   :members: sources
+
+.. autoclass:: ApplicationCandidate

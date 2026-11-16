@@ -19,6 +19,7 @@ information about the format of these files.
 (based on version 0.13)
 """
 
+import io
 import os
 import re
 import stat
@@ -122,6 +123,22 @@ class MIMEtype(object):
         """Returns a set of Mime types which this inherits from."""
         update_cache()
         return set(lookup(t) for t in inheritance[str(self)])
+
+    def get_applications(self, **kwargs):
+        """Returns applications associated with this MIME type.
+
+        The default application, if any, comes first.  See the module-level
+        :func:`get_applications` function for details.
+        """
+        return get_applications(self, **kwargs)
+
+    def get_default_application(self, **kwargs):
+        """Returns the default application for this MIME type, or None."""
+        return get_default_application(self, **kwargs)
+
+    def get_optional_applications(self, **kwargs):
+        """Returns the non-default applications for this MIME type."""
+        return get_optional_applications(self, **kwargs)
 
     def __str__(self):
         return self.media + '/' + self.subtype
@@ -537,19 +554,32 @@ app_exe = lookup('application', 'executable')
 _cache_uptodate = False
 
 def _cache_database():
-    global globs, magic, aliases, inheritance, _cache_uptodate
+    global globs, magic, aliases, inheritance, inheritance_order, _cache_uptodate
 
     _cache_uptodate = True
 
     aliases = {}    # Maps alias Mime types to canonical names
-    inheritance = defaultdict(set) # Maps to sets of parent mime types.
+    # Maps to sets of parent MIME types, as in earlier versions.
+    inheritance = defaultdict(set)
+    # Parallel declaration order, used to make parent traversal deterministic.
+    inheritance_order = defaultdict(list)
     
     # Load aliases
     for path in BaseDirectory.load_data_paths(os.path.join('mime', 'aliases')):
         with open(path, 'r') as f:
             for line in f:
-                alias, canonical = line.strip().split(None, 1)
-                aliases[alias] = canonical
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                fields = line.split(None, 1)
+                if len(fields) != 2:
+                    continue
+                alias, canonical = fields
+                alias = alias.lower()
+                # Earlier data directories take precedence, so the first
+                # definition of an alias wins.
+                if alias not in aliases:
+                    aliases[alias] = canonical.strip().lower()
     
     # Load filename patterns (globs)
     globs = GlobDB()
@@ -567,8 +597,18 @@ def _cache_database():
     for path in BaseDirectory.load_data_paths(os.path.join('mime', 'subclasses')):
         with open(path, 'r') as f:
             for line in f:
-                sub, parent = line.strip().split(None, 1)
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                fields = line.split(None, 1)
+                if len(fields) != 2:
+                    continue
+                sub, parent = fields
+                sub = sub.lower()
+                parent = parent.strip().lower()
                 inheritance[sub].add(parent)
+                if parent not in inheritance_order[sub]:
+                    inheritance_order[sub].append(parent)
 
 def update_cache():
     if not _cache_uptodate:
@@ -740,7 +780,996 @@ def get_extensions(mimetype):
         _mime2ext_cache_uptodate = True
     
     return _mime2ext_cache[mimetype]
-        
+
+
+# ---------------------------------------------------------------------------
+# MIME applications (mimeapps.list / mimeinfo.cache)
+#
+# The XDG MIME Applications specification layers association files from
+# highest to lowest precedence:
+#
+#   $XDG_CONFIG_HOME/$desktop-mimeapps.list
+#   $XDG_CONFIG_HOME/mimeapps.list
+#   $XDG_CONFIG_DIRS/$desktop-mimeapps.list
+#   $XDG_CONFIG_DIRS/mimeapps.list
+#   $XDG_DATA_HOME/applications/$desktop-mimeapps.list
+#   $XDG_DATA_HOME/applications/mimeapps.list
+#   $XDG_DATA_DIRS/applications/$desktop-mimeapps.list
+#   $XDG_DATA_DIRS/applications/mimeapps.list
+#   $XDG_DATA_DIRS/applications/mimeinfo.cache
+#
+# Canonical MIME names are used for lookup, so aliases and parent types share
+# associations.  Every result keeps the individual candidate sources.
+# ---------------------------------------------------------------------------
+
+class ApplicationCandidate(object):
+    """One application association found for a MIME type.
+
+    Each candidate records where it came from, so callers can inspect the
+    sources that contributed to a result.  ``mimetype`` is the MIME type whose
+    association supplied the application; it may be the requested type or one
+    of its parents.  ``layer`` is the index of the association file in the
+    precedence-ordered list (lower is higher precedence).
+    """
+
+    __slots__ = ('desktop_id', 'source', 'mimetype', 'layer', 'section')
+
+    def __init__(self, desktop_id, source=None, mimetype=None, layer=None,
+                 section=None):
+        self.desktop_id = desktop_id
+        self.source = source
+        self.mimetype = mimetype
+        self.layer = layer
+        self.section = section
+
+    @property
+    def application(self):
+        return self.desktop_id
+
+    @property
+    def filename(self):
+        return self.source
+
+    @property
+    def file(self):
+        return self.source
+
+    @property
+    def origin(self):
+        return self.source
+
+    @property
+    def source_file(self):
+        return self.source
+
+    @property
+    def path(self):
+        return self.source
+
+    @property
+    def mime_type(self):
+        return self.mimetype
+
+    @property
+    def priority(self):
+        return self.layer
+
+    def as_tuple(self):
+        return (self.desktop_id, self.source)
+
+    def __iter__(self):
+        # Allow ``application, source = candidate``.
+        return iter(self.as_tuple())
+
+    def __len__(self):
+        return 2
+
+    def __getitem__(self, index):
+        return self.as_tuple()[index]
+
+    def __repr__(self):
+        return ('ApplicationCandidate(%r, source=%r, mimetype=%r, '
+                'layer=%r, section=%r)' % (
+                    self.desktop_id, self.source, self.mimetype,
+                    self.layer, self.section))
+
+    def __eq__(self, other):
+        if isinstance(other, ApplicationCandidate):
+            return (self.desktop_id == other.desktop_id and
+                    self.source == other.source and
+                    self.mimetype == other.mimetype and
+                    self.layer == other.layer and
+                    self.section == other.section)
+        if isinstance(other, tuple):
+            return self.as_tuple() == other
+        return self.desktop_id == other
+
+    def __ne__(self, other):
+        return not (self == other)
+
+    def __hash__(self):
+        return hash(self.desktop_id)
+
+
+class Application(str):
+    """A desktop file ID with association provenance.
+
+    Application objects compare and behave like their desktop file ID string.
+    ``sources`` holds one :class:`ApplicationCandidate` for every place the
+    application was found, including inherited parent types.
+    """
+
+    def __new__(cls, desktop_id, source=None, mimetype=None, layer=None,
+                section=None, is_default=False):
+        obj = str.__new__(cls, desktop_id)
+        obj.desktop_id = desktop_id
+        obj.source = source
+        obj.mimetype = mimetype
+        obj.layer = layer
+        obj.section = section
+        obj.is_default = is_default
+        obj.sources = []
+        if (source is not None or mimetype is not None or
+                layer is not None or section is not None):
+            obj.sources.append(ApplicationCandidate(
+                desktop_id, source, mimetype, layer, section))
+        return obj
+
+    def add_source(self, candidate):
+        if candidate not in self.sources:
+            self.sources.append(candidate)
+
+    @property
+    def source_files(self):
+        return [c.source for c in self.sources]
+
+    @property
+    def associations(self):
+        return list(self.sources)
+
+    def __repr__(self):
+        return str.__repr__(self)
+
+
+class Applications(list):
+    """Ordered applications for a MIME type.
+
+    ``default`` is the selected default application, also present in the
+    list, or None if no default could be determined.  ``optional`` returns the
+    other applications in order.
+    """
+
+    def __init__(self, applications=(), default=None):
+        list.__init__(self, applications)
+        self.default = default
+
+    @property
+    def optional(self):
+        return [a for a in self if a is not self.default]
+
+    @property
+    def applications(self):
+        return list(self)
+
+
+class _AssociationEntry(object):
+    __slots__ = ('desktop_id', 'source', 'mimetype', 'layer', 'section')
+
+    def __init__(self, desktop_id, source, mimetype, layer, section):
+        self.desktop_id = desktop_id
+        self.source = source
+        self.mimetype = mimetype
+        self.layer = layer
+        self.section = section
+
+
+class _MimeAppsLayer(object):
+    def __init__(self, path, index, kind='mimeapps'):
+        self.path = path
+        self.index = index
+        self.kind = kind
+        self.default = defaultdict(list)
+        self.added = defaultdict(list)
+        self.removed = defaultdict(list)
+        self.cache = defaultdict(list)
+
+    def __repr__(self):
+        return '<_MimeAppsLayer %r (%s)>' % (self.path, self.kind)
+
+
+class _AssociationResult(object):
+    def __init__(self):
+        # Each group is (mimetype, defaults, added, cache) for one type in
+        # resolution order: the requested type, then its parents.
+        self.groups = []
+        self.removed_layers = {}
+
+    @property
+    def defaults(self):
+        return [e for _, defaults, _, _ in self.groups for e in defaults]
+
+    @property
+    def added(self):
+        return [e for _, _, added, _ in self.groups for e in added]
+
+    @property
+    def cache(self):
+        return [e for _, _, _, cache in self.groups for e in cache]
+
+    def all_entries(self):
+        return [e for _, defaults, added, cache in self.groups
+                for e in defaults + added + cache]
+
+
+_NO_DEFAULT = object()
+_SECTION_NAMES = {
+    'default applications': 'default',
+    'added associations': 'added',
+    'removed associations': 'removed',
+}
+
+
+def _split_association_list(value):
+    parts = re.split(r'(?<!\\);', value)
+    result = []
+    for part in parts:
+        part = part.strip().replace('\\;', ';')
+        if part:
+            result.append(part)
+    return result
+
+
+def _canonical_mime_name(name, aliases_map=None):
+    update_cache()
+    if aliases_map is None:
+        aliases_map = aliases
+    name = str(name).strip().lower()
+    seen = set()
+    while name in aliases_map and name not in seen:
+        seen.add(name)
+        name = aliases_map[name].strip().lower()
+    return name
+
+
+def _parent_mime_names(name, aliases_map=None, inheritance_map=None):
+    """Parent MIME types of ``name`` in breadth-first declaration order."""
+    update_cache()
+    if aliases_map is None:
+        aliases_map = aliases
+    if inheritance_map is None:
+        inheritance_map = inheritance
+    result = []
+    seen = set([name])
+    queue = [name]
+    while queue:
+        current = queue.pop(0)
+        if inheritance_map is inheritance:
+            ordered = inheritance_order.get(current)
+            declared = inheritance_map.get(current, ())
+            if ordered is None:
+                parents = declared
+            else:
+                parents = list(ordered)
+                for parent in declared:
+                    if parent not in parents:
+                        parents.append(parent)
+        else:
+            parents = inheritance_map.get(current, ())
+        if isinstance(parents, set):
+            parents = sorted(parents)
+        for parent in parents:
+            parent = _canonical_mime_name(parent, aliases_map)
+            if parent in seen:
+                continue
+            seen.add(parent)
+            result.append(parent)
+            queue.append(parent)
+    return result
+
+
+def _xdg_config_dirs():
+    """Current XDG config dirs, honouring environment changes."""
+    home = os.environ.get('XDG_CONFIG_HOME')
+    dirs = os.environ.get('XDG_CONFIG_DIRS')
+    if home is None and dirs is None:
+        return list(BaseDirectory.xdg_config_dirs)
+    result = []
+    if home:
+        result.append(home)
+    elif home is None:
+        result.append(BaseDirectory.xdg_config_home)
+    if dirs:
+        result.extend(d for d in dirs.split(':') if d)
+    else:
+        result.extend(BaseDirectory.xdg_config_dirs[1:])
+    return result
+
+
+def _xdg_data_dirs():
+    """Current XDG data dirs, honouring environment changes."""
+    home = os.environ.get('XDG_DATA_HOME')
+    dirs = os.environ.get('XDG_DATA_DIRS')
+    if home is None and dirs is None:
+        return list(BaseDirectory.xdg_data_dirs)
+    result = []
+    if home:
+        result.append(home)
+    elif home is None:
+        result.append(BaseDirectory.xdg_data_home)
+    if dirs:
+        result.extend(d for d in dirs.split(':') if d)
+    else:
+        result.extend(BaseDirectory.xdg_data_dirs[1:])
+    return result
+
+
+def _mimeapps_config_paths(desktop=None, config_home=None, config_dirs=None,
+                           data_home=None, data_dirs=None, use_defaults=True):
+    if desktop is None:
+        desktop = os.environ.get('XDG_CURRENT_DESKTOP', '')
+    if isinstance(desktop, (list, tuple)):
+        desktops = [d for d in desktop if d]
+    else:
+        desktops = [d for d in str(desktop).split(':') if d]
+
+    if config_dirs is None:
+        config_dirs = _xdg_config_dirs() if use_defaults else []
+    if data_dirs is None:
+        data_dirs = _xdg_data_dirs() if use_defaults else []
+    if config_home is not None:
+        config_dirs = [config_home] + list(config_dirs or [])
+    if data_home is not None:
+        data_dirs = [data_home] + list(data_dirs or [])
+
+    paths = []
+    seen = set()
+
+    def add(path, kind='mimeapps'):
+        path = os.path.abspath(path)
+        if path not in seen:
+            seen.add(path)
+            paths.append((path, kind))
+
+    for directory in config_dirs or ():
+        for desktop_name in desktops:
+            add(os.path.join(directory, desktop_name + '-mimeapps.list'))
+        add(os.path.join(directory, 'mimeapps.list'))
+
+    for directory in data_dirs or ():
+        applications = os.path.join(directory, 'applications')
+        for desktop_name in desktops:
+            add(os.path.join(applications, desktop_name + '-mimeapps.list'))
+        add(os.path.join(applications, 'mimeapps.list'))
+
+    for directory in data_dirs or ():
+        add(os.path.join(directory, 'applications', 'mimeinfo.cache'),
+            kind='mimeinfo.cache')
+
+    return paths
+
+
+def _parse_mimeapps_file(path, layer, canonical=None):
+    try:
+        f = io.open(path, 'r', encoding='utf-8', errors='replace')
+    except (IOError, OSError):
+        return
+
+    if canonical is None:
+        canonical = _canonical_mime_name
+    section = None
+    is_cache = layer.kind == 'mimeinfo.cache'
+    with f:
+        for raw_line in f:
+            line = raw_line.strip()
+            if not line or line.startswith('#'):
+                continue
+            if line.startswith('[') and line.endswith(']'):
+                section = line[1:-1].strip().lower()
+                continue
+            if '=' not in line or section is None:
+                continue
+            key, value = line.split('=', 1)
+            key = canonical(key)
+
+            if is_cache or section == 'mime cache':
+                target_name = 'cache'
+            else:
+                target_name = _SECTION_NAMES.get(section)
+                if target_name is None:
+                    continue
+            target = getattr(layer, target_name)
+
+            values = _split_association_list(value)
+            if target_name == 'default' and not values:
+                values = [_NO_DEFAULT]
+
+            for item in values:
+                if item not in target[key]:
+                    target[key].append(item)
+
+
+def _desktop_file_associations(path):
+    section = None
+    mimetypes = []
+    hidden = False
+    try:
+        f = io.open(path, 'r', encoding='utf-8', errors='replace')
+    except (IOError, OSError):
+        return None
+    with f:
+        for raw_line in f:
+            line = raw_line.strip()
+            if not line or line.startswith('#'):
+                continue
+            if line.startswith('[') and line.endswith(']'):
+                section = line[1:-1].strip()
+                continue
+            if section != 'Desktop Entry' or '=' not in line:
+                continue
+            key, value = line.split('=', 1)
+            key = key.strip()
+            if key == 'Hidden':
+                hidden = value.strip().lower() == 'true'
+            elif key == 'MimeType':
+                mimetypes.extend(_split_association_list(value))
+    if hidden:
+        return []
+    return mimetypes
+
+
+def _desktop_id(path, applications_dir):
+    rel = os.path.relpath(path, applications_dir)
+    return rel.replace(os.sep, '-')
+
+
+def _parse_pairs(text):
+    """Yield simple whitespace-separated key/value pairs."""
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith('#'):
+            continue
+        fields = line.split(None, 1)
+        if len(fields) == 2:
+            yield fields[0], fields[1]
+
+
+def _mime_data_section(data, names):
+    """Extract a named section from explicit MIME metadata.
+
+    ``data`` may be a mapping of section names to text, or one text blob with
+    optional ``[section]`` headers.
+    """
+    if hasattr(data, 'get'):
+        for name in names:
+            value = data.get(name)
+            if value is not None:
+                return value
+        return ''
+    text = str(data)
+    wanted = set(names)
+    section = None
+    lines = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith('[') and stripped.endswith(']'):
+            section = stripped[1:-1].strip().lower()
+            continue
+        if section is not None:
+            if section in wanted:
+                lines.append(line)
+        elif stripped and not stripped.startswith('#'):
+            lines.append(line)
+    return '\n'.join(lines)
+
+
+class MimeApps(object):
+    """Resolver for the XDG MIME Applications specification.
+
+    Association files are layered from highest to lowest precedence:
+    ``$desktop-mimeapps.list`` and ``mimeapps.list`` in configuration
+    directories, then the same names in ``$XDG_DATA_DIRS/applications``, then
+    ``mimeinfo.cache``.  Desktop files can optionally supply the lowest
+    precedence associations when no cache is available.
+
+    For embedded use, pass ``paths`` (high to low precedence) to read explicit
+    association files, and ``mime_data`` to supply MIME aliases, subclasses,
+    globs or magic data directly.
+    """
+
+    def __init__(self, desktop=None, config_home=None, config_dirs=None,
+                 data_home=None, data_dirs=None, scan_desktop_files=True,
+                 paths=None, mime_data=None):
+        self.desktop = desktop
+        self.config_home = config_home
+        self.config_dirs = config_dirs
+        self.data_home = data_home
+        self.data_dirs = data_dirs
+        self.scan_desktop_files = scan_desktop_files
+        self.paths = paths
+        self.mime_data = mime_data
+        # If any XDG location is supplied explicitly, do not fall back to
+        # the caller's host directories for the unspecified ones.
+        self._explicit_paths = any(
+            value is not None for value in
+            (config_home, config_dirs, data_home, data_dirs))
+        self._layers = None
+
+    def reload(self):
+        self._layers = None
+        self._mime_maps = None
+
+    def _get_mime_maps(self):
+        """Return (aliases, inheritance) including any explicit mime_data."""
+        try:
+            return self._mime_maps
+        except AttributeError:
+            pass
+        update_cache()
+        alias_map = dict(aliases)
+        inheritance_map = defaultdict(set)
+        for key, parents in inheritance.items():
+            inheritance_map[key].update(parents)
+
+        data = self.mime_data
+        if data:
+            alias_data = _mime_data_section(data, ('aliases', 'alias'))
+            for alias_name, canonical in _parse_pairs(alias_data):
+                alias_map.setdefault(alias_name.lower(),
+                                     canonical.strip().lower())
+
+            subclass_data = _mime_data_section(
+                data, ('subclasses', 'inheritance', 'parents'))
+            for sub, parent in _parse_pairs(subclass_data):
+                sub = sub.lower()
+                parent = parent.strip().lower()
+                inheritance_map[sub].add(parent)
+
+        self._mime_maps = (alias_map, inheritance_map)
+        return self._mime_maps
+
+    def _canonical(self, name):
+        alias_map, inheritance_map = self._get_mime_maps()
+        return _canonical_mime_name(name, alias_map)
+
+    def _parents(self, name):
+        alias_map, inheritance_map = self._get_mime_maps()
+        return _parent_mime_names(name, alias_map, inheritance_map)
+
+    def _load_layers(self):
+        if self._layers is not None:
+            return self._layers
+
+        if self.paths is not None:
+            paths = []
+            for index, path in enumerate(self.paths):
+                kind = 'mimeapps'
+                if isinstance(path, (tuple, list)):
+                    path, kind = path
+                if path and os.path.isfile(path):
+                    paths.append((os.path.abspath(path), kind))
+        else:
+            paths = _mimeapps_config_paths(
+                self.desktop, self.config_home, self.config_dirs,
+                self.data_home, self.data_dirs,
+                use_defaults=not self._explicit_paths)
+
+        layers = []
+        for index, (path, kind) in enumerate(paths):
+            if not os.path.isfile(path):
+                continue
+            layer = _MimeAppsLayer(path, index, kind)
+            _parse_mimeapps_file(path, layer, self._canonical)
+            layers.append(layer)
+
+        if self.paths is None and self.scan_desktop_files and not any(
+                layer.kind == 'mimeinfo.cache' for layer in layers):
+            if self._explicit_paths:
+                data_dirs = list(self.data_dirs or ())
+                if self.data_home:
+                    data_dirs = [self.data_home] + data_dirs
+            else:
+                data_dirs = list(_xdg_data_dirs())
+
+            next_index = len(paths)
+            for directory in data_dirs or ():
+                applications = os.path.join(directory, 'applications')
+                if not os.path.isdir(applications):
+                    continue
+                for root, dirs, files in os.walk(applications):
+                    dirs.sort()
+                    for filename in sorted(files):
+                        if not filename.endswith('.desktop'):
+                            continue
+                        path = os.path.join(root, filename)
+                        desktop_id = _desktop_id(path, applications)
+                        mimetypes = _desktop_file_associations(path)
+                        if not mimetypes:
+                            continue
+                        layer = _MimeAppsLayer(path, next_index, 'desktop')
+                        next_index += 1
+                        for mimetype in mimetypes:
+                            mimetype = self._canonical(mimetype)
+                            if desktop_id not in layer.cache[mimetype]:
+                                layer.cache[mimetype].append(desktop_id)
+                        layers.append(layer)
+
+        self._layers = layers
+        return layers
+
+    def _mime_name(self, mimetype):
+        if isinstance(mimetype, MIMEtype):
+            return self._canonical(str(mimetype))
+        if isinstance(mimetype, bytes):
+            return None
+        name = os.fspath(mimetype) if hasattr(mimetype, '__fspath__') \
+            else (mimetype if isinstance(mimetype, str) else None)
+        if name is None:
+            return None
+        name = name.strip()
+        if not _MIME_NAME_RE.match(name):
+            return None
+        return self._canonical(name)
+
+    def _resolve_argument(self, value):
+        """Resolve a MIME type, a file path, or a MIMEtype to a type name."""
+        name = self._mime_name(value)
+        if name is not None:
+            # A path such as "docs/readme" can match the MIME-type pattern;
+            # prefer the filesystem interpretation when the path exists.
+            if not os.path.exists(name):
+                return name
+            name = None
+
+        if isinstance(value, MIMEtype):
+            return self._canonical(str(value))
+        if isinstance(value, bytes):
+            path = value.decode('utf-8', 'replace')
+        elif hasattr(value, '__fspath__'):
+            path = os.fspath(value)
+        elif isinstance(value, str):
+            path = value
+        else:
+            return None
+        if not path.strip():
+            return None
+        detected = _mime_type_for_path(path)
+        if detected is None:
+            return None
+        return self._canonical(detected)
+
+    def get_all_associations(self, mimetype):
+        return self.get_associations(mimetype)
+
+    def get_all_applications(self, mimetype, fallback=True):
+        return self.get_applications(mimetype, fallback=fallback)
+
+    def get_associations(self, mimetype):
+        """Return every candidate association, preserving duplicates.
+
+        The list contains :class:`ApplicationCandidate` objects, each keeping
+        the file, layer, section and source MIME type which supplied it.
+        """
+        name = self._resolve_argument(mimetype)
+        if name is None:
+            return []
+        entries = self._resolve(name, []).all_entries()
+        return [ApplicationCandidate(
+            e.desktop_id, e.source, e.mimetype, e.layer, e.section)
+            for e in entries if e.desktop_id is not None]
+
+    def get_default_application(self, mimetype, fallback=False):
+        """Return the default application for ``mimetype``, or None.
+
+        With ``fallback=True``, the first associated application is used when
+        no default is specified.
+        """
+        if self._has_explicit_default(mimetype):
+            apps = self.get_applications(mimetype, fallback=False)
+        else:
+            apps = self.get_applications(mimetype, fallback=fallback)
+        return apps.default
+
+    def _has_explicit_default(self, mimetype):
+        name = self._resolve_argument(mimetype)
+        if name is None:
+            return False
+        result = self._resolve(name, [])
+        return _select_default(result) is not None
+
+    def get_applications(self, mimetype, fallback=True):
+        """Return ordered applications for ``mimetype``.
+
+        The default application (when known) is first, followed by other
+        explicit defaults, added associations, and cache entries.  Parent MIME
+        types are considered after the requested type.  Removals are applied
+        before parent types are merged, so a removed application cannot
+        reappear from inheritance.
+        """
+        name = self._resolve_argument(mimetype)
+        if name is None:
+            return Applications()
+
+        result = self._resolve(name, [])
+        default = _select_default(result)
+
+        # Keep each MIME type's associations together, in group order: the
+        # requested type first, then its parents.  Within a group the order is
+        # default, added, cache.
+        grouped = []
+        for group_name, defaults, added, cache in result.groups:
+            for entry in defaults + added + cache:
+                if entry.desktop_id is not None:
+                    grouped.append(entry)
+
+        if default is None and fallback:
+            for entry in grouped:
+                if entry.desktop_id is not None:
+                    default = entry
+                    break
+
+        ordered = []
+        if default is not None:
+            ordered.append(default)
+        for entry in grouped:
+            if entry.desktop_id is None or entry is default:
+                continue
+            ordered.append(entry)
+
+        applications = []
+        by_id = {}
+        for entry in ordered:
+            app_id = entry.desktop_id
+            app = by_id.get(app_id)
+            if app is None:
+                app = Application(app_id, entry.source, entry.mimetype,
+                                  entry.layer, entry.section)
+                app.sources = []
+                by_id[app_id] = app
+                applications.append(app)
+            app.add_source(ApplicationCandidate(
+                app_id, entry.source, entry.mimetype, entry.layer,
+                entry.section))
+
+        default_app = None
+        if default is not None:
+            default_app = by_id.get(default.desktop_id)
+            if default_app is not None:
+                default_app.is_default = True
+        return Applications(applications, default_app)
+
+    def get_optional_applications(self, mimetype, fallback=True):
+        """Return all applications except the default one."""
+        apps = self.get_applications(mimetype, fallback=fallback)
+        return Applications([a for a in apps if a is not apps.default], None)
+
+    def _resolve(self, name, stack):
+        name = self._canonical(name)
+        if name in stack:
+            return _AssociationResult()
+        stack = stack + [name]
+        layers = self._load_layers()
+
+        direct = _AssociationResult()
+        removed_layers = {}
+        defaults_seen = False
+        defaults = []
+        added = []
+        cache = []
+
+        for layer in layers:
+            # Removed Associations suppresses matching associations from this
+            # and all lower-precedence files.
+            for app in layer.removed.get(name, ()):
+                if app not in removed_layers:
+                    removed_layers[app] = layer.index
+
+            # Default Applications is not accumulated across layers: the
+            # highest-precedence file which mentions the type decides the
+            # default list.  An explicitly empty entry means "no default".
+            if not defaults_seen and name in layer.default:
+                defaults_seen = True
+                for app in layer.default[name]:
+                    if app is _NO_DEFAULT:
+                        defaults.append(_AssociationEntry(
+                            None, layer.path, name, layer.index, 'default'))
+                    elif not _removed_below(app, layer.index, removed_layers):
+                        defaults.append(_AssociationEntry(
+                            app, layer.path, name, layer.index, 'default'))
+
+            for app in layer.added.get(name, ()):
+                if not _removed_below(app, layer.index, removed_layers):
+                    added.append(_AssociationEntry(
+                        app, layer.path, name, layer.index, 'added'))
+
+            for app in layer.cache.get(name, ()):
+                if not _removed_below(app, layer.index, removed_layers):
+                    cache.append(_AssociationEntry(
+                        app, layer.path, name, layer.index, 'cache'))
+
+        direct.removed_layers = removed_layers
+        direct.groups.append((name, defaults, added, cache))
+        group_names = set([name])
+
+        for parent in self._parents(name):
+            parent_result = self._resolve(parent, stack)
+            for parent_name, parent_defaults, parent_added, parent_cache in \
+                    parent_result.groups:
+                if parent_name in group_names:
+                    continue
+                group_names.add(parent_name)
+                direct.groups.append((
+                    parent_name,
+                    _inherit(parent_defaults, removed_layers, parent_name),
+                    _inherit(parent_added, removed_layers, parent_name),
+                    _inherit(parent_cache, removed_layers, parent_name),
+                ))
+        return direct
+
+
+def _removed_below(app, layer_index, removed_layers):
+    """Is ``app`` removed by a higher-precedence layer?"""
+    return app in removed_layers and removed_layers[app] < layer_index
+
+
+def _inherit(entries, removed_layers, mimetype):
+    result = []
+    for entry in entries:
+        if _blocked(entry, removed_layers):
+            continue
+        result.append(_AssociationEntry(
+            entry.desktop_id, entry.source, mimetype,
+            entry.layer, entry.section))
+    return result
+
+
+def _blocked(entry, removed_layers):
+    """Whether a removal for the child type suppresses this inherited entry.
+
+    A removal only suppresses associations from the same or a lower
+    precedence layer.  An association declared at a higher precedence than the
+    removal still wins.
+    """
+    if entry.desktop_id is None:
+        return False
+    if entry.desktop_id in removed_layers:
+        return entry.layer >= removed_layers[entry.desktop_id]
+    return False
+
+
+def _select_default(result):
+    """Select the explicit default for the requested MIME type.
+
+    Default Applications entries are not inherited from parent types: only
+    the first group (the requested type) can supply the default.  A parent's
+    default remains available as an ordinary association.
+    """
+    if not result.groups:
+        return None
+    name, defaults, added, cache = result.groups[0]
+    for entry in defaults:
+        if entry.desktop_id is None:
+            return None
+        return entry
+    return None
+
+
+_MIME_NAME_RE = re.compile(r'^[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+$')
+
+
+def _mime_type_name(mimetype):
+    if isinstance(mimetype, MIMEtype):
+        name = str(mimetype)
+    elif isinstance(mimetype, bytes):
+        name = mimetype.decode('ascii', 'replace')
+    elif not isinstance(mimetype, str) and hasattr(mimetype, '__fspath__'):
+        name = os.fspath(mimetype)
+    elif isinstance(mimetype, str):
+        name = mimetype
+    else:
+        return None
+    name = name.strip()
+    if not _MIME_NAME_RE.match(name):
+        return None
+    return _canonical_mime_name(name)
+
+
+def _mime_type_from_argument(mimetype):
+    """Accept either a MIME type or a filename and return its MIME name."""
+    name = _mime_type_name(mimetype)
+    if name is not None:
+        return name
+    if isinstance(mimetype, MIMEtype):
+        return str(mimetype)
+    if isinstance(mimetype, bytes):
+        path = mimetype.decode('utf-8', 'replace')
+    else:
+        path = str(mimetype)
+    if not path.strip():
+        return None
+    return _mime_type_for_path(path)
+
+
+def _mime_type_for_path(path, follow=True):
+    """Detect a file's MIME type, without extension-only app fallback."""
+    try:
+        mtype = get_type2(path, follow=follow)
+    except (IOError, OSError):
+        return None
+    if mtype is None:
+        return None
+    return str(mtype)
+
+
+_module_resolver = None
+
+
+def _get_module_resolver():
+    global _module_resolver
+    if _module_resolver is None:
+        _module_resolver = MimeApps()
+    else:
+        # XDG directories can be changed by callers, so re-scan associations.
+        _module_resolver._layers = None
+    return _module_resolver
+
+
+def get_associations(mimetype):
+    """Return every candidate association for a MIME type.
+
+    Each :class:`ApplicationCandidate` records its association file, source
+    MIME type (which may be an inherited parent), layer and section.
+    Duplicate occurrences are preserved.
+    """
+    return _get_module_resolver().get_associations(mimetype)
+
+
+def get_applications(mimetype, fallback=True):
+    """Return applications associated with a MIME type.
+
+    The default application, when known, is first.  Applications behave like
+    their desktop file ID strings and carry a ``sources`` list with every
+    candidate occurrence.
+    """
+    return _get_module_resolver().get_applications(mimetype,
+                                                   fallback=fallback)
+
+
+def get_default_application(mimetype, fallback=False):
+    """Return the default application for a MIME type, or None."""
+    return _get_module_resolver().get_default_application(
+        mimetype, fallback=fallback)
+
+
+def get_optional_applications(mimetype, fallback=True):
+    """Return the non-default applications for a MIME type."""
+    return _get_module_resolver().get_optional_applications(
+        mimetype, fallback=fallback)
+
+
+def get_applications_for_file(path, follow=True, fallback=True):
+    """Return applications for a file based on its detected MIME type.
+
+    The type is detected with :func:`get_type2`.  If it is unknown, an empty
+    result is returned: no extension-only application fallback is attempted.
+    """
+    mimetype = _mime_type_for_path(path, follow=follow)
+    if mimetype is None:
+        return Applications()
+    return get_applications(mimetype, fallback=fallback)
+
+
+def get_default_application_for_file(path, follow=True, fallback=False):
+    """Return the default application for a file based on its MIME type."""
+    mimetype = _mime_type_for_path(path, follow=follow)
+    if mimetype is None:
+        return None
+    return get_default_application(mimetype, fallback=fallback)
+
+
+# Compatibility aliases for callers using the plural names.
+get_all_applications = get_applications
+get_all_associations = get_associations
+
 
 def install_mime_info(application, package_file):
     """Copy 'package_file' as ``~/.local/share/mime/packages/<application>.xml.``
