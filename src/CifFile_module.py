@@ -251,6 +251,14 @@ class CifBlock(StarFile.StarBlock):
     def loopnames(self):
         return [self.loops[a] for a in self.loops]
 
+    def merge_aliases(self,dictionary,targets=None,category_keys=None):
+        """Normalise aliased datanames in this block to the current names
+        declared by `dictionary`.  See the module-level `merge_aliases`
+        function for full documentation.  This block is not modified; the
+        normalised block is available as `merged` on the returned
+        `AliasMergeResult`."""
+        return merge_aliases(self,dictionary,targets=targets,category_keys=category_keys)
+
 
 # \section{CifFile}                                                       
 #                                                                         
@@ -3912,7 +3920,576 @@ class CifDic(StarFile.StarFile):
 
 
 
-# We provide some functions for straight validation.  These serve as an   
+# \section{Dictionary-driven alias merging}
+#
+# The routines in this section implement normalisation of aliased
+# datanames to the current names declared by a locked CIF dictionary,
+# as needed when ingesting data into an archive.  The dictionary is the
+# sole authority and is never modified: only exact, dictionary-declared
+# aliases are recognised, and approximate (undeclared) names are left
+# untouched.  For every value we record the original spelling, the
+# dictionary basis for the mapping, and the position of the value in
+# the original data block.  Where a logical field occurs more than
+# once, scalar values, loop columns and missing-value markers all
+# participate in conflict detection; conflicting occurrences are kept
+# as original evidence instead of being silently resolved (for example,
+# by taking the last column).  A new data block is produced only after
+# the merged loop row relations and references have been verified.
+#
+#
+# <Alias merging>=
+class AliasMergeError(CifError):
+    """Raised when aliased datanames cannot be merged into a structurally
+    valid new data block"""
+    pass
+
+
+class AliasObservation(object):
+    """A single observed value together with its position in the original
+    data block.  `loop_no` is -1 for unlooped (scalar) values, in which
+    case `packet_index` is None."""
+    def __init__(self,loop_no,packet_index,value):
+        self.loop_no = loop_no
+        self.packet_index = packet_index
+        self.value = value
+
+    def __repr__(self):
+        if self.loop_no < 0:
+            return 'AliasObservation(scalar, {!r})'.format(self.value)
+        return 'AliasObservation(loop {}, packet {}, {!r})'.format(
+            self.loop_no,self.packet_index,self.value)
+
+    def __eq__(self,other):
+        return (isinstance(other,AliasObservation) and
+                self.loop_no == other.loop_no and
+                self.packet_index == other.packet_index and
+                self.value == other.value)
+
+    def __ne__(self,other):
+        return not self == other
+
+
+class AliasProvenance(object):
+    """Record of one original occurrence of a logical field: the original
+    spelling, the dictionary basis for the mapping, and the position of
+    every value in the original data block."""
+    def __init__(self,canonical_name,original_name,spelling,loop_no,
+                 column_index,dictionary_basis,observations):
+        self.canonical_name = canonical_name    # current dictionary name
+        self.original_name = original_name      # internal (lower-case) name
+        self.spelling = spelling                # spelling as it appeared in the file
+        self.loop_no = loop_no                  # -1 if unlooped (scalar)
+        self.column_index = column_index        # position within loop or block
+        self.dictionary_basis = dictionary_basis
+        self.observations = observations        # tuple of AliasObservation
+
+    def __repr__(self):
+        return 'AliasProvenance({} <- {} at ({},{}))'.format(
+            self.canonical_name,self.spelling,self.loop_no,self.column_index)
+
+
+class AliasConflict(object):
+    """Record of aliased occurrences of one logical field that could not be
+    merged.  The original datanames are left untouched in the merged block
+    as evidence; `reason` is one of 'scalar-loop-mix', 'value-mismatch' or
+    'unalignable-rows'."""
+    def __init__(self,canonical_name,reason,occurrences,details=None):
+        self.canonical_name = canonical_name
+        self.reason = reason
+        self.occurrences = occurrences          # [(spelling,(loop_no,column_index))]
+        self.details = details or []            # [(row label,{spelling: value})]
+
+    def __str__(self):
+        names = [a[0] for a in self.occurrences]
+        return 'Alias conflict for {} ({}): {}'.format(
+            self.canonical_name,self.reason,', '.join(names))
+
+    def __repr__(self):
+        return 'AliasConflict({!r},{!r})'.format(self.canonical_name,self.reason)
+
+
+class AliasMergeResult(object):
+    """The outcome of `merge_aliases`.  `merged` is the new data block copy
+    in which all non-conflicting fields appear under their current
+    dictionary names; conflicting fields are left under their original
+    spellings as evidence.  `ok` is True only when no conflicts were
+    found.  Querying by the current name or by any original spelling
+    (`observations`) returns the same batch of observations."""
+    def __init__(self,dictionary_basis,resolution):
+        self.dictionary_basis = dictionary_basis
+        self.merged = None                      # new CifBlock, set on success
+        self.conflicts = []                     # list of AliasConflict
+        self.provenance = {}                    # canonical -> [AliasProvenance]
+        self.unrecognised = []                  # spellings not declared in dictionary
+        self.merged_fields = []                 # canonical names now normalised
+        self._resolution = resolution           # any declared spelling -> canonical
+        self._survivor = {}                     # canonical -> surviving AliasProvenance
+
+    @property
+    def ok(self):
+        return len(self.conflicts) == 0 and self.merged is not None
+
+    def canonical_of(self,name):
+        """Return the current dictionary name for `name`, or None if `name`
+        is not declared in the dictionary (exact matching only)."""
+        return self._resolution.get(name.lower())
+
+    def original_names(self,canonical):
+        """Return the spellings under which `canonical` appeared in the
+        original data block, in file order."""
+        return [p.spelling for p in self.provenance.get(canonical.lower(),[])]
+
+    def positions(self,canonical):
+        """Return (spelling, (loop_no, column_index)) for each original
+        occurrence of `canonical`."""
+        return [(p.spelling,(p.loop_no,p.column_index))
+                for p in self.provenance.get(canonical.lower(),[])]
+
+    def observations(self,name):
+        """Return the batch of observations for the logical field `name`,
+        whether `name` is the current name or an original spelling.  Raises
+        `KeyError` if the name is not declared or absent, and
+        `AliasMergeError` if the field has conflicting occurrences so no
+        single batch of observations exists."""
+        canonical = self._resolution.get(name.lower())
+        if canonical is None:
+            raise KeyError('{} is not declared in the dictionary'.format(name))
+        survivor = self._survivor.get(canonical)
+        if survivor is None:
+            if canonical in self.provenance:
+                raise AliasMergeError(
+                    '{} has conflicting occurrences: no single observation set'.format(canonical))
+            raise KeyError('{} does not occur in the data block'.format(name))
+        return survivor.observations
+
+    @property
+    def renames(self):
+        """Dictionary of {original spelling: canonical name} for datanames
+        that were renamed in the merged block."""
+        renames = {}
+        for canonical,provs in self.provenance.items():
+            if canonical in self._survivor:
+                for p in provs:
+                    if p.original_name != canonical:
+                        renames[p.spelling] = canonical
+        return renames
+
+
+def _alias_record(resolution,alias,canonical):
+    """Record `alias` as an alternative spelling of `canonical`, detecting
+    contradictory dictionary declarations."""
+    alias,canonical = alias.lower(),canonical.lower()
+    if alias in resolution and resolution[alias] != canonical:
+        raise AliasMergeError(
+            'Dictionary declares {} as an alias of both {} and {}'.format(
+                alias,resolution[alias],canonical))
+    resolution[alias] = canonical
+
+
+def _alias_resolution_map(dictionary):
+    """Build a mapping from every declared spelling (lower case) to the
+    canonical (current) dataname, using only exact declarations found in
+    `dictionary`.  Approximate names are never included."""
+    declared = {}                               # canonical -> [aliases]
+    for canonical,aliases in getattr(dictionary,'alias_table',{}).items():
+        for alias in listify(aliases) or []:
+            if isinstance(alias,unicode):
+                declared.setdefault(canonical.lower(),[]).append(alias.lower())
+    for defname in dictionary.keys():
+        try:
+            definition = dictionary[defname]
+        except KeyError:
+            continue
+        for alias in listify(definition.get('_item_aliases.alias_name',[]) or []):
+            if isinstance(alias,unicode):
+                declared.setdefault(defname.lower(),[]).append(alias.lower())
+    resolution = {}
+    alias_names = set(a for aliases in declared.values() for a in aliases)
+    for defname in dictionary.keys():
+        if defname.lower() not in alias_names:
+            resolution.setdefault(defname.lower(),defname.lower())
+    for canonical,aliases in declared.items():
+        resolution.setdefault(canonical,canonical)
+        for alias in aliases:
+            _alias_record(resolution,alias,canonical)
+    return resolution
+
+
+def _dictionary_basis(dictionary):
+    """A string identifying the dictionary used as the basis for merging"""
+    parts = [getattr(dictionary,'dicname',None),
+             getattr(dictionary,'dicversion',None),
+             getattr(dictionary,'diclang',None)]
+    basis = ' '.join([unicode(p) for p in parts if p])
+    uri = getattr(dictionary,'my_uri',None)
+    if uri:
+        basis = '{} ({})'.format(basis,uri)
+    return basis or 'unknown dictionary'
+
+
+def _field_category(dictionary,canonical):
+    """Return the (lower-case) category of `canonical` per the dictionary"""
+    try:
+        definition = dictionary[canonical]
+    except KeyError:
+        return None
+    for spec in ('_name.category_id','_item.category_id','_category'):
+        val = definition.get(spec,None)
+        if isinstance(val,unicode) and val not in ('.','?'):
+            return val.lower()
+    return None
+
+
+def _category_key_names(dictionary,category,category_keys,resolution):
+    """Return the canonical key datanames for `category`, preferring the
+    caller-supplied convention in `category_keys` over the dictionary."""
+    raw_keys = None
+    if category in category_keys:
+        raw_keys = listify(category_keys[category])
+    else:
+        for keylist in getattr(dictionary,'cat_key_table',{}).get(category,[]):
+            names = [k for k in listify(keylist) or []
+                     if isinstance(k,unicode) and k not in ('.','?')]
+            if names:
+                raw_keys = names
+                break
+        if raw_keys is None:
+            try:
+                cat_def = dictionary[category]
+            except KeyError:
+                cat_def = {}
+            for spec in (getattr(dictionary,'unique_spec',None),'_category.key_id'):
+                if not spec: continue
+                names = [k for k in listify(cat_def.get(spec,[]) or [])
+                         if isinstance(k,unicode) and k not in ('.','?')]
+                if names:
+                    raw_keys = names
+                    break
+    if not raw_keys:
+        return []
+    return [resolution.get(k.lower(),k.lower()) for k in raw_keys]
+
+
+def _linked_parent_names(dictionary,canonical):
+    """Return the datanames referenced by `canonical` according to the
+    dictionary (DDLm Link items, DDL1/DDL2 parent links)."""
+    try:
+        definition = dictionary[canonical]
+    except KeyError:
+        return []
+    parents = []
+    linked = definition.get('_name.linked_item_id',None)   # DDLm
+    if (definition.get('_type.purpose','') == 'Link' and
+        isinstance(linked,unicode) and linked not in ('.','?','')):
+        parents.append(linked)
+    parent_spec = getattr(dictionary,'parent_spec',None)   # DDL1/DDL2
+    if parent_spec:
+        for parent in listify(definition.get(parent_spec,[]) or []):
+            if isinstance(parent,unicode) and parent not in ('.','?',''):
+                parents.append(parent)
+    return parents
+
+
+def _same_value(value_a,value_b):
+    """Compare two raw CIF values.  The missing-value markers '.'
+    (inapplicable) and '?' (unknown) have distinct meanings and are
+    therefore different from each other and from any concrete value."""
+    return value_a == value_b
+
+
+class _AliasOccurrence(object):
+    """One occurrence of a logical field in a data block"""
+    def __init__(self,block,name,canonical):
+        self.name = name                        # internal (lower-case) name
+        self.canonical = canonical
+        self.spelling = block.true_case.get(name,name)
+        self.loop_no = block.FindLoop(name)     # -1 if unlooped
+        self.column_index = block.GetItemPosition(name)[1]
+        raw_value = block.GetItemValue(name)
+        if self.loop_no >= 0:
+            self.values = list(raw_value)
+        else:
+            self.values = [raw_value]
+
+    def order_key(self,block):
+        if self.loop_no < 0:
+            return (block.item_order.index(self.name),0)
+        return (block.item_order.index(self.loop_no),self.column_index)
+
+    def make_provenance(self,basis):
+        if self.loop_no < 0:
+            observations = (AliasObservation(-1,None,self.values[0]),)
+        else:
+            observations = tuple(AliasObservation(self.loop_no,i,v)
+                                 for i,v in enumerate(self.values))
+        return AliasProvenance(self.canonical,self.name,self.spelling,
+                               self.loop_no,self.column_index,basis,observations)
+
+
+def _find_key_columns(block,loop_no,key_names,resolution):
+    """Return {key canonical name: column name} for `loop_no`, or None if
+    any key is not present exactly once in the loop."""
+    columns = {}
+    loop_columns = block.loops[loop_no]
+    for key in key_names:
+        matches = [c for c in loop_columns if resolution.get(c,c) == key]
+        if len(matches) != 1:
+            return None
+        columns[key] = matches[0]
+    return columns
+
+
+def _key_tuples(block,key_columns):
+    """Return the list of key value tuples, one per packet, for the loop"""
+    key_order = sorted(key_columns)
+    columns = [list(block.GetItemValue(key_columns[k])) for k in key_order]
+    tuples = list(zip(*columns))
+    return [tuple(repr(v) if isinstance(v,(list,tuple)) else v for v in t)
+            for t in tuples]
+
+
+def _align_loop_rows(block,loop_a,loop_b,key_names,resolution):
+    """Return (mapping, reason): `mapping` sends packet indices of `loop_a`
+    to the corresponding packet indices of `loop_b` based on category key
+    values, or is None together with an explanatory `reason` when the rows
+    of the two loops cannot be brought into correspondence."""
+    columns_a = _find_key_columns(block,loop_a,key_names,resolution)
+    columns_b = _find_key_columns(block,loop_b,key_names,resolution)
+    if columns_a is None or columns_b is None:
+        return None,'category key columns not present in both loops'
+    keys_a = _key_tuples(block,columns_a)
+    keys_b = _key_tuples(block,columns_b)
+    if any(any(v in ('.','?') for v in t) for t in keys_a + keys_b):
+        return None,'missing key values prevent row correspondence'
+    if len(set(keys_a)) != len(keys_a) or len(set(keys_b)) != len(keys_b):
+        return None,'duplicate key values prevent row correspondence'
+    if set(keys_a) != set(keys_b):
+        return None,'category key values differ between loops'
+    index_b = dict((k,i) for i,k in enumerate(keys_b))
+    return dict((i,index_b[k]) for i,k in enumerate(keys_a)),None
+
+
+def _occurrence_summary(occurrences):
+    return [(o.spelling,(o.loop_no,o.column_index)) for o in occurrences]
+
+
+def _plan_group(block,canonical,occurrences,dictionary,category_keys,resolution):
+    """Decide how the occurrences of one logical field should be merged.
+    Returns (survivor, redundant, conflict): `survivor` is the occurrence
+    that will carry the canonical name, `redundant` lists occurrences to be
+    removed, and `conflict` is an AliasConflict if no merge is possible, in
+    which case all occurrences must be left untouched."""
+    occurrences = sorted(occurrences,
+                         key=lambda o: (o.name != canonical,o.order_key(block)))
+    survivor = occurrences[0]
+    rest = occurrences[1:]
+    if not rest:
+        return survivor,[],None
+    kinds = set(o.loop_no >= 0 for o in occurrences)
+    if len(kinds) > 1:
+        return None,[],AliasConflict(canonical,'scalar-loop-mix',
+                                     _occurrence_summary(occurrences),
+                                     [(None,dict((o.spelling,o.values[0])
+                                                 for o in occurrences))])
+    if survivor.loop_no < 0:                    # all scalar
+        if any(not _same_value(o.values[0],survivor.values[0]) for o in rest):
+            return None,[],AliasConflict(canonical,'value-mismatch',
+                                         _occurrence_summary(occurrences),
+                                         [(None,dict((o.spelling,o.values[0])
+                                                     for o in occurrences))])
+        return survivor,rest,None
+    # looped occurrences: rows must correspond before values are compared
+    category = _field_category(dictionary,canonical)
+    key_names = []
+    if category is not None:
+        key_names = _category_key_names(dictionary,category,category_keys,resolution)
+    redundant = []
+    for other in rest:
+        if other.loop_no == survivor.loop_no:
+            mapping = dict((i,i) for i in range(len(survivor.values)))
+            row_labels = list(range(len(survivor.values)))
+        else:
+            if not key_names:
+                return None,[],AliasConflict(
+                    canonical,'unalignable-rows',_occurrence_summary(occurrences),
+                    [(None,{'reason':'no category key available to align loops {} and {}'.format(
+                        survivor.loop_no,other.loop_no)})])
+            mapping,reason = _align_loop_rows(block,survivor.loop_no,
+                                              other.loop_no,key_names,resolution)
+            if mapping is None:
+                return None,[],AliasConflict(
+                    canonical,'unalignable-rows',_occurrence_summary(occurrences),
+                    [(None,{'reason':reason})])
+            key_columns = _find_key_columns(block,survivor.loop_no,key_names,resolution)
+            row_labels = _key_tuples(block,key_columns)
+        bad_rows = [(row_labels[i],{survivor.spelling: survivor.values[i],
+                                    other.spelling: other.values[mapping[i]]})
+                    for i in range(len(survivor.values))
+                    if not _same_value(survivor.values[i],other.values[mapping[i]])]
+        if bad_rows:
+            return None,[],AliasConflict(canonical,'value-mismatch',
+                                         _occurrence_summary(occurrences),bad_rows)
+        redundant.append(other)
+    return survivor,redundant,None
+
+
+def _copy_cif_block(block):
+    """Create an independent copy of `block` (CifBlock.copy is not usable
+    here as it shares loop structures with the original)"""
+    newblock = CifBlock(strict=0,compat_mode=getattr(block,'compat_mode',False))
+    newblock.block = dict(block.block)
+    newblock.loops = dict((k,list(v)) for k,v in block.loops.items())
+    newblock.item_order = list(block.item_order)
+    newblock.true_case = dict(block.true_case)
+    newblock.formatting_hints = dict(block.formatting_hints)
+    newblock.maxoutlength = block.maxoutlength
+    newblock.wraplength = block.wraplength
+    return newblock
+
+
+def _verify_merged_block(newblock,dictionary,categories,category_keys,
+                         resolution,merged_canonicals):
+    """Check that loop row relations and references in the merged block are
+    still valid.  Returns a list of problems (empty if valid)."""
+    problems = []
+    for loop_no,names in newblock.loops.items():
+        lengths = set()
+        for name in names:
+            value = newblock.GetItemValue(name)
+            if isinstance(value,list) and not isinstance(value,StarList):
+                lengths.add(len(value))
+            else:
+                lengths.add(1)
+        if len(lengths) > 1:
+            problems.append('loop {} has columns of unequal length'.format(loop_no))
+    for category in categories:
+        key_names = _category_key_names(dictionary,category,category_keys,resolution)
+        if not key_names:
+            continue
+        for loop_no in newblock.loops:
+            key_columns = _find_key_columns(newblock,loop_no,key_names,resolution)
+            if key_columns is None:
+                continue
+            tuples = _key_tuples(newblock,key_columns)
+            if len(set(tuples)) != len(tuples):
+                problems.append(
+                    'duplicate key values for category {} in loop {}'.format(category,loop_no))
+    for canonical in merged_canonicals:
+        for parent in _linked_parent_names(dictionary,canonical):
+            parent_canonical = resolution.get(parent.lower(),parent.lower())
+            child_columns = [n for n in newblock.keys()
+                             if resolution.get(n,n) == canonical]
+            parent_columns = [n for n in newblock.keys()
+                              if resolution.get(n,n) == parent_canonical]
+            if not child_columns or not parent_columns:
+                continue
+            parent_values = set()
+            for parent_column in parent_columns:
+                for value in listify(newblock.GetItemValue(parent_column)):
+                    parent_values.add(value)
+            for child_column in child_columns:
+                for value in listify(newblock.GetItemValue(child_column)):
+                    if value in ('.','?'):
+                        continue
+                    if value not in parent_values:
+                        problems.append(
+                            'value {} of {} not found in referenced item {}'.format(
+                                value,child_column,parent))
+    return problems
+
+
+def merge_aliases(block,dictionary,targets=None,category_keys=None):
+    """Normalise aliased datanames in `block` to the current names declared
+    by `dictionary`, returning an `AliasMergeResult`.
+
+    `dictionary` is treated as locked: it is the sole authority for the
+    mapping and is never modified.  Only exact, dictionary-declared aliases
+    are recognised; names not declared in the dictionary are left untouched
+    and reported in `result.unrecognised`.
+
+    `targets`, if given, restricts normalisation to the listed (canonical
+    or aliased) datanames; a target that is not declared in the dictionary
+    raises `AliasMergeError`.  `category_keys` is an optional caller
+    convention of the form {category: key dataname or [key datanames]}
+    overriding the dictionary category keys when aligning loop rows.
+
+    Where a logical field occurs more than once, scalar values, loop
+    columns and missing-value markers ('.' and '?' are distinct) all
+    participate in conflict detection.  Columns from loops whose rows
+    cannot be brought into correspondence through the category keys are
+    never folded together, even if their values are identical.  Conflicting
+    occurrences are left in the merged block under their original spellings
+    as evidence, and `result.ok` is False.  The new block copy is generated
+    only after the merged loop row relations and references have been
+    verified; if they are not valid, `AliasMergeError` is raised and no new
+    copy is produced.
+    """
+    resolution = _alias_resolution_map(dictionary)
+    basis = _dictionary_basis(dictionary)
+    if targets is not None:
+        if isinstance(targets,unicode):
+            targets = [targets]
+        target_set = set()
+        for target in targets:
+            canonical = resolution.get(target.lower())
+            if canonical is None:
+                raise AliasMergeError(
+                    'Target dataname {} is not declared in dictionary {}'.format(
+                        target,basis))
+            target_set.add(canonical)
+    else:
+        target_set = None
+    caller_keys = {}
+    for category,keys in (category_keys or {}).items():
+        caller_keys[category.lower()] = [k.lower() for k in listify(keys)]
+    result = AliasMergeResult(basis,resolution)
+    groups = {}
+    for name in block.keys():
+        canonical = resolution.get(name)
+        if canonical is None:
+            result.unrecognised.append(block.true_case.get(name,name))
+            continue
+        if target_set is not None and canonical not in target_set:
+            continue
+        occurrence = _AliasOccurrence(block,name,canonical)
+        groups.setdefault(canonical,[]).append(occurrence)
+    plans = []
+    for canonical,occurrences in groups.items():
+        survivor,redundant,conflict = _plan_group(
+            block,canonical,occurrences,dictionary,caller_keys,resolution)
+        provenance = [o.make_provenance(basis) for o in occurrences]
+        result.provenance[canonical] = provenance
+        if conflict is not None:
+            result.conflicts.append(conflict)
+        else:
+            plans.append((canonical,survivor,redundant))
+            by_name = dict((p.original_name,p) for p in provenance)
+            result._survivor[canonical] = by_name[survivor.name]
+            result.merged_fields.append(canonical)
+    # apply the plans to a new copy of the block
+    newblock = _copy_cif_block(block)
+    affected_categories = set(caller_keys.keys())
+    for canonical,survivor,redundant in plans:
+        for other in redundant:
+            newblock.RemoveItem(other.name)
+        if survivor.name != canonical:
+            newblock.ChangeTagName(survivor.name,canonical)
+        category = _field_category(dictionary,canonical)
+        if category is not None:
+            affected_categories.add(category)
+    # verify loop row relations and references before delivering the copy
+    problems = _verify_merged_block(newblock,dictionary,affected_categories,
+                                    caller_keys,resolution,
+                                    [p[0] for p in plans])
+    if problems:
+        raise AliasMergeError(
+            'Merged block failed verification; no new copy produced: ' +
+            '; '.join(problems))
+    result.merged = newblock
+    return result
+
+
+# We provide some functions for straight validation.  These serve as an
 # example of the use of the CifDic class with the CifFile class.          
 #                                                                         
 #                                                                         

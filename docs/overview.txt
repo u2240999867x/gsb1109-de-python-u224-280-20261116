@@ -359,12 +359,59 @@ Note that an error will be raised when calling `AddPacket` if the
 packet attributes do not exactly match the item names in the 
 loop.
 
-A packet may be removed using the `RemoveKeyedPacket` method, which 
-chooses the packet to be removed based on the value of the given 
-dataname: 
+A packet may be removed using the `RemoveKeyedPacket` method, which
+chooses the packet to be removed based on the value of the given
+dataname:
 
 ~~~{.python}
     aloop.RemoveKeyedPacket('_item_7','a')
+~~~
+
+## Normalising aliased datanames
+
+When ingesting data into an archive, older files may use datanames
+that a locked dictionary declares as aliases of current names. The
+`merge_aliases` function produces a new `CifBlock` copy in which such
+datanames appear under their current dictionary names:
+
+~~~{.python}
+    import CifFile
+    dic = CifFile.CifDic("cif_core_ddlm.dic", grammar="2.0", do_dREL=False)
+    block = CifFile.ReadCif("old_data.cif").first_block()
+    result = CifFile.merge_aliases(block, dic)
+    if result.ok:
+        new_block = result.merged
+~~~
+
+Only exact, dictionary-declared aliases are recognised; names that are
+not declared in the dictionary are left untouched and reported in
+`result.unrecognised`. The dictionary is never modified. The optional
+`targets` argument restricts normalisation to nominated datanames, and
+`category_keys` allows the caller to override the dictionary category
+keys used to align loop rows.
+
+Where a logical field occurs more than once (for example under both an
+old and a current spelling), scalar values, loop columns and
+missing-value markers (`.` and `?` are distinct) all participate in
+conflict detection. Columns from loops whose rows cannot be brought
+into correspondence through the category keys are never folded
+together, even if their values are identical. Conflicting occurrences
+are left in the merged block under their original spellings as
+evidence, `result.ok` is `False`, and `result.conflicts` describes
+each problem. The new block is produced only after the merged loop
+row relations and references have been verified; if they are invalid,
+`AliasMergeError` is raised.
+
+Every value retains its provenance: `result.provenance` records the
+original spelling, the dictionary basis and the position of each
+value. Querying by the current name or by an original spelling returns
+the same batch of observations:
+
+~~~{.python}
+    result.observations('_diffrn_data_frame.id')   # current name
+    result.observations('_diffrn_frame_data.id')   # original spelling
+    result.original_names('_diffrn_data_frame.id')
+    result.positions('_diffrn_data_frame.id')
 ~~~
 
 ## Writing CIF Files

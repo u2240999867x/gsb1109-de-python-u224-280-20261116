@@ -1906,6 +1906,290 @@ _item4 4
         f = open("tests/round_trip_test.cif","w")
         f.write(str(q))
 
+class AliasMergeTestCase(unittest.TestCase):
+    """Test dictionary-driven normalisation of aliased datanames"""
+    def setUp(self):
+        self.dic = CifFile.CifDic("tests/full_demo_0.0.6.dic",grammar="auto",
+                                  do_minimum=True,verbose_import=False)
+
+    def make_block(self,cif_string):
+        return CifFile.CifFile(cif_string,from_str=True).first_block()
+
+    def testScalarAliasRenamed(self):
+        """An aliased scalar is renamed to the current dictionary name"""
+        block = self.make_block("data_t\n_array_intensities.gain_su 0.05\n")
+        result = CifFile.merge_aliases(block,self.dic)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.merged['_array_intensities.gain_esd'],'0.05')
+        self.assertTrue('_array_intensities.gain_su' not in result.merged)
+        # the original block is untouched: a new copy is produced
+        self.assertEqual(block['_array_intensities.gain_su'],'0.05')
+        self.assertTrue('_array_intensities.gain_esd' not in block)
+
+    def testProvenanceRecorded(self):
+        """Original spelling, dictionary basis and value positions are kept"""
+        block = self.make_block("data_t\n_array_intensities.gain_su 0.05\n")
+        result = CifFile.merge_aliases(block,self.dic)
+        prov = result.provenance['_array_intensities.gain_esd']
+        self.assertEqual(len(prov),1)
+        self.assertEqual(prov[0].spelling,'_array_intensities.gain_su')
+        self.assertEqual(prov[0].loop_no,-1)
+        self.assertTrue('demo_dic' in prov[0].dictionary_basis)
+        self.assertTrue('DDLm' in prov[0].dictionary_basis)
+        # position of the single value: scalar, no packet index
+        self.assertEqual(result.observations('_array_intensities.gain_esd'),
+                         (CifFile.CifFile_module.AliasObservation(-1,None,'0.05'),))
+
+    def testUndeclaredNameNotAccepted(self):
+        """Approximate names not declared in the dictionary are left alone"""
+        block = self.make_block("data_t\n_array_intensities.gain_s 0.05\n")
+        result = CifFile.merge_aliases(block,self.dic)
+        self.assertTrue('_array_intensities.gain_s' in result.merged)
+        self.assertTrue('_array_intensities.gain_esd' not in result.merged)
+        self.assertEqual(result.unrecognised,['_array_intensities.gain_s'])
+
+    def testLoopedAliasRenamed(self):
+        """Aliased loop columns are renamed, preserving loop structure"""
+        block = self.make_block("""data_t
+loop_
+  _diffrn_frame_data.id
+  _diffrn_frame_data.details
+  f1 first
+  f2 second
+""")
+        result = CifFile.merge_aliases(block,self.dic)
+        self.assertTrue(result.ok)
+        self.assertEqual(list(result.merged['_diffrn_data_frame.id']),['f1','f2'])
+        loop_nos = set(result.merged.loops)
+        self.assertEqual(len(loop_nos),1)
+        self.assertEqual(result.merged.loops[loop_nos.pop()],
+                         ['_diffrn_data_frame.id','_diffrn_data_frame.details'])
+
+    def testIdenticalDuplicatesFolded(self):
+        """Alias and current name with identical values fold into one column"""
+        block = self.make_block("""data_t
+loop_
+  _diffrn_data_frame.id
+  _diffrn_frame_data.id
+  f1 f1
+  f2 f2
+""")
+        result = CifFile.merge_aliases(block,self.dic)
+        self.assertTrue(result.ok)
+        self.assertEqual(list(result.merged['_diffrn_data_frame.id']),['f1','f2'])
+        self.assertTrue('_diffrn_frame_data.id' not in result.merged)
+        # both original spellings are recorded in the provenance
+        self.assertEqual(sorted(result.original_names('_diffrn_data_frame.id')),
+                         ['_diffrn_data_frame.id','_diffrn_frame_data.id'])
+
+    def testConflictingValuesKeepEvidence(self):
+        """Conflicting duplicates are not resolved by taking the last column"""
+        block = self.make_block("""data_t
+loop_
+  _diffrn_data_frame.id
+  _diffrn_frame_data.id
+  f1 f1
+  f2 fX
+""")
+        result = CifFile.merge_aliases(block,self.dic)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.conflicts[0].reason,'value-mismatch')
+        # original evidence is preserved in the merged block
+        self.assertEqual(list(result.merged['_diffrn_frame_data.id']),['f1','fX'])
+        self.assertEqual(list(result.merged['_diffrn_data_frame.id']),['f1','f2'])
+        # no single batch of observations can be reported
+        self.assertRaises(CifFile.AliasMergeError,
+                          result.observations,'_diffrn_data_frame.id')
+
+    def testMissingValuesAreDistinct(self):
+        """'.' and '?' have different meanings and so conflict"""
+        block = self.make_block("""data_t
+loop_
+  _diffrn_data_frame.id
+  _diffrn_frame_data.id
+  f1 f1
+  .  ?
+""")
+        result = CifFile.merge_aliases(block,self.dic)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.conflicts[0].reason,'value-mismatch')
+
+    def testScalarLoopMixConflicts(self):
+        """A scalar and a loop column of one logical field conflict"""
+        block = self.make_block("""data_t
+_array_intensities.gain_su 0.5
+loop_ _array_intensities.gain_esd 0.5
+""")
+        result = CifFile.merge_aliases(block,self.dic)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.conflicts[0].reason,'scalar-loop-mix')
+
+    def testUnalignableLoopsNotFolded(self):
+        """Identical values in loops whose rows cannot be aligned are not folded"""
+        block = self.make_block("""data_t
+loop_ _diffrn_frame_data.details a
+loop_ _diffrn_data_frame.details a
+""")
+        result = CifFile.merge_aliases(block,self.dic)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.conflicts[0].reason,'unalignable-rows')
+        self.assertTrue('_diffrn_frame_data.details' in result.merged)
+        self.assertTrue('_diffrn_data_frame.details' in result.merged)
+
+    def testAlignableLoopsMerged(self):
+        """Columns in loops alignable through the caller's category key fold"""
+        block = self.make_block("""data_t
+loop_
+  _diffrn_data_frame.id
+  _diffrn_data_frame.details
+  f1 one
+  f2 two
+loop_
+  _diffrn_frame_data.id
+  _diffrn_frame_data.details
+  f2 two
+  f1 one
+""")
+        result = CifFile.merge_aliases(
+            block,self.dic,category_keys={'diffrn_data_frame':'_diffrn_data_frame.id'})
+        self.assertTrue(result.ok)
+        self.assertEqual(list(result.merged['_diffrn_data_frame.details']),['one','two'])
+        self.assertTrue('_diffrn_frame_data.details' not in result.merged)
+
+    def testAlignedLoopsValueMismatch(self):
+        """Rows aligned by key still conflict when values differ"""
+        block = self.make_block("""data_t
+loop_
+  _diffrn_data_frame.id
+  _diffrn_data_frame.array_id
+  f1 A1
+  f2 A2
+loop_
+  _diffrn_frame_data.id
+  _diffrn_frame_data.array_id
+  f2 AX
+  f1 A1
+""")
+        result = CifFile.merge_aliases(
+            block,self.dic,category_keys={'diffrn_data_frame':'_diffrn_data_frame.id'})
+        self.assertFalse(result.ok)
+        conflict = result.conflicts[0]
+        self.assertEqual(conflict.reason,'value-mismatch')
+        # the mismatch is reported against the aligned key, not the row number
+        self.assertEqual(conflict.details[0][0],('f2',))
+
+    def testDictionaryCompoundKeyAligns(self):
+        """The dictionary category key is used when no caller key is given"""
+        minidic = CifFile.CifDic("tests/alias_merge_test.dic",grammar="auto",
+                                 do_minimum=True,verbose_import=False)
+        block = self.make_block("""data_t
+loop_
+  _sample.id
+  _sample.part
+  _sample.value
+  a x 1.0
+  b y 2.0
+loop_
+  _sample_old.id
+  _sample_old.part
+  _sample_old.value
+  b y 2.0
+  a x 1.0
+""")
+        result = CifFile.merge_aliases(block,minidic)
+        self.assertTrue(result.ok)
+        self.assertTrue('_sample_old.value' not in result.merged)
+        self.assertEqual(list(result.merged['_sample.value']),['1.0','2.0'])
+        # rows were aligned by the compound key, not by position
+        self.assertEqual([o.value for o in result.observations('_sample_old.value')],
+                         ['1.0','2.0'])
+
+    def testTargetsRestrictMerging(self):
+        """Only caller-nominated target fields are normalised"""
+        block = self.make_block("""data_t
+_array_intensities.gain_su 0.5
+_diffrn_detector.make acme
+""")
+        result = CifFile.merge_aliases(block,self.dic,
+                                       targets=['_array_intensities.gain_esd'])
+        self.assertTrue('_array_intensities.gain_esd' in result.merged)
+        self.assertTrue('_diffrn_detector.make' in result.merged)
+        self.assertEqual(result.merged_fields,['_array_intensities.gain_esd'])
+
+    def testUndeclaredTargetRaises(self):
+        """A target field that is not in the dictionary is an error"""
+        block = self.make_block("data_t\n_array_intensities.gain_su 0.5\n")
+        self.assertRaises(CifFile.AliasMergeError,
+                          CifFile.merge_aliases,block,self.dic,
+                          ['_array_intensities.gain_s'])
+
+    def testDuplicateKeysBlockNewCopy(self):
+        """A caller key convention that yields duplicate keys stops the merge"""
+        block = self.make_block("""data_t
+loop_
+  _diffrn_frame_data.details
+  a
+  a
+""")
+        self.assertRaises(CifFile.AliasMergeError,
+                          CifFile.merge_aliases,block,self.dic,None,
+                          {'diffrn_data_frame':'_diffrn_data_frame.details'})
+
+    def testBrokenReferenceBlocksNewCopy(self):
+        """A reference that is invalid after merging stops the merge"""
+        block = self.make_block("""data_t
+loop_ _array_structure.id s1
+loop_ _diffrn_frame_data.array_id s9
+""")
+        self.assertRaises(CifFile.AliasMergeError,
+                          CifFile.merge_aliases,block,self.dic)
+
+    def testValidReferenceAccepted(self):
+        """A reference that remains valid does not block the merge"""
+        block = self.make_block("""data_t
+loop_ _array_structure.id s1
+loop_ _diffrn_frame_data.array_id s1
+""")
+        result = CifFile.merge_aliases(block,self.dic)
+        self.assertTrue(result.ok)
+        self.assertEqual(list(result.merged['_diffrn_data_frame.array_id']),['s1'])
+
+    def testDictionaryNotModified(self):
+        """The locked dictionary is not modified by merging"""
+        keys_before = list(self.dic.keys())
+        alias_before = dict(self.dic.alias_table)
+        block = self.make_block("data_t\n_array_intensities.gain_su 0.5\n")
+        CifFile.merge_aliases(block,self.dic)
+        self.assertEqual(list(self.dic.keys()),keys_before)
+        self.assertEqual(dict(self.dic.alias_table),alias_before)
+
+    def testConsistentLookupBothWays(self):
+        """Current name and original spelling return the same observations"""
+        block = self.make_block("""data_t
+loop_
+  _diffrn_frame_data.id
+  f1
+  f2
+""")
+        result = CifFile.merge_aliases(block,self.dic)
+        by_current = result.observations('_diffrn_data_frame.id')
+        by_original = result.observations('_diffrn_frame_data.id')
+        self.assertEqual(by_current,by_original)
+        self.assertEqual([o.value for o in by_current],['f1','f2'])
+        self.assertEqual([o.packet_index for o in by_current],[0,1])
+        self.assertEqual(result.canonical_of('_diffrn_frame_data.id'),
+                         '_diffrn_data_frame.id')
+        self.assertEqual(list(result.merged['_diffrn_data_frame.id']),
+                         [o.value for o in by_current])
+
+    def testBlockMethodWrapper(self):
+        """The CifBlock convenience method matches the module function"""
+        block = CifFile.CifBlock(
+            data=self.make_block("data_t\n_array_intensities.gain_su 0.05\n"))
+        result = block.merge_aliases(self.dic)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.merged['_array_intensities.gain_esd'],'0.05')
+
 if __name__=='__main__':
      #suite = unittest.TestLoader().loadTestsFromTestCase(DicEvalTestCase)
      #suite = unittest.TestLoader().loadTestsFromTestCase(SimpleWriteTestCase)

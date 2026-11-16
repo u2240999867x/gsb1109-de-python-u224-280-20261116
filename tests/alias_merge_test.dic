@@ -1,0 +1,74 @@
+# Minimal DDLm dictionary for testing dictionary-driven alias merging.
+# Defines one loopable category (SAMPLE) with a compound key, aliased
+# datanames, and a Link reference to the key.
+data_minidic
+_dictionary.title            mini_dic
+_dictionary.version          1.0
+_dictionary.class            Instance
+_dictionary.date             2026-01-01
+_dictionary.ddl_conformance  4.0
+_dictionary.namespace        mini
+
+save_MINI_DIC_HEAD
+_definition.id              MINI_DIC_HEAD
+_definition.scope           Category
+_definition.class           Head
+_name.object_id             MINI_DIC_HEAD
+save_
+
+save_SAMPLE
+_definition.id              SAMPLE
+_definition.scope           Category
+_definition.class           Loop
+_name.category_id           MINI_DIC_HEAD
+_name.object_id             SAMPLE
+_category.key_id            '_sample.key'
+loop_
+  _category_key.name        '_sample.id'
+                            '_sample.part'
+save_
+
+save__sample.id
+_definition.id              '_sample.id'
+loop_
+  _alias.definition_id      '_sample_old.id'
+_name.category_id           sample
+_name.object_id             id
+_type.purpose               Key
+_type.container             Single
+_type.contents              Code
+save_
+
+save__sample.part
+_definition.id              '_sample.part'
+loop_
+  _alias.definition_id      '_sample_old.part'
+_name.category_id           sample
+_name.object_id             part
+_type.purpose               Key
+_type.container             Single
+_type.contents              Code
+save_
+
+save__sample.value
+_definition.id              '_sample.value'
+loop_
+  _alias.definition_id      '_sample_old.value'
+_name.category_id           sample
+_name.object_id             value
+_type.purpose               Number
+_type.container             Single
+_type.contents              Real
+save_
+
+save__sample.label
+_definition.id              '_sample.label'
+loop_
+  _alias.definition_id      '_sample_old.label'
+_name.category_id           sample
+_name.object_id             label
+_name.linked_item_id        '_sample.id'
+_type.purpose               Link
+_type.container             Single
+_type.contents              Code
+save_
