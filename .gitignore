@@ -1,0 +1,26 @@
+# OS X / Darwin
+.DS_Store*
+
+# Python
+*.pyc
+*.egg-info*
+build/*
+dist/*
+setup.cfg
+setuptools-*.egg
+__pycache__
+.eggs
+
+# PyCharm
+**/.idea
+
+# Ctags
+.ctags
+tags
+
+# Virtual environments
+.venv
+
+# Tooling
+.pytest_cache/*
+.ruff_cache/*

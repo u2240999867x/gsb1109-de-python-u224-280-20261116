@@ -1,0 +1,81 @@
+#! /usr/bin/env python
+# -*- coding: utf-8 -*-
+
+##############################################################################
+##  DendroPy Phylogenetic Computing Library.
+##
+##  Copyright 2010-2026 Jeet Sukumaran, Mark T. Holder, and Matthew Andres Moreno.
+##  All rights reserved.
+##
+##  See "LICENSE.rst" for terms and conditions of usage.
+##
+##  If you use this work or any portion thereof in published work,
+##  please cite it as:
+##
+##     Moreno, M. A., Holder, M. T., & Sukumaran, J. (2024). DendroPy 5: a
+##     mature Python library for phylogenetic computing. Journal of Open
+##     Source Software, 9(101), 6943, https://doi.org/10.21105/joss.06943
+##
+##############################################################################
+
+"""
+Tests of birth-death model fitting.
+"""
+
+import unittest
+import os
+import sys
+import dendropy
+from dendropy.model import coalescent
+from dendropy.simulate import popgensim
+sys.path.insert(0, os.path.dirname(__file__))
+from support.mockrandom import MockRandom
+from support import pathmap
+
+class TruncatedCoalescentTreeTest(unittest.TestCase):
+
+    def get_species_tree(self, ntax=10):
+        _RNG = MockRandom()
+        ages = [_RNG.randint(1000,10000) for age in range(ntax)]
+        ages.sort()
+        pop_sizes = [_RNG.randint(1000,10000) for pop in range(2*ntax+1)]
+        taxon_namespace = dendropy.TaxonNamespace(["t{}".format(i+1) for i in range(ntax)])
+        species_tree = popgensim.pop_gen_tree(taxon_namespace=taxon_namespace,
+                                                 ages=ages,
+                                                 num_genes=4,
+                                                 pop_sizes=pop_sizes,
+                                                 rng=_RNG)
+        ages2 = []
+        for node in species_tree.postorder_node_iter():
+            distance_from_tip = node.distance_from_tip()
+            if distance_from_tip > 0:
+                ages2.append(distance_from_tip)
+        ages2.sort()
+        for index in range(len(ages2)):
+            assert (ages[index] - ages2[index]) < 10e-6
+
+        pop_sizes2 = []
+        for edge in species_tree.postorder_edge_iter():
+            pop_sizes2.append(edge.pop_size)
+        pop_sizes2.sort()
+
+        return species_tree
+
+    def runTest(self, ntax=10):
+        """TruncatedCoalescentTreeTest -- tree generation without checking [TODO: checks]"""
+        species_tree = self.get_species_tree(ntax)
+        gene_trees = []
+        while len(gene_trees) < 20:
+            gene_trees.append(coalescent.constrained_kingman_tree(species_tree)[0])
+
+class PureCoalescentTreeTest(unittest.TestCase):
+
+    def runTest(self):
+        """PureCoalescentTreeTest -- tree generation without checking [TODO: checks]"""
+        _RNG = MockRandom()
+        tns = dendropy.TaxonNamespace(["t{}".format(i+1) for i in range(100)])
+        t = coalescent.pure_kingman_tree(tns, rng=_RNG)
+        assert t._debug_tree_is_valid()
+
+if __name__ == "__main__":
+    unittest.main()
