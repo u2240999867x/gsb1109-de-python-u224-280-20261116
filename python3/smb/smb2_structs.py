@@ -167,6 +167,22 @@ class SMB2Message:
             self.payload = SMB2NegotiateResponse()
         elif self.command == SMB2_COM_ECHO:
             self.payload = SMB2EchoResponse()
+        elif self.command == SMB2_COM_OPLOCK_BREAK:
+            self.payload = self._selectBreakPayload()
+
+    def _selectBreakPayload(self):
+        # [MS-SMB2]: 2.2.23 - 2.2.25. Oplock and lease break messages share the
+        # SMB2_COM_OPLOCK_BREAK command; the actual structure is determined by
+        # the StructureSize field in the first two bytes of the payload.
+        if len(self.data) >= 2:
+            struct_size = struct.unpack('<H', self.data[:2])[0]
+            if struct_size in (SMB2LeaseBreakNotification.WIRE_STRUCTURE_SIZE, SMB2LeaseBreakNotification.STRUCTURE_SIZE):
+                return SMB2LeaseBreakNotification()
+            elif struct_size in (SMB2LeaseBreakResponse.WIRE_STRUCTURE_SIZE, SMB2LeaseBreakResponse.STRUCTURE_SIZE):
+                return SMB2LeaseBreakResponse()
+            elif struct_size == SMB2OplockBreakNotification.STRUCTURE_SIZE:
+                return SMB2OplockBreakNotification()
+        return None
 
     @property
     def isAsync(self):
@@ -415,6 +431,9 @@ class SMB2CreateResponse(Structure):
     - file_attributes (integer)
     - fid (16-bytes string)
     - create_time, lastaccess_time, lastwrite_time, change_time (float)
+    - create_contexts (list of (name, data) tuples): create contexts returned by the server
+    - lease_key (16-bytes string): present only if the server granted a lease
+    - lease_state (integer): bitmask of SMB2_LEASE_xxx constants, present only if the server granted a lease
 
     References:
     ===========
@@ -431,12 +450,22 @@ class SMB2CreateResponse(Structure):
             struct_size, self.oplock, _, self.create_action, \
             create_time, lastaccess_time, lastwrite_time, change_time, \
             self.allocation_size, self.file_size, self.file_attributes, \
-            _, self.fid, _, _ = struct.unpack(self.STRUCTURE_FORMAT, message.raw_data[SMB2Message.HEADER_SIZE:SMB2Message.HEADER_SIZE+self.STRUCTURE_SIZE])
+            _, self.fid, create_context_offset, create_context_length \
+                = struct.unpack(self.STRUCTURE_FORMAT, message.raw_data[SMB2Message.HEADER_SIZE:SMB2Message.HEADER_SIZE+self.STRUCTURE_SIZE])
 
             self.create_time = convertFILETIMEtoEpoch(create_time)
             self.lastaccess_time = convertFILETIMEtoEpoch(lastaccess_time)
             self.lastwrite_time = convertFILETIMEtoEpoch(lastwrite_time)
             self.change_time = convertFILETIMEtoEpoch(change_time)
+
+            self.create_contexts = [ ]
+            if create_context_length > 0:
+                self.create_contexts = _decodeCreateContexts(message.raw_data[create_context_offset:create_context_offset+create_context_length])
+                for name, data in self.create_contexts:
+                    if name == SMB2_CREATE_REQUEST_LEASE and len(data) >= 32:
+                        self.lease_key, self.lease_state, self.lease_flags, self.lease_duration \
+                            = struct.unpack('<16sIIQ', data[:32])
+                        break
 
 
 class SMB2WriteRequest(Structure):
@@ -855,3 +884,197 @@ class SMB2EchoResponse(Structure):
 
     def decode(self, message):
         pass
+
+
+def _decodeCreateContexts(buf):
+    """
+    Decodes a chain of SMB2_CREATE_CONTEXT values. [MS-SMB2]: 2.2.13.2
+
+    @return: a list of (name, data) tuples, in wire order
+    """
+    contexts = [ ]
+    offset = 0
+    while offset + 16 <= len(buf):
+        next_offset, name_offset, name_len, _, data_offset, data_len \
+            = struct.unpack('<IHHHHI', buf[offset:offset+16])
+        name = buf[offset+name_offset:offset+name_offset+name_len]
+        data = buf[offset+data_offset:offset+data_offset+data_len]
+        contexts.append((name, data))
+        if next_offset == 0:
+            break
+        offset += next_offset
+    return contexts
+
+
+def buildLeaseRequestCreateContext(lease_key, lease_state, lease_flags = 0, lease_duration = 0):
+    """
+    Builds the create context data for requesting a lease in a SMB2CreateRequest
+    (via the create_context_data parameter). [MS-SMB2]: 2.2.13.2.5
+
+    @param lease_key: 16-bytes string identifying the lease
+    @param lease_state: bitmask of SMB2_LEASE_xxx constants
+    @return: a string suitable for the create_context_data parameter of SMB2CreateRequest
+    """
+    assert len(lease_key) == 16
+    name = SMB2_CREATE_REQUEST_LEASE
+    data = struct.pack('<16sIIQ', lease_key, lease_state, lease_flags, lease_duration)
+    data_offset = 16 + len(name)
+    padding = b''
+    if data_offset % 8 != 0:
+        padding = b'\0'*(8 - data_offset % 8)
+        data_offset += len(padding)
+    return struct.pack('<IHHHHI',
+                       0,            # Next. Only a single context in the chain
+                       16,           # NameOffset, relative to start of this context
+                       len(name),
+                       0,            # Reserved
+                       data_offset,  # DataOffset, relative to start of this context
+                       len(data)) + name + padding + data
+
+
+class SMB2OplockBreakNotification(Structure):
+    """
+    Contains information about an opportunistic lock break notification sent by
+    the server. The same layout is used for the oplock break acknowledgment
+    (client to server) and the oplock break response (server to client).
+
+    If the message has no errors, each instance contains the following attributes:
+    - oplock (integer): one of SMB2_OPLOCK_LEVEL_xxx constants
+    - fid (16-bytes string)
+
+    References:
+    ===========
+    - [MS-SMB2]: 2.2.23.1, 2.2.24.1, 2.2.25.1
+    """
+
+    STRUCTURE_FORMAT = "<HBBI16s"
+    STRUCTURE_SIZE = struct.calcsize(STRUCTURE_FORMAT)
+
+    def __init__(self, fid = None, oplock = SMB2_OPLOCK_LEVEL_NONE):
+        self.fid = fid
+        self.oplock = oplock
+
+    def initMessage(self, message):
+        Structure.initMessage(self, message)
+        message.command = SMB2_COM_OPLOCK_BREAK
+
+    def prepare(self, message):
+        message.data = struct.pack(self.STRUCTURE_FORMAT,
+                                   24,  # Structure size. Must be 24 as mandated by [MS-SMB2] 2.2.24.1
+                                   self.oplock,
+                                   0,   # Reserved
+                                   0,   # Reserved2
+                                   self.fid)
+
+    def decode(self, message):
+        assert message.command == SMB2_COM_OPLOCK_BREAK
+
+        if message.status == 0:
+            struct_size, self.oplock, _, _, self.fid \
+                = struct.unpack(self.STRUCTURE_FORMAT, message.raw_data[SMB2Message.HEADER_SIZE:SMB2Message.HEADER_SIZE+self.STRUCTURE_SIZE])
+
+
+class SMB2LeaseBreakNotification(Structure):
+    """
+    Contains information about a lease break notification sent by the server
+    when it revokes a previously granted lease.
+
+    If the message has no errors, each instance contains the following attributes:
+    - flags (integer): bitmask of SMB2_NOTIFY_BREAK_LEASE_FLAG_xxx constants
+    - lease_key (16-bytes string)
+    - current_lease_state (integer): bitmask of SMB2_LEASE_xxx constants
+    - new_lease_state (integer): bitmask of SMB2_LEASE_xxx constants
+    - break_reason (integer)
+    - access_mask_hint (integer)
+    - share_mask_hint (integer)
+
+    References:
+    ===========
+    - [MS-SMB2]: 2.2.23.2
+    """
+
+    STRUCTURE_FORMAT = "<HH16sIIIII"
+    STRUCTURE_SIZE = struct.calcsize(STRUCTURE_FORMAT)
+
+    # Value carried in the StructureSize field on the wire. [MS-SMB2] 2.2.23.2
+    # mandates 44; the 4 trailing bytes beyond the decoded fields are reserved.
+    WIRE_STRUCTURE_SIZE = 44
+
+    @property
+    def isAckRequired(self):
+        return (self.flags & SMB2_NOTIFY_BREAK_LEASE_FLAG_ACK_REQUIRED) > 0
+
+    def decode(self, message):
+        assert message.command == SMB2_COM_OPLOCK_BREAK
+
+        if message.status == 0:
+            struct_size, self.flags, self.lease_key, \
+            self.current_lease_state, self.new_lease_state, self.break_reason, \
+            self.access_mask_hint, self.share_mask_hint \
+                = struct.unpack(self.STRUCTURE_FORMAT, message.raw_data[SMB2Message.HEADER_SIZE:SMB2Message.HEADER_SIZE+self.STRUCTURE_SIZE])
+
+
+class SMB2LeaseBreakAcknowledgment(Structure):
+    """
+    Sent by the client to acknowledge a lease break notification when the
+    server has set the SMB2_NOTIFY_BREAK_LEASE_FLAG_ACK_REQUIRED flag.
+
+    References:
+    ===========
+    - [MS-SMB2]: 2.2.24.2
+    """
+
+    STRUCTURE_FORMAT = "<HH16sIQ"
+    STRUCTURE_SIZE = struct.calcsize(STRUCTURE_FORMAT)
+
+    # Value carried in the StructureSize field on the wire. [MS-SMB2] 2.2.24.2
+    # mandates 36; the 4 trailing bytes beyond the encoded fields are reserved.
+    WIRE_STRUCTURE_SIZE = 36
+
+    def __init__(self, lease_key, lease_state, lease_duration = 0):
+        assert len(lease_key) == 16
+        self.lease_key = lease_key
+        self.lease_state = lease_state
+        self.lease_duration = lease_duration
+
+    def initMessage(self, message):
+        Structure.initMessage(self, message)
+        message.command = SMB2_COM_OPLOCK_BREAK
+
+    def prepare(self, message):
+        message.data = struct.pack(self.STRUCTURE_FORMAT,
+                                   self.WIRE_STRUCTURE_SIZE,
+                                   0,   # Flags. Must be 0
+                                   self.lease_key,
+                                   self.lease_state,
+                                   self.lease_duration) + b'\0'*(self.WIRE_STRUCTURE_SIZE - self.STRUCTURE_SIZE)
+
+
+class SMB2LeaseBreakResponse(Structure):
+    """
+    Contains the server response to a SMB2LeaseBreakAcknowledgment.
+
+    If the message has no errors, each instance contains the following attributes:
+    - flags (integer): bitmask of SMB2_NOTIFY_BREAK_LEASE_FLAG_xxx constants
+    - lease_key (16-bytes string)
+    - lease_state (integer): bitmask of SMB2_LEASE_xxx constants
+    - lease_duration (long)
+
+    References:
+    ===========
+    - [MS-SMB2]: 2.2.25.2
+    """
+
+    STRUCTURE_FORMAT = "<HH16sIQ"
+    STRUCTURE_SIZE = struct.calcsize(STRUCTURE_FORMAT)
+
+    # Value carried in the StructureSize field on the wire. [MS-SMB2] 2.2.25.2
+    # mandates 36; the 4 trailing bytes beyond the decoded fields are reserved.
+    WIRE_STRUCTURE_SIZE = 36
+
+    def decode(self, message):
+        assert message.command == SMB2_COM_OPLOCK_BREAK
+
+        if message.status == 0:
+            struct_size, self.flags, self.lease_key, self.lease_state, self.lease_duration \
+                = struct.unpack(self.STRUCTURE_FORMAT, message.raw_data[SMB2Message.HEADER_SIZE:SMB2Message.HEADER_SIZE+self.STRUCTURE_SIZE])

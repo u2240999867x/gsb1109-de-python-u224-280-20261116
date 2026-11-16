@@ -8,6 +8,7 @@ from .smb2_constants import *
 from .smb_structs import *
 from .smb2_structs import *
 from .security_descriptors import SecurityDescriptor
+from .leasecache import LeaseCache
 from nmb.base import NMBSession
 from .utils import convertFILETIMEtoEpoch, convertEpochToFILETIME
 from . import ntlm, securityblob
@@ -98,6 +99,13 @@ class SMB(NMBSession):
 
         # tqdm attributes for tracking progress
         self.pbar = None            #: If not None, it means there is an active tqdm progress bar being shown
+
+        # Lease-aware cache for file attributes and small content chunks.
+        # Observations recorded here are served as current data only while the
+        # lease under which they were recorded remains in force; a lease break
+        # notification from the server archives them so that subsequent
+        # requests are revalidated against the server.
+        self.lease_cache = LeaseCache()
 
         self._setupSMB1Methods()
 
@@ -249,6 +257,12 @@ class SMB(NMBSession):
         return self.mid
 
     def _updateState_SMB2(self, message):
+        if message.command == SMB2_COM_OPLOCK_BREAK:
+            # Oplock/lease break messages are unsolicited (or are responses to
+            # our break acknowledgments) and never match a pending request.
+            self._handleBreakMessage_SMB2(message)
+            return True
+
         if message.isReply:
             if message.command == SMB2_COM_NEGOTIATE:
                 if message.status == 0:
@@ -330,6 +344,14 @@ class SMB(NMBSession):
                     raise ProtocolError('Unknown status value (0x%08X) in SMB_COM_SESSION_SETUP_ANDX (with extended security)' % message.status,
                                         message.raw_data, message)
 
+            if message.command == SMB2_COM_CREATE and message.status == 0:
+                # If the server granted a lease on the opened file, register it
+                # with the lease cache. The new lease starts a fresh epoch and
+                # does not re-validate observations cached under earlier leases.
+                lease_state = getattr(message.payload, 'lease_state', None)
+                if lease_state is not None:
+                    self.lease_cache.lease_acquired(message.payload.lease_key, lease_state)
+
             if message.isAsync:
                 if message.status == 0x00000103:  # STATUS_PENDING
                     req = self.pending_requests.pop(message.mid, None)
@@ -354,6 +376,31 @@ class SMB(NMBSession):
         self.max_read_size = payload.max_read_size
         self.max_write_size = payload.max_write_size
         self.use_plaintext_authentication = False   # SMB2 never allows plaintext authentication
+
+
+    def _handleBreakMessage_SMB2(self, message):
+        payload = message.payload
+        if isinstance(payload, SMB2LeaseBreakNotification):
+            # The server is revoking the lease: cached attributes and data
+            # recorded under this lease must no longer be treated as current.
+            self.log.info('Lease break notification received (lease key %s, lease state 0x%02X -> 0x%02X)',
+                          binascii.hexlify(payload.lease_key), payload.current_lease_state, payload.new_lease_state)
+            self.lease_cache.lease_revoked(payload.lease_key)
+            if payload.isAckRequired:
+                self._sendSMBMessage(SMB2Message(SMB2LeaseBreakAcknowledgment(payload.lease_key, payload.new_lease_state)))
+        elif isinstance(payload, SMB2LeaseBreakResponse):
+            # Server has accepted our lease break acknowledgment. The cache
+            # stays invalid until a new lease is granted.
+            self.log.debug('Lease break acknowledgment accepted by server (lease key %s, lease state 0x%02X)',
+                           binascii.hexlify(payload.lease_key), payload.lease_state)
+        elif isinstance(payload, SMB2OplockBreakNotification):
+            # pysmb does not request opportunistic locks on its opens, so no
+            # cached data is associated with an oplock; log and acknowledge.
+            self.log.info('Oplock break notification received (oplock 0x%02X)', payload.oplock)
+            if payload.oplock != SMB2_OPLOCK_LEVEL_NONE:
+                self._sendSMBMessage(SMB2Message(SMB2OplockBreakNotification(payload.fid, SMB2_OPLOCK_LEVEL_NONE)))
+        else:
+            self.log.warning('Unable to decode SMB2_COM_OPLOCK_BREAK message; ignoring')
 
 
     def _handleNegotiateResponse_SMB2(self, message):

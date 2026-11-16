@@ -73,6 +73,21 @@ SMB2_OPLOCK_LEVEL_EXCLUSIVE = 0x08
 SMB2_OPLOCK_LEVEL_BATCH = 0x09
 SMB2_OPLOCK_LEVEL_LEASE = 0xFF
 
+# Bitmask for LeaseState fields in lease break and lease create context structures
+# [MS-SMB2]: 2.2.13.2.5, 2.2.23.2
+SMB2_LEASE_NONE = 0x00
+SMB2_LEASE_READ_CACHING = 0x01
+SMB2_LEASE_HANDLE_CACHING = 0x02
+SMB2_LEASE_WRITE_CACHING = 0x04
+
+# Bitmask for Flags field in SMB2LeaseBreakNotification and SMB2LeaseBreakResponse classes
+# [MS-SMB2]: 2.2.23.2, 2.2.25.2
+SMB2_NOTIFY_BREAK_LEASE_FLAG_ACK_REQUIRED = 0x01
+SMB2_NOTIFY_BREAK_LEASE_FLAG_PARENT_LEASE_KEY_SET = 0x04
+
+# Create context name for requesting a lease on a file open. [MS-SMB2]: 2.2.13.2.5
+SMB2_CREATE_REQUEST_LEASE = b'RqLs'
+
 # Values for FileAttributes field in SMB2CreateRequest class
 # The values are defined in [MS-FSCC] 2.6
 SMB2_FILE_ATTRIBUTE_ARCHIVE = 0x0020
