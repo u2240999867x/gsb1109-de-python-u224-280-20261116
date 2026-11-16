@@ -6,10 +6,12 @@ from .errors import (SignatureBodyMismatchError, InvalidSignatureError, InvalidA
                      AuthError, InvalidMessageError, InvalidIntrospectionError,
                      InterfaceNotFoundError, SignalDisabledError, InvalidBusNameError,
                      InvalidObjectPathError, InvalidInterfaceNameError, InvalidMemberNameError,
-                     DBusError)
+                     DBusError, RuleValidationError)
 from . import introspection
 from .message import Message
 from . import message_bus
+from . import property_filter
+from .property_filter import (PropertyFilter, Condition, PropertyRef, FilterVerdict, FilterResult)
 from . import proxy_object
 from . import service
 from .signature import SignatureType, SignatureTree, Variant
