@@ -13,6 +13,7 @@ Contents:
    menu
    icontheme
    mime
+   mimeapps
    recentfiles
    exceptions
 
