@@ -18,6 +18,7 @@
 import logging
 import urllib.parse as urlparse
 from collections.abc import Iterable
+from typing import TYPE_CHECKING
 from typing import Any
 
 from fastkml import atom
@@ -43,6 +44,9 @@ from fastkml.utils import find_all
 from fastkml.views import Camera
 from fastkml.views import LookAt
 from fastkml.views import Region
+
+if TYPE_CHECKING:
+    from fastkml.style_catalog import StyleCatalog
 
 logger = logging.getLogger(__name__)
 
@@ -146,6 +150,27 @@ class _Container(_Feature):
             raise ValueError(msg)
         assert self.features is not None  # noqa: S101
         self.features.append(kmlobj)
+
+    def style_catalog(self) -> "StyleCatalog":
+        """
+        Build a style catalog for this container tree.
+
+        The catalog resolves each feature's normal and highlight style and
+        records per-attribute provenance. It is a snapshot: rebuild it after
+        editing styles or features.
+
+        Returns
+        -------
+        StyleCatalog
+            The resolved styles for every feature below this container.
+
+        """
+        from fastkml.style_catalog import StyleCatalog  # noqa: PLC0415
+
+        return StyleCatalog(self)
+
+    get_style_catalog = style_catalog
+    map_catalog = style_catalog
 
 
 class Folder(_Container):

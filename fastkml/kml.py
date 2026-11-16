@@ -31,6 +31,7 @@ import zipfile
 from collections.abc import Iterable
 from pathlib import Path
 from typing import IO
+from typing import TYPE_CHECKING
 from typing import Any
 from typing import AnyStr
 from typing import cast
@@ -53,6 +54,9 @@ from fastkml.overlays import PhotoOverlay
 from fastkml.registry import RegistryItem
 from fastkml.registry import registry
 from fastkml.types import Element
+
+if TYPE_CHECKING:
+    from fastkml.style_catalog import StyleCatalog
 
 logger = logging.getLogger(__name__)
 
@@ -196,6 +200,27 @@ class KML(_XMLObject):
     ) -> None:
         """Append a feature."""
         self.features.append(kmlobj)
+
+    def style_catalog(self) -> "StyleCatalog":
+        """
+        Build a style catalog for every feature in this KML tree.
+
+        The catalog resolves normal and highlight styles, preserving per
+        attribute provenance and keeping separate ``Document`` scopes apart.
+        It is a snapshot: rebuild it after mutating styles or features.
+
+        Returns
+        -------
+        StyleCatalog
+            The resolved styles for every feature in this tree.
+
+        """
+        from fastkml.style_catalog import StyleCatalog  # noqa: PLC0415
+
+        return StyleCatalog(self)
+
+    get_style_catalog = style_catalog
+    map_catalog = style_catalog
 
     @classmethod
     def parse(

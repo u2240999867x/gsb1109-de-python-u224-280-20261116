@@ -73,6 +73,25 @@ from fastkml.overlays import ScreenOverlay
 from fastkml.overlays import ScreenXY
 from fastkml.overlays import Size
 from fastkml.overlays import ViewVolume
+from fastkml.style_catalog import ExternalStyleReference
+from fastkml.style_catalog import FeatureStyleEntry
+from fastkml.style_catalog import FeatureStyles
+from fastkml.style_catalog import MapStyleCatalog
+from fastkml.style_catalog import MissingStyleTarget
+from fastkml.style_catalog import ResolvedStyle
+from fastkml.style_catalog import StyleCatalog
+from fastkml.style_catalog import StyleCycle
+from fastkml.style_catalog import StyleDeclaration
+from fastkml.style_catalog import StyleReferenceIssue
+from fastkml.style_catalog import StyleResolver
+from fastkml.style_catalog import StyleSource
+from fastkml.style_catalog import build_map_catalog
+from fastkml.style_catalog import build_style_catalog
+from fastkml.style_catalog import catalog_styles
+from fastkml.style_catalog import get_style_catalog
+from fastkml.style_catalog import resolve_feature_styles
+from fastkml.style_catalog import resolve_style
+from fastkml.style_catalog import resolve_styles
 from fastkml.styles import BalloonStyle
 from fastkml.styles import HotSpot
 from fastkml.styles import IconStyle
@@ -108,6 +127,9 @@ __all__ = [
     "Delete",
     "Document",
     "ExtendedData",
+    "ExternalStyleReference",
+    "FeatureStyleEntry",
+    "FeatureStyles",
     "Folder",
     "GroundOverlay",
     "HotSpot",
@@ -124,6 +146,8 @@ __all__ = [
     "Link",
     "Location",
     "LookAt",
+    "MapStyleCatalog",
+    "MissingStyleTarget",
     "Model",
     "MultiGeometry",
     "NetworkLink",
@@ -137,6 +161,7 @@ __all__ = [
     "Point",
     "PolyStyle",
     "Polygon",
+    "ResolvedStyle",
     "ResourceMap",
     "RotationXY",
     "Scale",
@@ -149,16 +174,29 @@ __all__ = [
     "Size",
     "Snippet",
     "Style",
+    "StyleCatalog",
+    "StyleCycle",
+    "StyleDeclaration",
     "StyleMap",
+    "StyleReferenceIssue",
+    "StyleResolver",
+    "StyleSource",
     "StyleUrl",
     "TimeSpan",
     "TimeStamp",
     "Update",
     "ViewVolume",
+    "build_map_catalog",
+    "build_style_catalog",
+    "catalog_styles",
     "create_kml_geometry",
     "find",
     "find_all",
     "get_schema_parser",
+    "get_style_catalog",
+    "resolve_feature_styles",
+    "resolve_style",
+    "resolve_styles",
     "validate",
 ]
 

@@ -4,6 +4,10 @@ Changelog
 1.5.0 (unreleased)
 ------------------
 
+- Add ``fastkml.style_catalog`` with ``StyleCatalog``, ``ResolvedStyle``, per-attribute
+  provenance, and separate cycle/external/missing style reference reporting. Catalogs are
+  document-scoped, independent of the active normal/highlight state, and never mutate
+  parsed style declarations.
 - Drop support for Python 3.9.
 - Add ``Update``, ``Create``, ``Change``, and ``Delete`` element support to
   ``NetworkLinkControl``.

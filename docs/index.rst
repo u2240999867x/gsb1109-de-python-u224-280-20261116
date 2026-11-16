@@ -41,6 +41,7 @@ Key Features
    working_with_kml
    parse_edit_write
    geometries_and_styles
+   style_resolution
    build_rich_documents
    configuration
    upgrading

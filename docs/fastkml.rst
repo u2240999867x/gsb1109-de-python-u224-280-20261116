@@ -191,6 +191,14 @@ fastkml.styles
    :undoc-members:
    :show-inheritance:
 
+fastkml.style\_catalog
+----------------------
+
+.. automodule:: fastkml.style_catalog
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 fastkml.times
 --------------------
 

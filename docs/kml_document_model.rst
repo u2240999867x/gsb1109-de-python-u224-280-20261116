@@ -31,7 +31,9 @@ The document model is the glue for the rest of the library:
 
 * Geometry objects attach to ``Placemark.kml_geometry`` — see :doc:`geometry_bridge`.
 * Shared styles usually live on ``Document.styles`` and are resolved with
-  ``Document.get_style_by_url()``.
+  ``Document.get_style_by_url()``. To resolve every feature's effective normal and
+  highlight style with per-attribute provenance, use
+  ``Document.style_catalog()`` (see :doc:`style_resolution`).
 * Time primitives, views, regions, and extended data are all feature attributes managed by
   ``_Feature`` — see :doc:`time_and_views` and :doc:`extended_data`.
 * Recursive searching with ``find()`` and ``find_all()`` works because containers expose
