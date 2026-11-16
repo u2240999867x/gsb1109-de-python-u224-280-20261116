@@ -13,6 +13,8 @@ from . import message_bus
 from . import proxy_object
 from . import service
 from .signature import SignatureType, SignatureTree, Variant
+from .provenance import (SourceDomain, ScopedBusName, ScopedConnectionId, ScopedObjectPath,
+                         ScopedSerial, ScopedMessage, MessageArchive, tag_message, untag_message)
 from .validators import (is_bus_name_valid, is_object_path_valid, is_interface_name_valid,
                          is_member_name_valid, assert_bus_name_valid, assert_object_path_valid,
                          assert_interface_name_valid, assert_member_name_valid)

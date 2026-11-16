@@ -30,6 +30,8 @@ class MessageFlag(IntFlag):
 
 
 MESSAGE_FLAG_MAP = {field.value: field for field in MessageFlag}
+# IntFlag members with a value of 0 are not iterated, but 0 (NONE) is valid on the wire
+MESSAGE_FLAG_MAP.setdefault(MessageFlag.NONE.value, MessageFlag.NONE)
 
 
 class NameFlag(IntFlag):

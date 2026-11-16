@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+* Add `dbus_next.provenance`: merge D-Bus records from multiple hosts into one
+  repository by tagging bus names, connection generations, message serials, and
+  object paths with a `SourceDomain` while keeping the original names for
+  lookup. `MessageArchive` serializes the merged records and splits them back
+  into per-host messages with identical parameter types and values; scoped
+  identifiers from different domains never compare equal, so cross-bus
+  references do not connect by name alone.
+* Fix `MESSAGE_FLAG_MAP` to include `MessageFlag.NONE` so messages with no
+  flags can be unmarshalled.
+
 ## Version 0.2.3
 
 This version contains some bugfixes and new features.
