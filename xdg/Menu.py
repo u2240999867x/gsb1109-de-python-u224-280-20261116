@@ -64,6 +64,11 @@ EMPTY = "Empty"
 NOT_SHOW_IN = "NotShowIn"
 NO_EXEC = "NoExec"
 
+# Reasons why a declaration is masked by another declaration of the same
+# desktop file ID
+SHADOWED = "Shadowed"
+SCAN_INCOMPLETE = "ScanIncomplete"
+
 
 class Menu:
     """Menu containing sub menus under menu.Entries
@@ -500,6 +505,7 @@ class MenuEntry:
     def setAttributes(self, filename, dir="", prefix=""):
         self.Filename = filename
         self.Prefix = prefix
+        self.SourceDir = dir
         self.DesktopFileID = os.path.join(prefix, filename).replace("/", "-")
 
         if not os.path.isabs(self.DesktopEntry.filename):
@@ -1077,62 +1083,198 @@ class XMLMenuBuilder(object):
                 move_from_menu.Parent.Submenus.remove(move_from_menu)
 
 
+class MaskedEntry:
+    """A desktop entry declaration masked by another declaration.
+
+    Keeps the original MenuEntry, the directory it was found in and the
+    reason why it is not the selected declaration for its desktop file ID
+    (SHADOWED, HIDDEN or SCAN_INCOMPLETE).
+    """
+    def __init__(self, menuentry, reason):
+        self.MenuEntry = menuentry
+        self.SourceDir = menuentry.SourceDir
+        self.Reason = reason
+
+    def __repr__(self):
+        return "%s (%s)" % (self.MenuEntry.DesktopFileID, self.Reason)
+
+
+class DesktopEntryGroup:
+    """All declarations sharing one desktop file ID.
+
+    Declarations holds every declaration found, ordered by directory
+    priority (highest first). Effective is the selected declaration (None
+    if masking cannot be confirmed); every other declaration is kept in
+    Masked with its source directory and masking reason. Collisions keeps
+    all same-directory files whose paths derive to this ID.
+    """
+    def __init__(self, desktopfileid):
+        self.DesktopFileID = desktopfileid
+        self.Declarations = []
+        self.Effective = None
+        self.Masked = []
+        self.Collisions = []
+        self.Uncertain = False
+
+    def __repr__(self):
+        return self.DesktopFileID
+
+
 class MenuEntryCache:
     "Class to cache Desktop Entries"
     def __init__(self):
         self.cacheEntries = {}
         self.cacheEntries['legacy'] = []
         self.cache = {}
+        self._groups = {}
+        self.scanComplete = {}
 
     def add_menu_entries(self, dirs, prefix="", legacy=False):
+        scanned = False
         for dir_ in dirs:
-            if not dir_ in self.cacheEntries:
-                self.cacheEntries[dir_] = []
-                self.__addFiles(dir_, "", prefix, legacy)
+            # re-scan directories whose previous scan was incomplete: their
+            # contents were never confirmed
+            if dir_ not in self.cacheEntries or not self.scanComplete.get(dir_, True):
+                self.__scan(dir_, prefix, legacy)
+                scanned = True
+        if scanned:
+            self.__invalidate(dirs, legacy)
+
+    def rescan_menu_entries(self, dirs, prefix="", legacy=False):
+        """Re-scan the given directories, updating only their confirmed scope.
+
+        Entries from all other directories are left untouched; merged
+        results involving the rescanned directories (in any directory
+        order) are recomputed lazily on next use.
+        """
+        for dir_ in dirs:
+            self.__scan(dir_, prefix, legacy)
+        self.__invalidate(dirs, legacy)
+
+    def is_scan_complete(self, dir_):
+        """Whether a directory was read completely (or does not exist)."""
+        return self.scanComplete.get(dir_, True)
+
+    def __scan(self, dir_, prefix, legacy):
+        entries, complete = self.__addFiles(dir_, "", prefix, legacy)
+        self.cacheEntries[dir_] = entries
+        self.scanComplete[dir_] = complete
+        if legacy:
+            self.cacheEntries['legacy'] = [
+                e for e in self.cacheEntries['legacy'] if e.SourceDir != dir_
+            ]
+            self.cacheEntries['legacy'].extend(entries)
+
+    def __invalidate(self, dirs, legacy=False):
+        stale = set(dirs)
+        if legacy:
+            stale.add('legacy')
+        for cache in (self._groups, self.cache):
+            for key in list(cache):
+                if stale.intersection(key):
+                    del cache[key]
 
     def __addFiles(self, dir_, subdir, prefix, legacy):
-        for item in os.listdir(os.path.join(dir_, subdir)):
+        entries = []
+        complete = True
+        path = os.path.join(dir_, subdir)
+        try:
+            items = os.listdir(path)
+        except OSError:
+            # A missing directory confirms "no files"; a directory that
+            # exists but cannot be read leaves the scan incomplete.
+            return [], not os.path.isdir(path)
+        for item in items:
             if item.endswith(".desktop"):
                 try:
                     menuentry = MenuEntry(os.path.join(subdir, item), dir_, prefix)
                 except ParsingError:
                     continue
-
-                self.cacheEntries[dir_].append(menuentry)
-                if legacy:
-                    self.cacheEntries['legacy'].append(menuentry)
+                entries.append(menuentry)
             elif os.path.isdir(os.path.join(dir_, subdir, item)) and not legacy:
-                self.__addFiles(dir_, os.path.join(subdir, item), prefix, legacy)
+                sub_entries, sub_complete = self.__addFiles(
+                    dir_, os.path.join(subdir, item), prefix, legacy)
+                entries.extend(sub_entries)
+                complete = complete and sub_complete
+        return entries, complete
 
-    def get_menu_entries(self, dirs, legacy=True):
-        entries = []
-        ids = set()
-        # handle legacy items
-        appdirs = dirs[:]
+    def __cache_key(self, dirs, legacy):
+        appdirs = list(dirs)
         if legacy:
             appdirs.append("legacy")
-        # cache the results again
-        key = "".join(appdirs)
-        try:
-            return self.cache[key]
-        except KeyError:
-            pass
+        return tuple(appdirs)
+
+    def __groups_for(self, dirs, legacy):
+        key = self.__cache_key(dirs, legacy)
+        if key not in self._groups:
+            groups, entries = self.__build_groups(key)
+            self._groups[key] = groups
+            self.cache[key] = entries
+        return self._groups[key]
+
+    def __build_groups(self, appdirs):
+        groups = []
+        index = {}
+        uncertain = False
         for dir_ in appdirs:
-            for menuentry in self.cacheEntries[dir_]:
-                try:
-                    if menuentry.DesktopFileID not in ids:
-                        ids.add(menuentry.DesktopFileID)
-                        entries.append(menuentry)
-                    elif menuentry.getType() == MenuEntry.TYPE_SYSTEM:
-                        # FIXME: This is only 99% correct, but still...
-                        idx = entries.index(menuentry)
-                        entry = entries[idx]
-                        if entry.getType() == MenuEntry.TYPE_USER:
-                            entry.Original = menuentry
-                except UnicodeDecodeError:
-                    continue
-        self.cache[key] = entries
-        return entries
+            by_id = {}
+            for menuentry in self.cacheEntries.get(dir_, []):
+                by_id.setdefault(menuentry.DesktopFileID, []).append(menuentry)
+            for desktopfileid, candidates in by_id.items():
+                # Path-derived ID collisions (e.g. "foo-bar.desktop" and
+                # "foo/bar.desktop") keep all originals; the representative
+                # is chosen deterministically, never by traversal order.
+                candidates.sort(key=lambda entry: entry.Filename)
+                group = index.get(desktopfileid)
+                if group is None:
+                    group = DesktopEntryGroup(desktopfileid)
+                    group.Uncertain = uncertain
+                    index[desktopfileid] = group
+                    groups.append(group)
+                group.Declarations.extend(candidates)
+                if len(candidates) > 1:
+                    group.Collisions.extend(candidates)
+            if not self.scanComplete.get(dir_, True):
+                # The directory could not be read completely, so absence of
+                # an ID cannot be confirmed: declarations of IDs first seen
+                # below this directory must not be exposed.
+                uncertain = True
+
+        entries = []
+        for group in groups:
+            if group.Uncertain:
+                group.Masked = [MaskedEntry(e, SCAN_INCOMPLETE)
+                                for e in group.Declarations]
+                continue
+            group.Effective = group.Declarations[0]
+            if group.Effective.DesktopEntry.getHidden():
+                reason = HIDDEN
+            else:
+                reason = SHADOWED
+            for declaration in group.Declarations[1:]:
+                group.Masked.append(MaskedEntry(declaration, reason))
+                if declaration.getType() == MenuEntry.TYPE_SYSTEM and \
+                        group.Effective.getType() == MenuEntry.TYPE_USER:
+                    # FIXME: This is only 99% correct, but still...
+                    group.Effective.Original = declaration
+            entries.append(group.Effective)
+        return groups, entries
+
+    def get_menu_entries(self, dirs, legacy=True):
+        key = self.__cache_key(dirs, legacy)
+        self.__groups_for(dirs, legacy)
+        return self.cache[key]
+
+    def get_entry_groups(self, dirs, legacy=True):
+        """Return the DesktopEntryGroup objects for the given directories."""
+        return self.__groups_for(dirs, legacy)
+
+    def get_masked_entries(self, dirs, legacy=True):
+        """Return all masked declarations, with sources and reasons."""
+        masked = []
+        for group in self.__groups_for(dirs, legacy):
+            masked.extend(group.Masked)
+        return masked
 
 
 def parse(filename=None, debug=False):
