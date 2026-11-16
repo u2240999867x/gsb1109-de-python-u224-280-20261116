@@ -183,6 +183,15 @@ fastkml.overlays
    :show-inheritance:
 
 
+fastkml.replay
+--------------------
+
+.. automodule:: fastkml.replay
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+
 fastkml.styles
 ---------------------
 

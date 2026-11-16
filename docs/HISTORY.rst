@@ -5,6 +5,10 @@ Changelog
 ------------------
 
 - Drop support for Python 3.9.
+- Add the ``fastkml.replay`` module for offline replay of NetworkLink/Region
+  fetch schedules over a timestamped viewport trajectory, including
+  antimeridian boxes, parent-region deactivation, cache validity and shared
+  link targets.
 - Add ``Update``, ``Create``, ``Change``, and ``Delete`` element support to
   ``NetworkLinkControl``.
 - Constructor keyword arguments beyond ``ns``/``name_spaces`` (e.g. ``id``, ``target_id``)

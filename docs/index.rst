@@ -40,6 +40,7 @@ Key Features
    create_kml_files
    working_with_kml
    parse_edit_write
+   offline_replay
    geometries_and_styles
    build_rich_documents
    configuration
