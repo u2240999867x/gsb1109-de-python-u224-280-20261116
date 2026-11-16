@@ -1,5 +1,15 @@
 .. current-version: 7.1.33 (managed by bump2version)
 
+Unreleased
+----------
+
+- Added ``pysnmp.linkreport``, which turns a day of SNMP counter snapshots
+  into a per-interface link report. It reconciles Counter32 and Counter64
+  octet counters with ``sysUpTime`` and ``ifCounterDiscontinuityTime``,
+  splits the day into device boot generations, and reports counter wraps and
+  resets separately. Increments that cannot be counted exactly are given as a
+  range or a lower bound instead of a guess.
+
 Revision 7.1.33, released on Nov 15, 2026
 -----------------------------------------
 

@@ -12,6 +12,7 @@ Documentation
    :caption: Usage Tutorials
 
    /docs/pysnmp-hlapi-tutorial
+   /docs/linkreport
 
 .. toctree::
    :maxdepth: 2
