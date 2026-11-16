@@ -170,7 +170,7 @@ class MessageBus(BaseMessageBus):
                             member='Hello',
                             serial=self.next_serial())
 
-        self._method_return_handlers[hello_msg.serial] = on_hello
+        self._register_method_return(hello_msg, on_hello)
         self._stream.write(hello_msg._marshall())
         self._stream.flush()
 
@@ -301,6 +301,16 @@ class MessageBus(BaseMessageBus):
                     _future_set_result(future, reply)
 
         self._call(msg, reply_handler)
+
+        def on_cancelled(done_future):
+            if done_future.cancelled():
+                # The consumer stopped waiting locally, but the method call has
+                # already been sent and may still receive a reply. Detach the
+                # subscription while keeping the call pending, and do not resend
+                # because the remote operation is not known to be idempotent.
+                self._cancel_method_return(msg.serial)
+
+        future.add_done_callback(on_cancelled)
 
         await future
 

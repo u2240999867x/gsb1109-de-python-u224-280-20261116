@@ -207,7 +207,7 @@ class MessageBus(BaseMessageBus):
                                 member='Hello',
                                 serial=self.next_serial())
 
-            self._method_return_handlers[hello_msg.serial] = on_hello
+            self._register_method_return(hello_msg, on_hello)
             self._stream.write(hello_msg._marshall())
             self._stream.flush()
 
@@ -294,7 +294,7 @@ class MessageBus(BaseMessageBus):
 
             main.quit()
 
-        self._method_return_handlers[msg.serial] = reply_handler
+        self._register_method_return(msg, reply_handler)
         self.send(msg)
         main.run()
 

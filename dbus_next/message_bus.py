@@ -18,6 +18,49 @@ import traceback
 from typing import Type, Callable, Optional, Union
 
 
+class _PendingCall:
+    """Bookkeeping for a method call that has already been sent and may still
+    receive a reply.
+
+    The fact that the call was made is kept independent of the state of the
+    consumer waiting on its reply. The consumer may stop waiting (e.g. its
+    future is cancelled) while the call itself stays pending, so a reply that
+    arrives later is still matched to the exact request and consumed once
+    instead of being mistaken for a different call that reuses the serial.
+
+    ``generation`` identifies the connection the call was made on. A reply from
+    a previous connection can never be matched against a call made on a later
+    one, even when the serial numbers overlap.
+    """
+
+    __slots__ = ('callback', 'generation')
+
+    def __init__(self, callback, generation):
+        self.callback = callback
+        self.generation = generation
+
+    @property
+    def cancelled(self):
+        # The consumer stopped waiting for a reply, but the call itself remains
+        # pending so a late reply is still matched and consumed exactly once.
+        return self.callback is None
+
+    def cancel(self):
+        """Detach the consumer from this call without dropping the call."""
+        self.callback = None
+
+    def notify(self, reply, err):
+        """Invoke the consumer exactly once, if it is still subscribed."""
+        callback = self.callback
+        if callback is None:
+            return False
+        # mark as consumed before invoking so a re-entrant reply cannot notify
+        # the same consumer twice
+        self.callback = None
+        callback(reply, err)
+        return True
+
+
 class BaseMessageBus:
     """An abstract class to manage a connection to a DBus message bus.
 
@@ -58,7 +101,16 @@ class BaseMessageBus:
         # the main loop.
         self._user_disconnect = False
 
-        self._method_return_handlers = {}
+        # Outstanding method calls keyed by their reply serial. The values are
+        # _PendingCall records that keep the fact a call was sent separate from
+        # the state of the consumer waiting on its reply.
+        self._method_return_calls = {}
+
+        # Bumped every time the underlying connection is replaced. Pending
+        # calls remember the generation they were made on so replies that
+        # arrive on a new connection cannot be matched against stale serials.
+        self._connection_generation = 0
+
         self._serial = 0
         self._user_message_handlers = []
         # the key is the name and the value is the unique name of the owner.
@@ -452,13 +504,17 @@ class BaseMessageBus:
 
         self._disconnected = True
 
-        for handler in self._method_return_handlers.values():
+        # this connection is over; bump the generation so any buffered replies
+        # can never be matched against calls made on a later connection
+        self._connection_generation += 1
+
+        for call in self._method_return_calls.values():
             try:
-                handler(None, err)
+                call.notify(None, err)
             except Exception:
                 logging.warning('a message handler threw an exception on shutdown', exc_info=True)
 
-        self._method_return_handlers.clear()
+        self._method_return_calls.clear()
 
         for path in list(self._path_exports.keys()):
             self.unexport(path)
@@ -574,6 +630,32 @@ class BaseMessageBus:
         if err:
             raise err
 
+    def _register_method_return(self, msg, callback):
+        """Record a method call that expects a reply and remember the consumer
+        that should be notified when it arrives.
+
+        The call is keyed by its serial on the current connection generation.
+        Returns the serial of the call.
+        """
+        if not msg.serial:
+            msg.serial = self.next_serial()
+
+        self._method_return_calls[msg.serial] = _PendingCall(callback,
+                                                             self._connection_generation)
+        return msg.serial
+
+    def _cancel_method_return(self, serial):
+        """Unsubscribe the consumer from a pending call without discarding the
+        call itself. A reply that arrives later still completes and consumes the
+        original call exactly once, but no consumer is notified.
+
+        The call is not resent: cancellation is a local state change and there
+        is no promise that the remote operation can be safely reissued.
+        """
+        call = self._method_return_calls.get(serial)
+        if call is not None:
+            call.cancel()
+
     def _call(self, msg, callback):
         BaseMessageBus._check_callback_type(callback)
 
@@ -590,7 +672,7 @@ class BaseMessageBus:
         if msg.flags & MessageFlag.NO_REPLY_EXPECTED:
             callback(None, None)
         else:
-            self._method_return_handlers[msg.serial] = reply_notify
+            self._register_method_return(msg, reply_notify)
 
     @staticmethod
     def _check_callback_type(callback):
@@ -719,11 +801,21 @@ class BaseMessageBus:
 
         else:
             # An ERROR or a METHOD_RETURN
-            if msg.reply_serial in self._method_return_handlers:
+            call = self._method_return_calls.get(msg.reply_serial)
+            if call is not None:
+                if call.generation != self._connection_generation:
+                    # The reply belongs to a connection that has been replaced.
+                    # Its serial may now belong to a call on the current
+                    # connection, so leave that record untouched and drop the
+                    # stale reply instead of matching them up.
+                    return
+                # consume the call exactly once regardless of whether a user
+                # handler already handled the message
+                del self._method_return_calls[msg.reply_serial]
                 if not handled:
-                    handler = self._method_return_handlers[msg.reply_serial]
-                    handler(msg, None)
-                del self._method_return_handlers[msg.reply_serial]
+                    call.notify(msg, None)
+            # no matching call: a reply for an unknown or already consumed call
+            # is dropped rather than misrouted
 
     def _make_method_handler(self, interface, method):
         def handler(msg, send_reply):
