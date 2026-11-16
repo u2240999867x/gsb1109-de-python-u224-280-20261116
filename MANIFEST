@@ -79,6 +79,7 @@ smb/SMBProtocol.py
 smb/__init__.py
 smb/base.py
 smb/ntlm.py
+smb/restore.py
 smb/securityblob.py
 smb/smb_constants.py
 smb/smb_structs.py

@@ -1,3 +1,18 @@
+pysmb-1.2.16, unreleased
+=========================
+
+- Add ``smb.restore`` for planning common restore sets across several shares
+  from trusted backup-group correspondence, allowed time windows, and
+  required files. Equal snapshot timestamps alone are never treated as
+  correspondence, and incomplete groups are reported instead of guessed.
+- Add structured diagnostics for missing files, missing group evidence or
+  correspondence, declaration contradictions, out-of-window copies, and
+  unavailable copies.
+- Add ``PinnedRestore``, which reads directories and files only through the
+  selected copy's ``@GMT-...`` path. It has no live-share fallback; when one
+  copy becomes unavailable, only the sets and diagnostics that depend on it
+  are revoked.
+
 pysmb-1.2.15, 08 Aug 2026
 =========================
 

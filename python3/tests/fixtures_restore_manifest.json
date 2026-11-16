@@ -1,0 +1,30 @@
+{
+  "shares": {
+    "finance": {"snapshots": [
+      {"id": "finance-1", "time": "2026-11-12T02:00:00Z",
+       "backup_group": "nightly", "files": ["/ledger.xlsx", "/rates.csv"]},
+      {"id": "finance-2", "time": "2026-11-13T02:00:00Z",
+       "backup_group": "nightly-2", "files": ["/ledger.xlsx"]}
+    ]},
+    "archive": {"copies": [
+      {"id": "archive-1", "time": "2026-11-12T02:00:30Z",
+       "backup_group": "nightly", "files": ["/reports/2026-11/q3.pdf"]},
+      {"id": "archive-2", "time": "2026-11-13T02:00:30Z",
+       "backup_group": "nightly-2", "files": ["/reports/2026-11/q3.pdf"]}
+    ]}
+  },
+  "backup_groups": [
+    {"id": "nightly", "backup_time": "2026-11-12T02:00:00Z",
+     "correspondence": {
+       "finance": {"id": "finance-1", "proof": "catalogue:nightly/finance"},
+       "archive": {"id": "archive-1", "proof": "catalogue:nightly/archive"}
+     }},
+    {"id": "nightly-2", "backup_time": "2026-11-13T02:00:00Z",
+     "correspondence": {
+       "finance": {"id": "finance-2", "proof": "catalogue:nightly-2/finance"},
+       "archive": {"id": "archive-2"}
+     }}
+  ],
+  "window": {"from": "2026-11-11T00:00:00Z", "to": "2026-11-14T00:00:00Z"},
+  "required_files": {"finance": ["/ledger.xlsx"], "archive": ["/reports/"]}
+}

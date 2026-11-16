@@ -67,6 +67,8 @@ Hence, please take some time to familiarize yourself with the smb package conten
   Contains the SMB protocol implementation for use in the Twisted framework.
 * **smb/SMBHandler.py** :
   Provides support for "smb://" URL in the urllib2 python package.
+* **smb/restore.py** :
+  Plans evidence-complete restores across several shares and pins directory/file reads to the selected shadow copy.
 
 Using pysmb
 ===========
@@ -81,6 +83,7 @@ As an application developer who is looking to use pysmb to implement file transf
    :doc:`smb.SMBConnection.SMBConnection<api/smb_SMBConnection>` documentation.
  * To use pysmb in Twisted, please read :doc:`smb.SMBProtocol.SMBProtocolFactory<api/smb_SMBProtocolFactory>` documentation.
  * To support "smb://" URL in urllib2 python package, read :doc:`smb.SMBHandler.SMBHandler<api/smb_SMBHandler>` documentation.
+ * To restore several shares from one backup, read :doc:`smb.restore<api/smb_restore>` documentation.
 
 As a software developer who is looking to modify pysmb so that you can integrate it to other network frameworks:
  * Read :doc:`extending`
