@@ -10,7 +10,7 @@ c_scanner = Extension("CifFile.StarScan",
 
 setup(name="PyCifRW",
       py_modules = ['CifFile.CifFile_module','CifFile.yapps3_compiled_rt','CifFile.YappsStarParser_1_1','CifFile.YappsStarParser_1_0',
-                    'CifFile.YappsStarParser_STAR2','CifFile.YappsStarParser_2_0','CifFile.StarFile','CifFile.TypeContentsParser',
+                    'CifFile.YappsStarParser_STAR2','CifFile.YappsStarParser_2_0','CifFile.StarFile','CifFile.LoopRows','CifFile.TypeContentsParser',
                     'CifFile.cif_files_validator'],
       ext_modules = [c_scanner],
       packages = ['CifFile', 'CifFile.drel'],
