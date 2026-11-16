@@ -2560,6 +2560,12 @@ class BlockCollection(object):
                     start_key = dup_key
                     while start_key in new_bc.lower_keys: start_key = start_key+'+'
                     new_bc._rekey(dup_key,start_key)
+                  elif our_parent is not None and their_parent is not None:
+                    #both are save frames in different hierarchies, which is
+                    #legitimate: rename our block's access key only
+                    start_key = dup_key
+                    while start_key in self.lower_keys: start_key = start_key+'+'
+                    self._rekey(dup_key,start_key)
                   else:
                     raise StarError("The following key is duplicated: {}".format(dup_key))
         self.dictionary.update(new_bc.dictionary)
@@ -2835,6 +2841,9 @@ class BlockCollection(object):
                     outstring.write('\n\n' + 'save_' + child_name + '\n')
                     self.block_to_string_nested(child_ref,child_name,outstring,4)
                     outstring.write('\n' + 'save_'+ '\n')
+                    all_names.remove(child_ref)
+                    for desc_ref in [a for a in list(all_names) if self.is_child_of_parent(child_ref,a)]:
+                        all_names.remove(desc_ref)
             elif self.grammar in ('1.0','1.1','2.0'):                   #non-nested save frames
                 child_refs = [a for a in blockorder if self.is_child_of_parent(blockref,a)]
                 for child_ref in child_refs:
