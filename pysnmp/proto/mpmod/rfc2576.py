@@ -546,6 +546,7 @@ class SnmpV1MessageProcessingModel(AbstractMessageProcessingModel):
                     contextName=contextName,
                     securityEngineId=securityEngineId,
                     communityName=communityName,
+                    reqID=reqID,
                     pdu=pdu,
                 ),
             )
