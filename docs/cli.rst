@@ -45,6 +45,21 @@ Render an X12 document as an HTML view that highlights structure and errors.
 .. literalinclude:: _generated/cli/x12html.txt
    :language: text
 
+x12split
+--------
+
+Split oversized 837 transaction sets into smaller valid ones when a receiver
+caps the segment count per transaction set. Claims stay whole and in original
+order; the subscriber / patient HL context each part needs is copied into it,
+and HL references and envelope counts are rebuilt.
+
+.. code-block:: console
+
+   $ x12split --help
+
+.. literalinclude:: _generated/cli/x12split.txt
+   :language: text
+
 x12info
 -------
 

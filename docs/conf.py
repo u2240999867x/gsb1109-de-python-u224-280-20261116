@@ -31,7 +31,7 @@ extensions = [
 # in environments where the subprocess Python could not import pyx12 (e.g.
 # Read the Docs). In-process import surfaces any failure as a Sphinx build
 # error instead of an empty <pre> block on the rendered page.
-_CLI_SCRIPTS = ("x12valid", "x12norm", "x12html", "x12info", "x12xml", "xmlx12")
+_CLI_SCRIPTS = ("x12valid", "x12norm", "x12split", "x12html", "x12info", "x12xml", "xmlx12")
 
 
 def _capture_cli_help() -> None:
