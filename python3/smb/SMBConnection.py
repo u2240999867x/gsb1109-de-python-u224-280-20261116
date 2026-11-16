@@ -308,6 +308,79 @@ class SMBConnection(SMB):
 
         return results[0]
 
+    def compoundFileOperations(self, service_name, path, read_length = 0xFFFF,
+                               query_output_length = 4096, timeout = 30, keep_data = True):
+        """
+        Run an SMB2 compound CREATE, QUERY_INFO, READ and CLOSE batch for *path*.
+
+        The four commands are sent in a single SMB2 message chain. Sub-operations
+        after CREATE use the all-ones file-id placeholder. The returned
+        :class:`smb.compound.CompoundOperationReport` records each sub-operation's
+        status and the file context it actually inherited, archives bytes that
+        were successfully read, and reports the opened resource separately from
+        the close result.
+
+        A failed CREATE leaves later placeholder handles unresolved instead of
+        promoting the placeholder to a real file id. Bytes read before a later
+        failure stay in the report archive, while a failed CLOSE is recorded in
+        the resource status.
+
+        :param string/unicode service_name: the name of the shared folder for the *path*
+        :param string/unicode path: path of the file relative to *service_name*
+        :param int read_length: maximum number of bytes to request in READ
+        :param int query_output_length: output buffer length for QUERY_INFO
+        :param int timeout: timeout in seconds for the batch
+        :param bool keep_data: keep successfully read bytes in the report archive
+        :return: A :class:`smb.compound.CompoundOperationReport` instance.
+        """
+        if not self.sock:
+            raise NotConnectedError('Not connected to server')
+        if not self.isUsingSMB2:
+            raise NotReadyError('Compound file operations require SMB2')
+
+        results = [ ]
+
+        def cb(report):
+            self.is_busy = False
+            results.append(report)
+
+        def eb(failure):
+            self.is_busy = False
+            raise failure
+
+        self.is_busy = True
+        try:
+            self._compoundFileOperations_SMB2(service_name, path, cb, eb,
+                                              read_length = read_length,
+                                              query_output_length = query_output_length,
+                                              timeout = timeout,
+                                              keep_data = keep_data)
+            while self.is_busy:
+                self._pollForNetBIOSPacket(timeout)
+        finally:
+            self.is_busy = False
+
+        return results[0]
+
+    def exportCompoundFileOperations(self, service_name, path, file_obj = None,
+                                     read_length = 0xFFFF, query_output_length = 4096,
+                                     timeout = 30, keep_data = True, indent = 2):
+        """
+        Run :meth:`compoundFileOperations` and export its JSON report.
+
+        If *file_obj* is a path or has a ``write`` method, the JSON report is
+        written to it and the report dictionary is returned. If *file_obj* is
+        None, the dictionary is returned without writing.
+
+        :return: The JSON-serialisable report dictionary.
+        """
+        report = self.compoundFileOperations(service_name, path,
+                                             read_length = read_length,
+                                             query_output_length = query_output_length,
+                                             timeout = timeout,
+                                             keep_data = keep_data)
+        return report.export(file_obj, include_data = keep_data, indent = indent)
+
     def retrieveFile(self, service_name, path, file_obj, timeout = 30, show_progress = False, tqdm_kwargs = {}):
         """
         Retrieve the contents of the file at *path* on the *service_name* and write these contents to the provided *file_obj*.

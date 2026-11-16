@@ -12,6 +12,7 @@ from nmb.base import NMBSession
 from .utils import convertFILETIMEtoEpoch, convertEpochToFILETIME
 from . import ntlm, securityblob
 from .strategy import DataFaultToleranceStrategy
+from . import compound as compound_ops
 
 try:
     import hashlib
@@ -65,7 +66,7 @@ class SMB(NMBSession):
         self.smb_message = SMBMessage()
         self.is_using_smb2 = False   #: Are we communicating using SMB2 protocol? self.smb_message will be a SMB2Message instance if this flag is True
         self.async_requests = { }    #: AsyncID mapped to _PendingRequest instance
-        self.pending_requests = { }  #: MID mapped to _PendingRequest instance
+        self.pending_requests = { }  #: MID mapped to _PendingRequest instance (or a list for compound batches)
         self.connected_trees = { }   #: Share name mapped to TID
         self.next_rpc_call_id = 1    #: Next RPC callID value. Not used directly in SMB message. Usually encapsulated in sub-commands under SMB_COM_TRANSACTION or SMB_COM_TRANSACTION2 messages
 
@@ -341,8 +342,16 @@ class SMB(NMBSession):
                         req.callback(message, **req.kwargs)
                         return True
             else:
-                req = self.pending_requests.pop(message.mid, None)
-                if req:
+                req = self.pending_requests.get(message.mid, None)
+                if isinstance(req, list):
+                    if req:
+                        pending = req.pop(0)
+                        if not req:
+                            self.pending_requests.pop(message.mid, None)
+                        pending.callback(message, **pending.kwargs)
+                        return True
+                elif req:
+                    self.pending_requests.pop(message.mid, None)
                     req.callback(message, **req.kwargs)
                     return True
 
@@ -743,6 +752,120 @@ c8 4f 32 4b 70 16 d3 01 12 78 5a 47 bf 6e e1 88
             self._pushToArray(messages_history, m)
         else:
             sendCreate(self.connected_trees[service_name])
+
+    def _compoundFileOperations_SMB2(self, service_name, path, callback, errback,
+                                     read_length = 0xFFFF, query_output_length = 4096,
+                                     timeout = 30, keep_data = True):
+        if not self.has_authenticated:
+            raise NotReadyError('SMB connection not authenticated')
+
+        expiry_time = time.time() + timeout
+        path = path.replace('/', '\\')
+        if path.startswith('\\'):
+            path = path[1:]
+        if path.endswith('\\'):
+            path = path[:-1]
+        messages_history = [ ]
+
+        def sendBatch(tid):
+            requests = compound_ops.create_compound_file_operations(
+                path,
+                read_length = read_length,
+                query_output_length = query_output_length)
+
+            batch_mid = self._getNextMID_SMB2()
+            for index, request in enumerate(requests):
+                request.mid = batch_mid
+                request.session_id = self.session_id
+                request.tid = tid
+                if index:
+                    request.flags |= SMB2_FLAGS_RELATED_OPERATIONS
+
+            responses = { }
+            finished = [ False ]
+
+            def finish():
+                if finished[0]:
+                    return
+                finished[0] = True
+                for request in requests:
+                    self.pending_requests.pop(request.mid, None)
+                ordered = [ responses.get(index) for index in range(len(requests)) ]
+                for message in ordered:
+                    if message is not None:
+                        self._pushToArray(messages_history, message)
+                report = compound_ops.parse_compound_report(requests, ordered,
+                                                            service_name = service_name,
+                                                            path = path,
+                                                            keep_data = keep_data)
+                callback(report)
+
+            def responseCB(index, message, **kwargs):
+                if finished[0]:
+                    return
+                responses[index] = message
+                if message.status != 0:
+                    finish()
+                elif len(responses) == len(requests):
+                    finish()
+
+            self.pending_requests[batch_mid] = [
+                _PendingRequest(batch_mid, int(time.time()) + timeout,
+                                lambda message, index = index, **kwargs: responseCB(index, message, **kwargs),
+                                errback)
+                for index in range(len(requests))
+            ]
+
+            self._sendSMBMessageCompound_SMB2(requests)
+
+        if service_name not in self.connected_trees:
+            def connectCB(connect_message, **kwargs):
+                self._pushToArray(messages_history, connect_message)
+                if connect_message.status == 0:
+                    self.connected_trees[service_name] = connect_message.tid
+                    sendBatch(connect_message.tid)
+                else:
+                    errback(OperationFailure('Failed to run compound operations on %s: Unable to connect to shared device' % ( service_name, ), messages_history))
+
+            m = SMB2Message(SMB2TreeConnectRequest(r'\\%s\%s' % ( self.remote_name.upper(), service_name )))
+            self._sendSMBMessage(m)
+            self.pending_requests[m.mid] = _PendingRequest(m.mid, expiry_time, connectCB, errback, path = service_name)
+            self._pushToArray(messages_history, m)
+        else:
+            sendBatch(self.connected_trees[service_name])
+
+    def _sendSMBMessageCompound_SMB2(self, messages):
+        for message in messages:
+            if message.mid == 0:
+                message.mid = self._getNextMID_SMB2()
+            if message.command != SMB2_COM_NEGOTIATE:
+                message.session_id = self.session_id
+            message.next_command_offset = 0
+
+        for index, message in enumerate(messages):
+            if index < len(messages) - 1:
+                length = len(message.encode())
+                message.next_command_offset = ( length + 7 ) & ~7
+            else:
+                message.next_command_offset = 0
+            message.encode()
+
+        data = b''
+        for index, message in enumerate(messages):
+            if self.is_signing_active:
+                message.flags |= SMB2_FLAGS_SIGNED
+            raw_data = message.encode()
+            if self.is_signing_active:
+                message.signature = hmac.new(self.signing_session_key, raw_data, sha256).digest()[:16]
+                message.raw_data = message.encode()
+                raw_data = message.raw_data
+            else:
+                message.raw_data = raw_data
+            data += raw_data
+            if index < len(messages) - 1 and len(raw_data) % 8:
+                data += b'\0' * ( 8 - len(raw_data) % 8 )
+
+        self.sendNMBMessage(data)
 
     def _getAttributes_SMB2(self, service_name, path, callback, errback, timeout = 30):
         if not self.has_authenticated:
@@ -1996,8 +2119,16 @@ c8 4f 32 4b 70 16 d3 01 12 78 5a 47 bf 6e e1 88
                     if not message.status.hasError:
                         self.connected_trees[req.kwargs['path']] = message.tid
 
-            req = self.pending_requests.pop(message.mid, None)
-            if req:
+            req = self.pending_requests.get(message.mid, None)
+            if isinstance(req, list):
+                if req:
+                    pending = req.pop(0)
+                    if not req:
+                        self.pending_requests.pop(message.mid, None)
+                    pending.callback(message, **pending.kwargs)
+                    return True
+            elif req:
+                self.pending_requests.pop(message.mid, None)
                 req.callback(message, **req.kwargs)
                 return True
 
