@@ -251,9 +251,9 @@ theme_cache = {}
 dir_cache = {}
 icon_cache = {}
 
-def getIconPath(iconname, size = None, theme = None, extensions = ["png", "svg", "xpm"]):
+def getIconPath(iconname, size = None, theme = None, extensions = ["png", "svg", "xpm"], scale = None):
     """Get the path to a specified icon.
-    
+
     size :
       Icon size in pixels. Defaults to ``xdg.Config.icon_size``.
     theme :
@@ -262,13 +262,16 @@ def getIconPath(iconname, size = None, theme = None, extensions = ["png", "svg",
       theme.
     extensions :
       List of preferred file extensions.
-    
+    scale :
+      Scale factor of the wanted icon, e.g. 2 for a HiDPI icon.  If omitted,
+      directories with any scale are considered.
+
     Example::
-    
+
         >>> getIconPath("inkscape", 32)
         '/usr/share/icons/hicolor/32x32/apps/inkscape.png'
     """
-    
+
     global themes
 
     if size == None:
@@ -289,7 +292,7 @@ def getIconPath(iconname, size = None, theme = None, extensions = ["png", "svg",
         themes = list(__get_themes(theme))
 
     # more caching (icon looked up in the last 5 seconds?)
-    tmp = (iconname, size, theme, tuple(extensions))
+    tmp = (iconname, size, theme, tuple(extensions), scale)
     try:
         timestamp, icon = icon_cache[tmp]
     except KeyError:
@@ -301,7 +304,7 @@ def getIconPath(iconname, size = None, theme = None, extensions = ["png", "svg",
             return icon
 
     for thme in themes:
-        icon = LookupIcon(iconname, size, thme, extensions)
+        icon = LookupIcon(iconname, size, thme, extensions, scale=scale)
         if icon:
             icon_cache[tmp] = (time.time(), icon)
             return icon
@@ -329,7 +332,7 @@ def getIconPath(iconname, size = None, theme = None, extensions = ["png", "svg",
 
     # we haven't found anything? "hicolor" is our fallback
     if theme != "hicolor":
-        icon = getIconPath(iconname, size, "hicolor")
+        icon = getIconPath(iconname, size, "hicolor", extensions, scale)
         icon_cache[tmp] = [time.time(), icon]
         return icon
 
@@ -348,10 +351,15 @@ def getIconData(path):
             data.parse(icon_file)
             return data
 
-def __get_themes(themename):
+def __get_themes(themename, _seen=None):
     """Generator yielding IconTheme objects for a specified theme and any themes
     from which it inherits.
+
+    Inheritance loops are ignored; each resolved theme file is visited once.
     """
+    if _seen is None:
+        _seen = set()
+
     for dir in icondirs:
         theme_file = os.path.join(dir, themename, "index.theme")
         if os.path.isfile(theme_file):
@@ -363,83 +371,115 @@ def __get_themes(themename):
         if debug:
             raise NoThemeError(themename)
         return
-    
+
+    theme_key = os.path.realpath(theme_file)
+    if theme_key in _seen:
+        return
+    _seen.add(theme_key)
+
     theme = IconTheme()
     theme.parse(theme_file)
     yield theme
     for subtheme in theme.getInherits():
-        for t in __get_themes(subtheme):
+        for t in __get_themes(subtheme, _seen):
             yield t
 
-def LookupIcon(iconname, size, theme, extensions):
+def LookupIcon(iconname, size, theme, extensions, scale=None):
+    cache_key = (theme.name, os.path.realpath(theme.dir))
     # look for the cache
-    if theme.name not in theme_cache:
-        theme_cache[theme.name] = []
-        theme_cache[theme.name].append(time.time() - (xdg.Config.cache_time + 1)) # [0] last time of lookup
-        theme_cache[theme.name].append(0)               # [1] mtime
-        theme_cache[theme.name].append(dict())          # [2] dir: [subdir, [items]]
+    if cache_key not in theme_cache:
+        theme_cache[cache_key] = []
+        theme_cache[cache_key].append(time.time() - (xdg.Config.cache_time + 1)) # [0] last time of lookup
+        theme_cache[cache_key].append(0)               # [1] mtime
+        theme_cache[cache_key].append(dict())          # [2] dir: [subdir, [items]]
 
     # cache stuff (directory lookuped up the in the last 5 seconds?)
-    if int(time.time() - theme_cache[theme.name][0]) >= xdg.Config.cache_time:
-        theme_cache[theme.name][0] = time.time()
-        for subdir in theme.getDirectories():
+    if int(time.time() - theme_cache[cache_key][0]) >= xdg.Config.cache_time:
+        theme_cache[cache_key][0] = time.time()
+        subdirs = list(theme.getDirectories())
+        for scaled_subdir in theme.getScaledDirectories():
+            if scaled_subdir not in subdirs:
+                subdirs.append(scaled_subdir)
+        for subdir in subdirs:
             for directory in icondirs:
                 dir = os.path.join(directory,theme.name,subdir)
-                if (dir not in theme_cache[theme.name][2] \
-                or theme_cache[theme.name][1] < os.path.getmtime(os.path.join(directory,theme.name))) \
+                theme_dir = os.path.join(directory, theme.name)
+                if (dir not in theme_cache[cache_key][2] \
+                or theme_cache[cache_key][1] < os.path.getmtime(theme_dir)) \
                 and subdir != "" \
                 and os.path.isdir(dir):
-                    theme_cache[theme.name][2][dir] = [subdir, os.listdir(dir)]
-                    theme_cache[theme.name][1] = os.path.getmtime(os.path.join(directory,theme.name))
+                    theme_cache[cache_key][2][dir] = [subdir, os.listdir(dir)]
+                    theme_cache[cache_key][1] = os.path.getmtime(theme_dir)
 
-    for dir, values in theme_cache[theme.name][2].items():
-        if DirectoryMatchesSize(values[0], size, theme):
+    for dir, values in theme_cache[cache_key][2].items():
+        if DirectoryMatchesSize(values[0], size, theme, scale=scale):
             for extension in extensions:
                 if iconname + "." + extension in values[1]:
                     return os.path.join(dir, iconname + "." + extension)
 
     minimal_size = 2**31
     closest_filename = ""
-    for dir, values in theme_cache[theme.name][2].items():
-        distance = DirectorySizeDistance(values[0], size, theme)
-        if distance < minimal_size:
-            for extension in extensions:
-                if iconname + "." + extension in values[1]:
-                    closest_filename = os.path.join(dir, iconname + "." + extension)
-                    minimal_size = distance
+    for dir, values in theme_cache[cache_key][2].items():
+        distance = DirectorySizeDistance(values[0], size, theme, scale=scale)
+        if distance >= minimal_size:
+            continue
+        for extension in extensions:
+            if iconname + "." + extension in values[1]:
+                closest_filename = os.path.join(dir, iconname + "." + extension)
+                minimal_size = distance
 
     return closest_filename
 
-def DirectoryMatchesSize(subdir, iconsize, theme):
+def DirectoryMatchesSize(subdir, iconsize, theme, scale=None):
     Type = theme.getType(subdir)
     Size = theme.getSize(subdir)
     Threshold = theme.getThreshold(subdir)
     MinSize = theme.getMinSize(subdir)
     MaxSize = theme.getMaxSize(subdir)
+    if scale is not None and theme.getScale(subdir) != scale:
+        return False
     if Type == "Fixed":
         return Size == iconsize
-    elif Type == "Scaleable":
+    elif Type in ("Scalable", "Scaleable"):
         return MinSize <= iconsize <= MaxSize
     elif Type == "Threshold":
         return Size - Threshold <= iconsize <= Size + Threshold
 
-def DirectorySizeDistance(subdir, iconsize, theme):
+def DirectorySizeDistance(subdir, iconsize, theme, scale=None):
     Type = theme.getType(subdir)
     Size = theme.getSize(subdir)
     Threshold = theme.getThreshold(subdir)
     MinSize = theme.getMinSize(subdir)
     MaxSize = theme.getMaxSize(subdir)
+    if scale is not None and theme.getScale(subdir) != scale:
+        # A directory at the wrong scale cannot satisfy the request; keep it
+        # out of the closest-match search as well.
+        return 2**31
     if Type == "Fixed":
         return abs(Size - iconsize)
-    elif Type == "Scalable":
+    elif Type in ("Scalable", "Scaleable"):
         if iconsize < MinSize:
             return MinSize - iconsize
         elif iconsize > MaxSize:
-            return MaxSize - iconsize
+            return iconsize - MaxSize
         return 0
     elif Type == "Threshold":
         if iconsize < Size - Threshold:
-            return MinSize - iconsize
+            return Size - Threshold - iconsize
         elif iconsize > Size + Threshold:
-            return iconsize - MaxSize
+            return iconsize - (Size + Threshold)
         return 0
+
+
+def select_icon_pack(*args, **kwargs):
+    """Select a minimum-volume offline icon pack.
+
+    This is a lazy re-export of :func:`xdg.IconPack.select_icon_pack`; keeping
+    the import local avoids a circular import at module load time.
+    """
+    from xdg.IconPack import select_icon_pack as _select
+    return _select(*args, **kwargs)
+
+
+build_icon_pack = select_icon_pack
+plan_icon_pack = select_icon_pack

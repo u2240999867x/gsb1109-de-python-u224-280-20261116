@@ -12,6 +12,7 @@ Contents:
    desktopentry
    menu
    icontheme
+   iconpack
    mime
    recentfiles
    exceptions
