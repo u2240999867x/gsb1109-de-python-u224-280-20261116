@@ -1,5 +1,24 @@
 .. current-version: 7.1.33 (managed by bump2version)
 
+Unreleased
+----------
+
+- Kept the SNMPv3 transport endpoint, authoritative engine and management
+  context as separate identities.  Peer discovery is now cached per context,
+  so multiple contexts behind one proxy endpoint are no longer conflated and
+  re-discovering one context leaves the others verified.
+- Withheld ContextEngineId learned from engine discovery reports, which only
+  echo the request, and confirmed it from responses instead.
+- Revoked boot/time freshness when the authoritative engine ID or its boot
+  generation moves, and stopped unvalidated report timing from overwriting a
+  trusted USM timeline.  Other reports are no longer misread as identity
+  changes.
+- Added :class:`pysnmp.hlapi.v3arch.asyncio.V3Collector` and
+  :class:`~pysnmp.hlapi.v3arch.asyncio.CollectionReplay` so every request
+  records the route, engine, context and boot generation actually used, and
+  a replay reports pending discovery instead of guessing missing evidence.
+  Report PDUs are kept as diagnostics and never stored as business values.
+
 Revision 7.1.33, released on Nov 15, 2026
 -----------------------------------------
 

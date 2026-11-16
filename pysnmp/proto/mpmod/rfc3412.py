@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import sys
+import time
 from typing import TYPE_CHECKING
 
 from pyasn1.codec.ber import decoder, eoo
@@ -126,21 +127,361 @@ class SnmpV3MessageProcessingModel(AbstractMessageProcessingModel):
         """Create SNMPv3 message processing model instance."""
         AbstractMessageProcessingModel.__init__(self)
         self.__scopedPDU = ScopedPDU()
+        # Peer identity is kept in layers.  A transport endpoint speaks for
+        # one authoritative SNMP engine, while the same endpoint can expose
+        # many SNMP contexts, each owning a different contextEngineId.
         self.__engineIdCache = {}
+        self.__contextCache = {}
+        self.__engineIdCacheExpiry = {}
         self.__engineIdCacheExpQueue = {}
         self.__expirationTimer = 0
 
-    def get_peer_engine_info(self, transportDomain, transportAddress):
-        """Return cached peer SNMP engine data."""
-        k = transportDomain, transportAddress
-        if k in self.__engineIdCache:
-            return (
-                self.__engineIdCache[k]["securityEngineId"],
-                self.__engineIdCache[k]["contextEngineId"],
-                self.__engineIdCache[k]["contextName"],
-            )
-        else:
+    @staticmethod
+    def _route_key(transportDomain, transportAddress):
+        """Build the key identifying one transport route."""
+        return tuple(transportDomain), tuple(transportAddress)
+
+    @staticmethod
+    def _to_bytes(value):
+        if value is None:
+            return None
+        if isinstance(value, bytes):
+            return value
+        try:
+            return bytes(value)
+        except (TypeError, ValueError):
+            return value
+
+    @staticmethod
+    def _context_key(transportDomain, transportAddress, contextName):
+        """Build the key identifying one context on a transport route."""
+        return (
+            SnmpV3MessageProcessingModel._route_key(transportDomain, transportAddress),
+            SnmpV3MessageProcessingModel._to_bytes(contextName) or b"",
+        )
+
+    def _schedule_engine_cache_expiry(self, cacheKey, snmpEngine=None):
+        """Register expiry of one cache entry, cancelling a stale one first."""
+        resolution = 1.0
+        if snmpEngine is not None and snmpEngine.transport_dispatcher is not None:
+            resolution = snmpEngine.transport_dispatcher.get_timer_resolution()
+        expireAt = int(self.__expirationTimer + 300 / resolution)
+
+        staleExpireAt = self.__engineIdCacheExpiry.pop(cacheKey, None)
+        if staleExpireAt is not None:
+            staleQueue = self.__engineIdCacheExpQueue.get(staleExpireAt)
+            if staleQueue is not None:
+                if cacheKey in staleQueue:
+                    staleQueue.remove(cacheKey)
+                if not staleQueue:
+                    del self.__engineIdCacheExpQueue[staleExpireAt]
+
+        self.__engineIdCacheExpiry[cacheKey] = expireAt
+        if expireAt not in self.__engineIdCacheExpQueue:
+            self.__engineIdCacheExpQueue[expireAt] = []
+        self.__engineIdCacheExpQueue[expireAt].append(cacheKey)
+
+    def _mark_route_contexts_pending(self, routeKey, dropContextEngineId=True):
+        """Mark all contexts on one route as no longer verified.
+
+        This is only used for route-wide facts.  Re-discovering a single
+        context deliberately leaves the other contexts on the same route
+        untouched.  A boot-generation change keeps the context mapping (the
+        managed objects did not move) but drops its freshness, so
+        *dropContextEngineId* is False in that case.
+        """
+        for (cachedRouteKey, _), contextData in self.__contextCache.items():
+            if cachedRouteKey == routeKey:
+                contextData["state"] = "pending"
+                contextData["engineId"] = None
+                contextData["engineBoots"] = None
+                if dropContextEngineId:
+                    contextData["contextEngineId"] = None
+
+    def get_peer_engine_info(self, transportDomain, transportAddress, contextName=b""):
+        """Return cached peer SNMP engine data.
+
+        The lookup is scoped to *contextName*.  Two contexts sharing a
+        transport endpoint are therefore interpreted independently: learning
+        the contextEngineId of one context never changes the view of another.
+        """
+        routeKey = self._route_key(transportDomain, transportAddress)
+        engineData = self.__engineIdCache.get(routeKey)
+        contextData = self.__contextCache.get(
+            self._context_key(transportDomain, transportAddress, contextName)
+        )
+
+        securityEngineId = engineData and engineData.get("securityEngineId")
+        contextEngineId = None
+        if contextData is not None and contextData.get("state") == "verified":
+            contextEngineId = contextData.get("contextEngineId")
+        if contextEngineId is None:
+            contextEngineId = securityEngineId
+
+        if securityEngineId is None:
             return None, None, None
+        return securityEngineId, contextEngineId, contextName
+
+    def get_peer_engine_details(
+        self, transportDomain, transportAddress, contextName=b""
+    ):
+        """Return cached peer engine data including boot generation.
+
+        Unlike :meth:`get_peer_engine_info` this returns the full cache entry,
+        including the last observed ``snmpEngineBoots``/``snmpEngineTime`` and
+        the point in time when the information was confirmed.  A missing entry
+        means discovery is still pending.
+        """
+        routeKey = self._route_key(transportDomain, transportAddress)
+        engineData = self.__engineIdCache.get(routeKey)
+        if engineData is None:
+            return None
+
+        contextKey = self._context_key(transportDomain, transportAddress, contextName)
+        contextData = self.__contextCache.get(contextKey)
+
+        details = dict(engineData)
+        details["routeKey"] = routeKey
+        details["contextKey"] = contextKey
+        details["contextKnown"] = contextData is not None
+        details["contextName"] = contextData and contextData.get("contextName")
+        details["contextEngineId"] = contextData and contextData.get("contextEngineId")
+        contextState = contextData and contextData.get("state")
+        details["contextState"] = contextState
+        contextBoots = contextData and contextData.get("engineBoots")
+        engineBoots = engineData.get("engineBoots")
+        details["freshnessVerified"] = bool(
+            engineData.get("freshnessVerified")
+            and contextState == "verified"
+            and (
+                engineBoots is None
+                or contextBoots is None
+                or contextBoots == engineBoots
+            )
+        )
+        return details
+
+    def remember_peer_engine_info(
+        self,
+        transportDomain,
+        transportAddress,
+        securityEngineId,
+        contextEngineId=None,
+        contextName=b"",
+        engineBoots=None,
+        engineTime=None,
+        source="report",
+        verified=True,
+        trust_context_engine_id=True,
+        snmpEngine=None,
+        securityModel=3,
+        freshnessVerified=None,
+    ):
+        """Remember (or refresh) confirmed peer engine/context identity.
+
+        ``securityEngineId`` is the authoritative engine that authenticates
+        messages on this route.  ``contextEngineId``/``contextName`` identify
+        the management context, which a proxy may map onto a different SNMP
+        engine.  The two are stored separately so that re-discovering one
+        context does not disturb the others.
+
+        Returns a tuple ``(previous, changed)`` where *changed* tells whether
+        the authoritative engine identity or its boot generation moved.
+        """
+        routeKey = self._route_key(transportDomain, transportAddress)
+        contextKey = self._context_key(transportDomain, transportAddress, contextName)
+
+        previous = self.__engineIdCache.get(routeKey)
+        existingContext = self.__contextCache.get(contextKey)
+
+        changed = False
+        engineChanged = False
+        if previous is not None:
+            if previous.get("securityEngineId") != self._to_bytes(securityEngineId):
+                changed = True
+                engineChanged = True
+            elif (
+                engineBoots is not None
+                and previous.get("engineBoots") is not None
+                and engineBoots > previous.get("engineBoots")
+            ):
+                # A boot generation only moves forward.  An older value
+                # (e.g. a replayed report) is not a new generation.
+                changed = True
+
+        sameEngine = previous is not None and previous.get(
+            "securityEngineId"
+        ) == self._to_bytes(securityEngineId)
+        if sameEngine:
+            previousBoots = previous.get("engineBoots")
+            if engineBoots is None:
+                # A report without timing evidence must not erase the boot
+                # generation confirmed earlier for the same engine.
+                engineBoots = previousBoots
+                engineTime = previous.get("engineTime")
+            elif previousBoots is not None and engineBoots < previousBoots:
+                # A boot generation only moves forward.  An older value (e.g.
+                # a replayed report) is not a new generation and must not
+                # replace the trusted one.
+                engineBoots = previousBoots
+                engineTime = previous.get("engineTime")
+
+        self.__engineIdCache[routeKey] = {
+            "securityEngineId": self._to_bytes(securityEngineId),
+            "engineBoots": engineBoots,
+            "engineTime": engineTime,
+            "confirmedAt": time.time() if verified else None,
+            "state": "verified" if verified else "pending",
+            # Only a confirmed response (or timing evidence learned from a
+            # validated message) authorizes reusing boot/time values.  A bare
+            # report may identify the engine but must not authorize requests
+            # unless the caller says the report did not revoke freshness.
+            "freshnessVerified": (
+                bool(verified and source == "response")
+                if freshnessVerified is None
+                else bool(freshnessVerified)
+            ),
+            "source": source,
+        }
+        self._schedule_engine_cache_expiry(("engine", routeKey), snmpEngine)
+
+        if changed and previous is not None:
+            # The authoritative engine or its boot generation moved.  No
+            # context on this route may keep using the old freshness evidence.
+            # If only the boot generation moved, the context mapping itself
+            # is still valid and is preserved.
+            self._mark_route_contexts_pending(
+                routeKey, dropContextEngineId=engineChanged
+            )
+            existingContext = self.__contextCache.get(contextKey)
+            # The authoritative engine itself moved: the old engine's
+            # timeline is irrelevant.  A forward boot-generation change is
+            # different -- USM has just validated the new values and they are
+            # the current evidence, so the timeline must be kept.
+            if engineChanged and snmpEngine is not None:
+                smHandler = snmpEngine.security_models.get(securityModel)
+                if smHandler is not None and hasattr(smHandler, "invalidate_timeline"):
+                    smHandler.invalidate_timeline(
+                        self._to_bytes(previous.get("securityEngineId"))
+                    )
+
+        if trust_context_engine_id:
+            storedContextEngineId = contextEngineId
+            contextState = "verified" if verified else "pending"
+            confirmedAt = time.time() if verified else None
+        elif existingContext is not None and not engineChanged:
+            # A report (e.g. notInTimeWindows) does not re-confirm the context
+            # identity.  Keep what an earlier response verified rather than
+            # letting a report erase it, and leave other contexts alone.  A
+            # boot-only change keeps the mapping too: the managed objects did
+            # not move, only freshness lapsed.
+            storedContextEngineId = existingContext.get("contextEngineId")
+            contextState = existingContext.get("state", "pending")
+            confirmedAt = existingContext.get("confirmedAt")
+        else:
+            # An engine discovery report echoes the request's contextEngineId,
+            # which is not evidence of the managed object's context engine.
+            storedContextEngineId = None
+            contextState = "pending"
+            confirmedAt = None
+
+        self.__contextCache[contextKey] = {
+            "contextEngineId": self._to_bytes(storedContextEngineId),
+            "contextName": self._to_bytes(contextName) or b"",
+            "engineId": self._to_bytes(securityEngineId),
+            "engineBoots": engineBoots,
+            "confirmedAt": confirmedAt,
+            "state": contextState,
+            "source": source,
+        }
+        self._schedule_engine_cache_expiry(("context", contextKey), snmpEngine)
+
+        debug.logger & debug.FLAG_MP and debug.logger(
+            "rememberPeerEngineInfo: engine {} context {} for {} {} "
+            "context {!r} (changed {})".format(
+                self.__engineIdCache[routeKey],
+                self.__contextCache[contextKey],
+                transportDomain,
+                transportAddress,
+                contextName,
+                changed,
+            )
+        )
+
+        return previous, changed
+
+    def forget_peer_engine_info(
+        self, transportDomain, transportAddress, contextName=None
+    ):
+        """Drop peer discovery evidence.
+
+        With *contextName* given only that context's evidence is removed,
+        leaving other contexts on the same route intact.  Without it the whole
+        route (engine and all contexts) is forgotten.
+        """
+        routeKey = self._route_key(transportDomain, transportAddress)
+        if contextName is None:
+            self.__engineIdCache.pop(routeKey, None)
+            for key in list(self.__contextCache):
+                if key[0] == routeKey:
+                    del self.__contextCache[key]
+            return
+
+        contextKey = self._context_key(transportDomain, transportAddress, contextName)
+        self.__contextCache.pop(contextKey, None)
+
+    def invalidate_peer_discovery(
+        self,
+        transportDomain,
+        transportAddress,
+        contextName=None,
+        snmpEngine=None,
+        securityModel=3,
+        invalidate_timeline=True,
+    ):
+        """Revoke freshness evidence without discarding verified observations.
+
+        The route keeps the engine ID it discovered, so the next request can
+        be addressed to it, but the boot/time authorization is withdrawn.
+
+        With *invalidate_timeline* (an authoritative engine identity change),
+        every context on the route loses freshness and the USM timeline of
+        the old engine is dropped.  Without it (a boot/time report) only the
+        named context is re-opened; other contexts sharing the endpoint keep
+        their verified state.  In both cases the ``contextEngineId`` mappings
+        are preserved, because the managed objects did not move.
+        """
+        routeKey = self._route_key(transportDomain, transportAddress)
+
+        if invalidate_timeline:
+            # The authoritative engine identity is in question.  Withdraw
+            # route-wide freshness, keep every context mapping (the managed
+            # objects did not move) and force the next request through
+            # discovery.
+            engineData = self.__engineIdCache.get(routeKey)
+            if engineData is not None:
+                engineData["freshnessVerified"] = False
+                engineData["state"] = "pending"
+                if snmpEngine is not None:
+                    smHandler = snmpEngine.security_models.get(securityModel)
+                    if smHandler is not None and hasattr(
+                        smHandler, "invalidate_timeline"
+                    ):
+                        smHandler.invalidate_timeline(
+                            engineData.get("securityEngineId")
+                        )
+            self._mark_route_contexts_pending(routeKey, dropContextEngineId=False)
+            return
+
+        if contextName is None:
+            return
+
+        # A boot/time report concerns one context only.  Other contexts on
+        # the same endpoint keep their verified state and observations.
+        contextKey = self._context_key(transportDomain, transportAddress, contextName)
+        contextData = self.__contextCache.get(contextKey)
+        if contextData is not None and contextData.get("state") == "verified":
+            contextData["state"] = "pending"
 
     # 7.1.1a
     def prepare_outgoing_message(
@@ -172,29 +513,40 @@ class SnmpV3MessageProcessingModel(AbstractMessageProcessingModel):
             "prepareOutgoingMessage: new msgID %s" % msgID
         )
 
-        k = (transportDomain, transportAddress)
-        if k in self.__engineIdCache:
-            peerSnmpEngineData = self.__engineIdCache[k]
-        else:
-            peerSnmpEngineData = None
-
+        routeKey = self._route_key(transportDomain, transportAddress)
+        peerSnmpEngineData = self.__engineIdCache.get(routeKey)
+        peerContextData = self.__contextCache.get(
+            self._context_key(transportDomain, transportAddress, contextName)
+        )
         debug.logger & debug.FLAG_MP and debug.logger(
-            "prepareOutgoingMessage: peer SNMP engine data {} for transport {}, address {}".format(
-                peerSnmpEngineData, transportDomain, transportAddress
+            "prepareOutgoingMessage: peer SNMP engine data {} context data {} "
+            "for transport {}, address {}".format(
+                peerSnmpEngineData,
+                peerContextData,
+                transportDomain,
+                transportAddress,
             )
         )
 
         # 7.1.4
+        # The context layer and the authentication engine layer are kept
+        # apart.  A proxy may authenticate on behalf of one engine while the
+        # managed objects live in a context owned by another engine.
         if contextEngineId is None:
-            if peerSnmpEngineData is None:
-                contextEngineId = snmpEngineID
+            if (
+                peerContextData is not None
+                and peerContextData.get("state") == "verified"
+                and peerContextData.get("contextEngineId")
+            ):
+                # Only a context confirmed by discovery may steer the
+                # outgoing contextEngineId.  An unverified or lapsed mapping
+                # is kept for audit, but it must not be used to address a new
+                # request.
+                contextEngineId = peerContextData["contextEngineId"]
+            elif peerSnmpEngineData is not None:
+                contextEngineId = peerSnmpEngineData["securityEngineId"]
             else:
-                contextEngineId = peerSnmpEngineData["contextEngineId"]
-                # Defaulting contextEngineID to securityEngineId should
-                # probably be done on Agent side (see 7.1.3.d.2,) so this
-                # is a sort of workaround.
-                if not contextEngineId:
-                    contextEngineId = peerSnmpEngineData["securityEngineId"]
+                contextEngineId = snmpEngineID
         # 7.1.5
         if not contextName:
             contextName = self._empty_string
@@ -352,6 +704,16 @@ class SnmpV3MessageProcessingModel(AbstractMessageProcessingModel):
                 securityLevel=securityLevel,
                 contextEngineId=contextEngineId,
                 contextName=contextName,
+                securityEngineId=securityEngineId,
+                engineBoots=peerSnmpEngineData
+                and peerSnmpEngineData.get("engineBoots"),
+                engineTime=peerSnmpEngineData and peerSnmpEngineData.get("engineTime"),
+                contextState=peerContextData
+                and peerContextData.get("state")
+                or "pending",
+                freshnessVerified=bool(
+                    peerSnmpEngineData and peerSnmpEngineData.get("freshnessVerified")
+                ),
                 pdu=pdu,
             ),
         )
@@ -615,6 +977,52 @@ class SnmpV3MessageProcessingModel(AbstractMessageProcessingModel):
 
         return transportDomain, transportAddress, wholeMsg
 
+    @staticmethod
+    def _report_revokes_freshness(reportPdu):
+        """Return True for reports that say the timeline moved.
+
+        ``usmStatsUnknownEngineIDs`` and ``usmStatsNotInTimeWindows`` are the
+        two reports that invalidate cached boot/time evidence.  Other reports
+        (unknown user, wrong digest, decryption error, unsupported security
+        level) identify credential problems and leave freshness alone.
+        """
+        varBinds = pMod.apiPDU.get_varbinds(reportPdu)
+        if not varBinds:
+            return False
+        return tuple(varBinds[0][0]) in (
+            (1, 3, 6, 1, 6, 3, 15, 1, 1, 2, 0),  # usmStatsNotInTimeWindows
+            (1, 3, 6, 1, 6, 3, 15, 1, 1, 4, 0),  # usmStatsUnknownEngineIDs
+        )
+
+    @staticmethod
+    def _trusted_engine_timing(snmpEngine, securityEngineId):
+        """Return boot/time evidence validated by the USM timeline.
+
+        Report PDUs carry USM statistics counters, not a boot generation.
+        The authoritative boot/time values are those the security model has
+        validated while processing authenticated messages, so read them from
+        the USM timeline rather than from the report varbinds.
+        """
+        if snmpEngine is None or securityEngineId is None:
+            return None, None
+        securityModel = snmpEngine.security_models.get(3)
+        if securityModel is None or not hasattr(securityModel, "get_timeline_info"):
+            return None, None
+        timeline = securityModel.get_timeline_info(securityEngineId)
+        if not timeline:
+            return None, None
+        return timeline["engineBoots"], timeline["engineTime"]
+
+    def _increase_engine_generation(self, routeKey, engineBoots, engineTime):
+        """Advance the recorded boot generation only, never regress it."""
+        entry = self.__engineIdCache.get(routeKey)
+        if entry is None or engineBoots is None:
+            return
+        recordedBoots = entry.get("engineBoots")
+        if recordedBoots is None or engineBoots > recordedBoots:
+            entry["engineBoots"] = engineBoots
+            entry["engineTime"] = engineTime
+
     # 7.2.1
 
     def prepare_data_elements(
@@ -789,34 +1197,54 @@ class SnmpV3MessageProcessingModel(AbstractMessageProcessingModel):
                 # (seems to be irrelevant on Py3 but just in case)
                 del origTraceback
         else:
-            # Sniff for engineIdCache
-            k = (transportDomain, transportAddress)
-            if k not in self.__engineIdCache:
-                contextEngineId = scopedPDU[0]
-                contextName = scopedPDU[1]
-                pdus = scopedPDU[2]
-                pdu = pdus.getComponent()
-                # Here we assume that authentic/default EngineIDs
-                # come only in the course of engine-to-engine communication.
-                if pdu.tagSet in rfc3411.INTERNAL_CLASS_PDUS:
-                    self.__engineIdCache[k] = {
-                        "securityEngineId": securityEngineId,
-                        "contextEngineId": contextEngineId,
-                        "contextName": contextName,
-                    }
-
-                    expireAt = int(
-                        self.__expirationTimer
-                        + 300 / snmpEngine.transport_dispatcher.get_timer_resolution()
+            # Sniff for engine/context identity in engine-to-engine messages.
+            contextEngineId = scopedPDU[0]
+            contextName = scopedPDU[1]
+            pdus = scopedPDU[2]
+            pdu = pdus.getComponent()
+            if pdu.tagSet in rfc3411.INTERNAL_CLASS_PDUS:
+                # A Report is received on this route.  The scopedPDU may echo
+                # the contextEngineId of our request, so only the
+                # authoritative (security) engine is trusted from here.  The
+                # contextEngineId is confirmed by a response PDU, not a
+                # Report.
+                routeKey = self._route_key(transportDomain, transportAddress)
+                reportEngineBoots, reportEngineTime = self._trusted_engine_timing(
+                    snmpEngine, securityEngineId
+                )
+                previousEngineData = self.__engineIdCache.get(routeKey)
+                reportRevokesFreshness = self._report_revokes_freshness(pdu)
+                self.remember_peer_engine_info(
+                    transportDomain,
+                    transportAddress,
+                    securityEngineId,
+                    contextEngineId,
+                    contextName,
+                    engineBoots=reportEngineBoots,
+                    engineTime=reportEngineTime,
+                    source="report",
+                    verified=True,
+                    trust_context_engine_id=False,
+                    snmpEngine=snmpEngine,
+                    securityModel=securityModel,
+                    freshnessVerified=bool(
+                        previousEngineData
+                        and previousEngineData.get("freshnessVerified")
+                        and not reportRevokesFreshness
+                    ),
+                )
+                debug.logger & debug.FLAG_MP and debug.logger(
+                    "prepareDataElements: cache securityEngineId {!r} for {!r} {!r} "
+                    "context {!r} (contextEngineId trust withheld)".format(
+                        securityEngineId,
+                        transportDomain,
+                        transportAddress,
+                        contextName,
                     )
-                    if expireAt not in self.__engineIdCacheExpQueue:
-                        self.__engineIdCacheExpQueue[expireAt] = []
-                    self.__engineIdCacheExpQueue[expireAt].append(k)
-
-                    debug.logger & debug.FLAG_MP and debug.logger(
-                        "prepareDataElements: cache securityEngineId {!r} for {!r} {!r}".format(
-                            securityEngineId, transportDomain, transportAddress
-                        )
+                )
+                if reportEngineBoots is not None:
+                    self._increase_engine_generation(
+                        routeKey, reportEngineBoots, reportEngineTime
                     )
 
         (snmpEngineID,) = snmpEngine.get_mib_builder().import_symbols(
@@ -928,6 +1356,28 @@ class SnmpV3MessageProcessingModel(AbstractMessageProcessingModel):
             ):
                 smHandler.release_state_information(securityStateReference)
                 raise error.StatusInformation(errorIndication=errind.dataMismatch)
+
+            # A response is the authoritative confirmation of the context
+            # behind the route.  Record it per context: the security engine
+            # authenticating this route and the engine owning the managed
+            # objects may legitimately differ when a proxy is in between.
+            responseBoots, responseTime = self._trusted_engine_timing(
+                snmpEngine, securityEngineId
+            )
+            self.remember_peer_engine_info(
+                transportDomain,
+                transportAddress,
+                securityEngineId,
+                contextEngineId,
+                contextName,
+                engineBoots=responseBoots,
+                engineTime=responseTime,
+                source="response",
+                verified=True,
+                trust_context_engine_id=True,
+                snmpEngine=snmpEngine,
+                securityModel=securityModel,
+            )
 
             snmpEngine.observer.store_execution_context(
                 snmpEngine,
@@ -1083,10 +1533,19 @@ class SnmpV3MessageProcessingModel(AbstractMessageProcessingModel):
 
     def __expire_engines_info(self):
         if self.__expirationTimer in self.__engineIdCacheExpQueue:
-            for engineKey in self.__engineIdCacheExpQueue[self.__expirationTimer]:
-                del self.__engineIdCache[engineKey]
+            for cacheKey in self.__engineIdCacheExpQueue[self.__expirationTimer]:
+                # Skip stale registrations: the entry was refreshed since and
+                # its expiry moved to a later tick.
+                if self.__engineIdCacheExpiry.get(cacheKey) != self.__expirationTimer:
+                    continue
+                del self.__engineIdCacheExpiry[cacheKey]
+                cacheKind, key = cacheKey
+                if cacheKind == "engine":
+                    self.__engineIdCache.pop(key, None)
+                elif cacheKind == "context":
+                    self.__contextCache.pop(key, None)
                 debug.logger & debug.FLAG_MP and debug.logger(
-                    f"__expireEnginesInfo: expiring {engineKey!r}"
+                    f"__expireEnginesInfo: expiring {cacheKey!r}"
                 )
             del self.__engineIdCacheExpQueue[self.__expirationTimer]
         self.__expirationTimer += 1

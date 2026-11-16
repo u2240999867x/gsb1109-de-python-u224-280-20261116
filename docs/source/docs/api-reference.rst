@@ -87,6 +87,26 @@ Engine object on input.
 
 .. autoclass:: pysnmp.hlapi.v3arch.asyncio.SnmpEngine(snmpEngineID=None)
 
+SNMPv3 Collection Identity
+--------------------------
+
+Behind a proxy the transport endpoint, the authoritative SNMP engine and the
+management context (``contextEngineId``/``contextName``) are distinct
+identities. :py:class:`~pysnmp.hlapi.v3arch.asyncio.V3Collector` keeps them
+apart while collecting values, and
+:py:class:`~pysnmp.hlapi.v3arch.asyncio.CollectionReplay` replays the journal
+to audit which route, engine and context each request actually used. Requests
+whose evidence is incomplete replay as ``pending-discovery`` instead of being
+attributed to a guessed identity.
+
+.. autoclass:: pysnmp.hlapi.v3arch.asyncio.V3Collector
+
+.. autoclass:: pysnmp.hlapi.v3arch.asyncio.CollectionReplay
+
+.. autoclass:: pysnmp.hlapi.v3arch.asyncio.CollectionIdentity
+
+.. autoclass:: pysnmp.hlapi.v3arch.asyncio.CollectionSample
+
 High-level v3arch auth
 ----------------------
 

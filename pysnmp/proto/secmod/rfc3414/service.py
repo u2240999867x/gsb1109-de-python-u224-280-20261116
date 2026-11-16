@@ -1283,19 +1283,12 @@ class SnmpUSMSecurityModel(AbstractSecurityModel):
                     "processIncomingMsg: incoming msg authenticated"
                 )
 
-            # synchronize time with authed peer
-            self.__timeline[msgAuthoritativeEngineId] = (
-                securityParameters.getComponentByPosition(1),
-                securityParameters.getComponentByPosition(2),
-                securityParameters.getComponentByPosition(2),
-                int(time.time()),
-            )
-
-            self.__schedule_timeline_expiry(msgAuthoritativeEngineId, snmpEngine)
-
-            debug.logger & debug.FLAG_SM and debug.logger(
-                f"processIncomingMsg: store timeline for securityEngineID {msgAuthoritativeEngineId!r}"
-            )
+            # Synchronization with an authenticated peer is validated in
+            # 3.2.7 below.  Do not publish the message's time values here:
+            # a report carrying a lower boot generation (or replayed time)
+            # would otherwise overwrite the trusted timeline before it gets
+            # rejected, and the replay check would then compare against the
+            # bogus values it just installed.
 
         # 3.2.7
         if securityLevel == 3 or securityLevel == 2:
@@ -1313,7 +1306,11 @@ class SnmpUSMSecurityModel(AbstractSecurityModel):
                     )
                 )
             else:
-                # Non-authoritative SNMP engine: use cached estimates
+                # Non-authoritative SNMP engine: use cached estimates.  When
+                # this engine has never been seen before there is nothing to
+                # compare against; the first authenticated message establishes
+                # the timeline, and every later message has to move it
+                # forward (3.2.7b).
                 if msgAuthoritativeEngineId in self.__timeline:
                     (
                         snmpEngineBoots,
@@ -1332,7 +1329,35 @@ class SnmpUSMSecurityModel(AbstractSecurityModel):
                         )
                     )
                 else:
-                    raise error.ProtocolError("Peer SNMP engine info missing")
+                    if (
+                        not usmUserName
+                        or usmUserAuthProtocol == noauth.NoAuth.SERVICE_ID
+                    ):
+                        # Only an authenticated message may establish a
+                        # trusted timeline.  An unauthenticated probe cannot
+                        # authorize later requests.
+                        raise error.ProtocolError("Peer SNMP engine info missing")
+
+                    snmpEngineBoots = msgAuthoritativeEngineBoots
+                    snmpEngineTime = msgAuthoritativeEngineTime
+                    latestReceivedEngineTime = msgAuthoritativeEngineTime
+                    idleTime = 0
+                    self.__timeline[msgAuthoritativeEngineId] = (
+                        msgAuthoritativeEngineBoots,
+                        msgAuthoritativeEngineTime,
+                        msgAuthoritativeEngineTime,
+                        int(time.time()),
+                    )
+                    self.__schedule_timeline_expiry(
+                        msgAuthoritativeEngineId, snmpEngine
+                    )
+                    debug.logger & debug.FLAG_SM and debug.logger(
+                        "processIncomingMsg: established timeline for new securityEngineID {!r} at boots {} time {}".format(
+                            msgAuthoritativeEngineId,
+                            msgAuthoritativeEngineBoots,
+                            msgAuthoritativeEngineTime,
+                        )
+                    )
 
             # 3.2.7a
             if msgAuthoritativeEngineId == snmpEngineID:
@@ -1526,6 +1551,71 @@ class SnmpUSMSecurityModel(AbstractSecurityModel):
             maxSizeResponseScopedPDU,
             securityStateReference,
         )
+
+    def get_timeline_info(self, securityEngineId):
+        """Return the trusted timeline for *securityEngineId*, if any.
+
+        The timeline is established and advanced only by authenticated
+        messages (RFC 3414 3.2.7).  Callers use it as freshness evidence: when
+        the authoritative engine ID or its boot generation moves, previously
+        collected evidence must not be reused for new requests.
+        """
+        key = self.__to_octets(securityEngineId)
+        if key in self.__timeline:
+            boots, engineTime, latestReceivedEngineTime, updatedAt = self.__timeline[
+                key
+            ]
+            return {
+                "engineBoots": int(boots),
+                "engineTime": int(engineTime),
+                "latestReceivedEngineTime": int(latestReceivedEngineTime),
+                "updatedAt": updatedAt,
+            }
+        return None
+
+    @staticmethod
+    def __to_octets(engineId):
+        """Normalise an engine ID to octets for dictionary lookup."""
+        if engineId is None or isinstance(engineId, bytes):
+            return engineId
+        try:
+            return bytes(engineId)
+        except (TypeError, ValueError):
+            return engineId
+
+    def is_timeline_trusted(self, securityEngineId):
+        """Return True when a trusted timeline exists for the engine."""
+        return self.__to_octets(securityEngineId) in self.__timeline
+
+    def invalidate_timeline(self, securityEngineId=None):
+        """Drop freshness evidence for one engine (or all engines).
+
+        Called when the authoritative engine identity changes.  The next
+        request must run discovery instead of reusing the old boot/time
+        estimates.  A merely advanced boot generation is *not* a reason to
+        drop the timeline: USM validated and installed those newer values,
+        and they are the current evidence.
+        """
+        securityEngineId = self.__to_octets(securityEngineId)
+        if securityEngineId is None:
+            keys = list(self.__timeline)
+        elif securityEngineId in self.__timeline:
+            keys = [securityEngineId]
+        else:
+            keys = []
+
+        for key in keys:
+            self.__timeline.pop(key, None)
+            expireAt = self.__timelineExpiry.pop(key, None)
+            if expireAt is not None:
+                queue = self.__timelineExpQueue.get(expireAt)
+                if queue is not None:
+                    if key in queue:
+                        queue.remove(key)
+                    if not queue:
+                        del self.__timelineExpQueue[expireAt]
+
+        return keys
 
     def __schedule_timeline_expiry(self, securityEngineId, snmpEngine):
         """Register expiry of the cached timeline for *securityEngineId*.

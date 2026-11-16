@@ -63,6 +63,7 @@ from pysnmp.hlapi.v3arch.asyncio import auth
 from pysnmp.hlapi.v3arch.asyncio.auth import CommunityData, UsmUserData
 from pysnmp.hlapi.v3arch.asyncio.cmdgen import *
 from pysnmp.hlapi.v3arch.asyncio.context import *
+from pysnmp.hlapi.v3arch.asyncio.collector import *
 from pysnmp.hlapi.v3arch.asyncio.ntforg import *
 from pysnmp.hlapi.v3arch.asyncio.transport import *
 from pysnmp.proto.rfc1902 import *

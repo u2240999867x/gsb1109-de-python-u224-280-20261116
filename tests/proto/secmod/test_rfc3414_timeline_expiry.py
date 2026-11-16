@@ -121,3 +121,23 @@ def test_multiple_engines_expire_independently():
 
     assert ENGINE_ID in timeline()
     assert other not in timeline()
+
+
+def test_invalidate_timeline_removes_expiry_bookkeeping():
+    """Dropping an engine's timeline must also drop its expiry registration.
+
+    Without this, a wiped entry could linger in the expiry queue and the
+    engine would be reported as trusted again once the stale bucket fired.
+    """
+    svc = _make_service()[0]
+    engine = _NoDispatcherEngine()
+    timeline = getattr(svc, "_SnmpUSMSecurityModel__timeline")
+    schedule = getattr(svc, "_SnmpUSMSecurityModel__schedule_timeline_expiry")
+
+    timeline[ENGINE_ID] = (2, 1, 1, 0)
+    schedule(ENGINE_ID, engine)
+
+    assert svc.invalidate_timeline(ENGINE_ID) == [ENGINE_ID]
+    assert not svc.is_timeline_trusted(ENGINE_ID)
+    assert getattr(svc, "_SnmpUSMSecurityModel__timelineExpiry") == {}
+    assert getattr(svc, "_SnmpUSMSecurityModel__timelineExpQueue") == {}
