@@ -13,6 +13,7 @@ Python DBus-Next Documentation
    low-level-interface/index.rst
    message-bus/index.rst
    introspection
+   introspection-diff
    validators
    constants
    errors

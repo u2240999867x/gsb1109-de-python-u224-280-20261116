@@ -6,9 +6,149 @@ from .errors import InvalidIntrospectionError
 from typing import List, Union
 
 import xml.etree.ElementTree as ET
+import xml.parsers.expat as expat
 
 # https://dbus.freedesktop.org/doc/dbus-specification.html#introspection-format
-# TODO annotations
+
+_SOURCE_ATTR = '{urn:dbus-next}source'
+_LINE_ATTR = '{urn:dbus-next}line'
+
+
+class Annotation:
+    """A D-Bus introspection annotation.
+
+    Annotations are key/value metadata attached to an interface or one of its
+    members.  They do not change the wire type of a member, but they can
+    change how a client should collect or invoke it (for example
+    ``org.freedesktop.DBus.Deprecated`` or
+    ``org.freedesktop.DBus.Property.EmitsChangedSignal``).
+
+    :ivar name: The annotation name.
+    :vartype name: str
+    :ivar value: The annotation value as it appeared in the XML, or ``None``
+        when the value attribute was omitted.
+    :vartype value: str
+    :ivar source: The source document label supplied while parsing, if any.
+    :vartype source: str
+    :ivar line: The line in the source document, when it could be determined.
+    :vartype line: int
+    """
+    def __init__(self,
+                 name: str,
+                 value: str = None,
+                 source: str = None,
+                 line: int = None):
+        self.name = name
+        self.value = value
+        self.source = source
+        self.line = line
+
+    @staticmethod
+    def from_xml(element: ET.Element, source: str = None) -> 'Annotation':
+        """Convert an ``annotation`` element into an :class:`Annotation`.
+
+        :param element: The parsed XML element.
+        :type element: :class:`xml.etree.ElementTree.Element`
+        :param source: The source document label. Defaults to the provenance
+            attached by :func:`Node.parse`.
+        :type source: str
+        """
+        name = element.attrib.get('name')
+        if not name:
+            raise InvalidIntrospectionError('annotations must have a "name" attribute')
+
+        line = element.attrib.get(_LINE_ATTR)
+        try:
+            line = int(line) if line is not None else None
+        except (TypeError, ValueError):
+            line = None
+
+        if source is None:
+            source = element.attrib.get(_SOURCE_ATTR)
+
+        return Annotation(name, element.attrib.get('value'), source=source, line=line)
+
+    def to_xml(self) -> ET.Element:
+        """Convert this :class:`Annotation` into an
+        :class:`xml.etree.ElementTree.Element`.
+        """
+        element = ET.Element('annotation')
+        element.set('name', self.name)
+        if self.value is not None:
+            element.set('value', self.value)
+        return element
+
+    def to_dict(self) -> dict:
+        return {
+            'name': self.name,
+            'value': self.value,
+            'source': self.source,
+            'line': self.line,
+        }
+
+    def __eq__(self, other):
+        if type(other) is Annotation:
+            return (self.name, self.value) == (other.name, other.value)
+        return super().__eq__(other)
+
+    def __repr__(self):
+        return f'Annotation({self.name!r}, {self.value!r})'
+
+    def __hash__(self):
+        return hash((self.name, self.value))
+
+
+def _annotations_from_xml(element: ET.Element, source: str = None) -> List[Annotation]:
+    annotations = []
+    for child in element:
+        if child.tag == 'annotation':
+            annotations.append(Annotation.from_xml(child, source=source))
+    return annotations
+
+
+def _provenance(element: ET.Element, source: str = None):
+    if source is None:
+        source = element.attrib.get(_SOURCE_ATTR)
+
+    line = element.attrib.get(_LINE_ATTR)
+    try:
+        line = int(line) if line is not None else None
+    except (TypeError, ValueError):
+        line = None
+
+    return source, line
+
+
+def _parse_xml_with_provenance(data: Union[str, bytes],
+                               source: str = None) -> ET.Element:
+    """Parse XML and remember the source document and line of each element.
+
+    ElementTree does not expose line numbers.  Expat emits start elements in
+    the same document order as ``Element.iter()``, so a second lightweight
+    pass is enough to attach line information without changing the element
+    type or requiring a third-party parser.
+    """
+    root = ET.fromstring(data)
+
+    try:
+        lines = []
+        parser = expat.ParserCreate()
+        parser.StartElementHandler = lambda name, attrs: lines.append(
+            parser.CurrentLineNumber)
+        parser.Parse(data, True)
+    except expat.ExpatError:
+        lines = []
+
+    elements = list(root.iter())
+    if len(lines) == len(elements):
+        for element, line in zip(elements, lines):
+            element.set(_LINE_ATTR, str(line))
+
+    if source is not None:
+        for element in elements:
+            element.set(_SOURCE_ATTR, str(source))
+
+    return root
 
 
 class Arg:
@@ -22,6 +162,8 @@ class Arg:
     :vartype type: :class:`SignatureType <dbus_next.SignatureType>`
     :ivar signature: The signature string of this argument.
     :vartype signature: str
+    :ivar annotations: Annotations attached to this argument.
+    :vartype annotations: list(:class:`Annotation`)
 
     :raises:
         - :class:`InvalidMemberNameError <dbus_next.InvalidMemberNameError>` - If the name of the arg is not valid.
@@ -31,7 +173,10 @@ class Arg:
     def __init__(self,
                  signature: Union[SignatureType, str],
                  direction: List[ArgDirection] = None,
-                 name: str = None):
+                 name: str = None,
+                 annotations: List[Annotation] = None,
+                 source: str = None,
+                 line: int = None):
         if name is not None:
             assert_member_name_valid(name)
 
@@ -50,6 +195,9 @@ class Arg:
         self.signature = signature
         self.name = name
         self.direction = direction
+        self.annotations = annotations if annotations is not None else []
+        self.source = source
+        self.line = line
 
     def from_xml(element: ET.Element, direction: ArgDirection) -> 'Arg':
         """Convert a :class:`xml.etree.ElementTree.Element` into a
@@ -71,7 +219,13 @@ class Arg:
         if not signature:
             raise InvalidIntrospectionError('a method argument must have a "type" attribute')
 
-        return Arg(signature, direction, name)
+        source, line = _provenance(element)
+        return Arg(signature,
+                   direction,
+                   name,
+                   annotations=_annotations_from_xml(element, source=source),
+                   source=source,
+                   line=line)
 
     def to_xml(self) -> ET.Element:
         """Convert this :class:`Arg` into an :class:`xml.etree.ElementTree.Element`.
@@ -83,6 +237,8 @@ class Arg:
         if self.direction:
             element.set('direction', self.direction.value)
         element.set('type', self.signature)
+        for annotation in self.annotations:
+            element.append(annotation.to_xml())
 
         return element
 
@@ -100,13 +256,21 @@ class Signal:
     :raises:
         - :class:`InvalidMemberNameError <dbus_next.InvalidMemberNameError>` - If the name of the signal is not a valid member name.
     """
-    def __init__(self, name: str, args: List[Arg] = None):
+    def __init__(self,
+                 name: str,
+                 args: List[Arg] = None,
+                 annotations: List[Annotation] = None,
+                 source: str = None,
+                 line: int = None):
         if name is not None:
             assert_member_name_valid(name)
 
         self.name = name
         self.args = args or []
         self.signature = ''.join(arg.signature for arg in self.args)
+        self.annotations = annotations if annotations is not None else []
+        self.source = source
+        self.line = line
 
     def from_xml(element):
         """Convert an :class:`xml.etree.ElementTree.Element` to a :class:`Signal`.
@@ -130,7 +294,12 @@ class Signal:
             if child.tag == 'arg':
                 args.append(Arg.from_xml(child, ArgDirection.OUT))
 
-        signal = Signal(name, args)
+        source, line = _provenance(element)
+        signal = Signal(name,
+                        args,
+                        annotations=_annotations_from_xml(element, source=source),
+                        source=source,
+                        line=line)
 
         return signal
 
@@ -142,6 +311,8 @@ class Signal:
 
         for arg in self.args:
             element.append(arg.to_xml())
+        for annotation in self.annotations:
+            element.append(annotation.to_xml())
 
         return element
 
@@ -163,7 +334,13 @@ class Method:
     :raises:
         - :class:`InvalidMemberNameError <dbus_next.InvalidMemberNameError>` - If the name of this method is not valid.
     """
-    def __init__(self, name: str, in_args: List[Arg] = [], out_args: List[Arg] = []):
+    def __init__(self,
+                 name: str,
+                 in_args: List[Arg] = [],
+                 out_args: List[Arg] = [],
+                 annotations: List[Annotation] = None,
+                 source: str = None,
+                 line: int = None):
         assert_member_name_valid(name)
 
         self.name = name
@@ -171,6 +348,9 @@ class Method:
         self.out_args = out_args
         self.in_signature = ''.join(arg.signature for arg in in_args)
         self.out_signature = ''.join(arg.signature for arg in out_args)
+        self.annotations = annotations if annotations is not None else []
+        self.source = source
+        self.line = line
 
     def from_xml(element: ET.Element) -> 'Method':
         """Convert an :class:`xml.etree.ElementTree.Element` to a :class:`Method`.
@@ -201,7 +381,13 @@ class Method:
                 elif direction == ArgDirection.OUT:
                     out_args.append(arg)
 
-        return Method(name, in_args, out_args)
+        source, line = _provenance(element)
+        return Method(name,
+                      in_args,
+                      out_args,
+                      annotations=_annotations_from_xml(element, source=source),
+                      source=source,
+                      line=line)
 
     def to_xml(self) -> ET.Element:
         """Convert this :class:`Method` into an :class:`xml.etree.ElementTree.Element`.
@@ -213,6 +399,8 @@ class Method:
             element.append(arg.to_xml())
         for arg in self.out_args:
             element.append(arg.to_xml())
+        for annotation in self.annotations:
+            element.append(annotation.to_xml())
 
         return element
 
@@ -238,7 +426,10 @@ class Property:
     def __init__(self,
                  name: str,
                  signature: str,
-                 access: PropertyAccess = PropertyAccess.READWRITE):
+                 access: PropertyAccess = PropertyAccess.READWRITE,
+                 annotations: List[Annotation] = None,
+                 source: str = None,
+                 line: int = None):
         assert_member_name_valid(name)
 
         tree = SignatureTree._get(signature)
@@ -250,6 +441,9 @@ class Property:
         self.signature = signature
         self.access = access
         self.type = tree.types[0]
+        self.annotations = annotations if annotations is not None else []
+        self.source = source
+        self.line = line
 
     def from_xml(element):
         """Convert an :class:`xml.etree.ElementTree.Element` to a :class:`Property`.
@@ -271,7 +465,13 @@ class Property:
         if not signature:
             raise InvalidIntrospectionError('properties must have a "type" attribute')
 
-        return Property(name, signature, access)
+        source, line = _provenance(element)
+        return Property(name,
+                        signature,
+                        access,
+                        annotations=_annotations_from_xml(element, source=source),
+                        source=source,
+                        line=line)
 
     def to_xml(self) -> ET.Element:
         """Convert this :class:`Property` into an :class:`xml.etree.ElementTree.Element`.
@@ -280,6 +480,8 @@ class Property:
         element.set('name', self.name)
         element.set('type', self.signature)
         element.set('access', self.access.value)
+        for annotation in self.annotations:
+            element.append(annotation.to_xml())
         return element
 
 
@@ -305,13 +507,19 @@ class Interface:
                  name: str,
                  methods: List[Method] = None,
                  signals: List[Signal] = None,
-                 properties: List[Property] = None):
+                 properties: List[Property] = None,
+                 annotations: List[Annotation] = None,
+                 source: str = None,
+                 line: int = None):
         assert_interface_name_valid(name)
 
         self.name = name
         self.methods = methods if methods is not None else []
         self.signals = signals if signals is not None else []
         self.properties = properties if properties is not None else []
+        self.annotations = annotations if annotations is not None else []
+        self.source = source
+        self.line = line
 
     @staticmethod
     def from_xml(element: ET.Element) -> 'Interface':
@@ -330,7 +538,11 @@ class Interface:
         if not name:
             raise InvalidIntrospectionError('interfaces must have a "name" attribute')
 
-        interface = Interface(name)
+        source, line = _provenance(element)
+        interface = Interface(name,
+                              annotations=_annotations_from_xml(element, source=source),
+                              source=source,
+                              line=line)
 
         for child in element:
             if child.tag == 'method':
@@ -354,6 +566,8 @@ class Interface:
             element.append(signal.to_xml())
         for prop in self.properties:
             element.append(prop.to_xml())
+        for annotation in self.annotations:
+            element.append(annotation.to_xml())
 
         return element
 
@@ -392,6 +606,8 @@ class Node:
         self.nodes = []
         self.name = name
         self.is_root = is_root
+        self.source = None
+        self.line = None
 
     @staticmethod
     def from_xml(element: ET.Element, is_root: bool = False):
@@ -408,6 +624,7 @@ class Node:
             - :class:`InvalidIntrospectionError <dbus_next.InvalidIntrospectionError>` - If the XML tree is not valid introspection data.
         """
         node = Node(element.attrib.get('name'), is_root=is_root)
+        node.source, node.line = _provenance(element)
 
         for child in element:
             if child.tag == 'interface':
@@ -418,23 +635,31 @@ class Node:
         return node
 
     @staticmethod
-    def parse(data: str) -> 'Node':
+    def parse(data: str, source: str = None) -> 'Node':
         """Parse XML data as a string into a :class:`Node`.
 
         The string must be valid DBus introspection XML.
 
         :param data: The XMl string.
         :type data: str
+        :param source: An optional label for the document (for example the
+            bus name and path, or a filename). It is retained on the parsed
+            objects and copied into comparison reports so annotation and
+            strategy decisions can point back to their origin.
+        :type source: str
 
         :raises:
             - :class:`InvalidIntrospectionError <dbus_next.InvalidIntrospectionError>` - If the string is not valid introspection data.
         """
-        element = ET.fromstring(data)
+        element = _parse_xml_with_provenance(data, source=source)
         if element.tag != 'node':
             raise InvalidIntrospectionError(
                 'introspection data must have a "node" for the root element')
 
-        return Node.from_xml(element, is_root=True)
+        node = Node.from_xml(element, is_root=True)
+        if source is not None:
+            node.source = source
+        return node
 
     def to_xml(self) -> ET.Element:
         """Convert this :class:`Node` into an :class:`xml.etree.ElementTree.Element`.
