@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.coverage.run]
+source = ["imaplib2/tests"]
+source_pkgs = ["imaplib2"]
+
+[tool.coverage.paths]
+source = [
+    ".",
+    ".tox/*/lib/*/site-packages/",
+    '.tox\\*\\Lib\\site-packages\\',
+]
+
+[tool.codespell]
+# Ref: https://github.com/codespell-project/codespell#using-a-config-file
+skip = '.git*'
+check-hidden = true
+# ignore-regex = ''
+ignore-words-list = 'donn'
