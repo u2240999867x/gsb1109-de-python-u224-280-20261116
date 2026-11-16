@@ -21,6 +21,9 @@ __all__ = [
     "KMLParseError",
     "KMLSchemaError",
     "KMLWriteError",
+    "NetworkLinkError",
+    "QueryParameterCollisionError",
+    "UnresolvedTemplateVariablesError",
 ]
 
 
@@ -43,3 +46,15 @@ class KMLSchemaError(FastKMLError):
 # geometry and kml_coordinates are mutually exclusive
 class GeometryError(FastKMLError):
     """Raised when there is an error with the geometry."""
+
+
+class NetworkLinkError(FastKMLError):
+    """Raised when a NetworkLink request URL cannot be built."""
+
+
+class QueryParameterCollisionError(NetworkLinkError):
+    """Raised when a rendered query parameter collides with an existing one."""
+
+
+class UnresolvedTemplateVariablesError(NetworkLinkError):
+    """Raised when a complete URL is required but template variables are unresolved."""
