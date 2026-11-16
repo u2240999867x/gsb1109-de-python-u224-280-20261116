@@ -1,0 +1,31 @@
+{
+  "device": "core-sw-1",
+  "interfaces": [
+    {"ifIndex": 1, "ifName": "Gi0/1", "ifType": "ethernetCsmacd", "role": "uplink"},
+    {"ifIndex": 2, "ifName": "Po1", "ifType": "ieee8023adLag", "role": "uplink"},
+    {"ifIndex": 3, "ifName": "Gi0/3", "ifType": "ethernetCsmacd", "role": "access"},
+    {"ifIndex": 4, "ifName": "Gi0/4", "ifType": "ethernetCsmacd", "role": "access"},
+    {"ifIndex": 11, "ifName": "Vlan100", "ifType": "propVirtual"},
+    {"ifIndex": 12, "ifName": "Gi0/9.100", "ifType": "propVirtual"}
+  ],
+  "ifStack": [
+    {"higher": 11, "lower": 1},
+    {"higher": 2, "lower": 3},
+    {"higher": 2, "lower": 4}
+  ],
+  "counters": {
+    "1": {"ifHCInOctets": 900000, "ifHCOutOctets": 450000},
+    "2": {"ifHCInOctets": 300000, "ifHCOutOctets": 120000},
+    "3": {"ifHCInOctets": 100000, "ifHCOutOctets": 40000},
+    "4": {"ifHCInOctets": 200000, "ifHCOutOctets": 80000},
+    "11": {"ifHCInOctets": 700000, "ifHCOutOctets": 300000},
+    "12": {"ifHCInOctets": 5000, "ifHCOutOctets": 2000}
+  },
+  "metering": {
+    "layer": {"ifTypes": ["ethernetCsmacd"]},
+    "items": [
+      {"name": "uplink", "select": {"roles": ["uplink"]}},
+      {"name": "access", "select": {"roles": ["access"]}}
+    ]
+  }
+}
