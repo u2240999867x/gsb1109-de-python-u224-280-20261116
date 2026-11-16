@@ -149,6 +149,37 @@ were popped (because the new segment ended them) and which were
 pushed (because the new segment started them). The context reader uses
 those lists to keep its data tree in sync.
 
+837 HL reconciliation
+---------------------
+
+Each 837 claim hierarchy is an ``HL`` tree. An ``HL`` segment makes two
+attribution statements at once:
+
+* ``HL02`` names the parent's hierarchical id number (an intra-transaction
+  reference that only resolves inside the owning ``ST``), and
+* the implementation-guide loop the segment sits in — ``2000A`` billing
+  provider (level ``20``), ``2000B`` subscriber (``22``), ``2000C``
+  patient (``23``) — fixes which parent levels that loop may hang off, and
+  ``HL04`` states whether the node has children.
+
+A submitted file can make those statements disagree (e.g. a patient-level
+``HL`` whose ``HL02`` points at the billing provider).
+:func:`pyx12.hl_reconcile.reconcile` is the offline entry for auditing
+such files: it reads the stream without moving or rewriting any segment,
+keeps the original segment text on every report, and lists each conflict
+with the reasons it fails (parent level not allowed, child-code
+contradiction, dangling / cross-transaction parent, cycle, …).
+
+The caller supplies only the ``HL02`` corrections it is willing to accept
+(:class:`pyx12.hl_reconcile.AllowedCorrection`, each with a cost). The
+module searches for the minimum-cost assignment where level code, child
+code and loop placement all hold simultaneously. When several solutions
+tie, only the parent assignments they all share are auto-confirmed; the
+remainder are returned as pending candidates for manual review. If no
+authorized assignment is legal — or an id is missing/duplicated — the
+original declarations are reported as contradictions rather than hidden
+by moving segments or editing business values.
+
 Error tree
 ----------
 

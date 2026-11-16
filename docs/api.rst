@@ -54,6 +54,11 @@ Top-level driver
 - :doc:`api/pyx12/x12metadata/index` — extract interchange / functional group / transaction metadata
 - :doc:`api/pyx12/params/index` — runtime parameters and config-file loading
 
+Offline reconciliation
+----------------------
+
+- :doc:`api/pyx12/hl_reconcile/index` — 837 HL parent vs. guideline loop conflict report and minimum-cost correction
+
 .. toctree::
    :hidden:
    :maxdepth: 4
