@@ -1,0 +1,43 @@
+exclude: (test_files|_static)
+
+ci:
+  autoupdate_schedule: "monthly"
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-added-large-files
+      - id: check-case-conflict
+      - id: check-merge-conflict
+      - id: check-symlinks
+      - id: check-yaml
+      - id: debug-statements
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+      - id: trailing-whitespace
+  - repo: https://github.com/codespell-project/codespell
+    rev: v2.4.3
+    hooks:
+      - id: codespell
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.17.3
+    hooks:
+      - id: ruff-check
+        files: pynetdicom
+        # ignore some warnings:
+        # - raw Exception catch and exception pass without logging
+        #   (used for generic outer scope exception handling)
+        # - type check w/o type error (fixing would change the API)
+        args: ["--fix", "--show-fixes", "--ignore=BLE001,TRY004,S110"]
+  - repo: https://github.com/psf/black-pre-commit-mirror
+    rev: 26.10.1
+    hooks:
+      - id: black
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v2.4.1
+    hooks:
+      - id: mypy
+        files: src
+        args: []
+        additional_dependencies: ["types-requests"]
