@@ -134,6 +134,7 @@ Are you a **scientist** or researcher? Pooch can help you too!
     progressbars.rst
     unpacking.rst
     decompressing.rst
+    shared-files.rst
 
 .. toctree::
     :caption: Reference

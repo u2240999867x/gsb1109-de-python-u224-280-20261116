@@ -18,6 +18,7 @@ from typing import Any, Optional, Union
 
 from .downloaders import DOIDownloader, choose_downloader, doi_to_repository
 from .hashes import file_hash, hash_matches
+from .references import SharedFileRegistry
 from .typing import Action, Downloader, PathInputType, PathType, Processor
 from .utils import (
     cache_location,
@@ -265,6 +266,7 @@ def create(
     urls: Optional[dict] = None,
     retry_if_failed: int = 0,
     allow_updates: Union[bool, str] = True,
+    name: Optional[str] = None,
 ):
     """
     Create a :class:`~pooch.Pooch` with sensible defaults to fetch data files.
@@ -336,6 +338,10 @@ def create(
         will be checked for the true/false value. If ``False``, any mismatch
         with hashes in the registry will result in an error. Defaults to
         ``True``.
+    name : str or None
+        Identifier of the data package, used to distinguish references to
+        files shared between several packages pointing at the same cache
+        directory. If None, the final component of *path* is used.
 
     Returns
     -------
@@ -434,6 +440,7 @@ def create(
         urls=urls,
         retry_if_failed=retry_if_failed,
         allow_updates=allow_updates,
+        name=name,
     )
     return pup
 
@@ -476,6 +483,11 @@ class Pooch:
         the registry are allowed to update from the remote URL. If ``False``,
         any mismatch with hashes in the registry will result in an error.
         Defaults to ``True``.
+    name : str or None
+        Identifier of the data package owning this registry. It is used to
+        distinguish references to files shared between several packages. If
+        None, the final component of *path* is used. Packages that point at the
+        same cache directory should pass distinct, stable names.
 
     """
 
@@ -487,6 +499,7 @@ class Pooch:
         urls: Optional[dict[str, str]] = None,
         retry_if_failed: int = 0,
         allow_updates: bool = True,
+        name: Optional[str] = None,
     ) -> None:
         self.path = path
         self.base_url = base_url
@@ -498,6 +511,10 @@ class Pooch:
         self.urls = dict(urls)
         self.retry_if_failed = retry_if_failed
         self.allow_updates = allow_updates
+        if name is None:
+            name = os.path.basename(os.path.normpath(os.path.abspath(str(path))))
+        self.name = name
+        self._references: Optional[SharedFileRegistry] = None
 
     @property
     def abspath(self) -> Path:
@@ -508,6 +525,100 @@ class Pooch:
     def registry_files(self) -> list[str]:
         "List of file names on the registry"
         return list(self.registry)
+
+    @property
+    def references(self) -> SharedFileRegistry:
+        """
+        Persistent reference registry for files in the local storage.
+
+        The same instance is returned on every access so reference counts are
+        shared across calls on this :class:`Pooch`.
+        """
+        if self._references is None:
+            self._references = SharedFileRegistry(self.abspath)
+        return self._references
+
+    def _owner_of(self, fname: str) -> str:
+        """
+        Build the reference owner identifier for a registry entry.
+        """
+        return f"{self.name}:{fname}"
+
+    def track(self, fname: str) -> str:
+        """
+        Record that this package references a registry file.
+
+        Call this once a file (or a processor output derived from it) is in
+        use. Tracking the same file several times is idempotent: the package
+        counts as a single owner.
+
+        Parameters
+        ----------
+        fname : str
+            File name as listed in the registry.
+
+        Returns
+        -------
+        full_path : str
+            The absolute path of the tracked file.
+        """
+        self._assert_file_in_registry(fname)
+        full_path = str(self.abspath / fname)
+        self.references.add(full_path, self._owner_of(fname))
+        return full_path
+
+    def untrack(self, fname: str, cleanup: bool = True) -> bool:
+        """
+        Remove this package's reference to a registry file.
+
+        The file on disk is only deleted when no other package references it.
+        When the file is shared, its remaining owners keep it untouched.
+
+        Parameters
+        ----------
+        fname : str
+            File name as listed in the registry.
+        cleanup : bool
+            If True (default), delete the file and prune emptied directories
+            once the last reference is gone.
+
+        Returns
+        -------
+        deleted : bool
+            True if the file was removed from disk, False if it is still
+            referenced (or was never tracked by this package).
+        """
+        full_path = str(self.abspath / fname)
+        return self.references.remove(
+            full_path, self._owner_of(fname), cleanup=cleanup
+        )
+
+    def remove_registry_file(self, fname: str, cleanup: bool = True) -> bool:
+        """
+        Remove a material from this package version only.
+
+        The registry entry is dropped and this package's reference to the file
+        is released. A file still referenced by another package sharing the
+        cache directory is kept in place.
+
+        Parameters
+        ----------
+        fname : str
+            File name as listed in the registry.
+        cleanup : bool
+            If True (default), delete the file once it becomes unreferenced.
+
+        Returns
+        -------
+        deleted : bool
+            True if the underlying file was removed, False if another package
+            still uses it.
+        """
+        self._assert_file_in_registry(fname)
+        deleted = self.untrack(fname, cleanup=cleanup)
+        self.registry.pop(fname, None)
+        self.urls.pop(fname, None)
+        return deleted
 
     def fetch(
         self,
@@ -601,6 +712,10 @@ class Pooch:
                 pooch=self,
                 retry_if_failed=self.retry_if_failed,
             )
+
+        # Record that this package relies on the file so it is not removed
+        # while another package version still needs it.
+        self.track(fname)
 
         if processor is not None:
             return processor(str(full_path), action, self)

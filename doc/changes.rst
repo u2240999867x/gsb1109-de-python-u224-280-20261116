@@ -3,6 +3,26 @@
 Changelog
 =========
 
+Unreleased
+----------
+
+New features:
+
+* Add explicit conflict handling and root-constrained extraction to the
+  :class:`pooch.Unzip` and :class:`pooch.Untar` processors. Archive members
+  are now resolved against the extraction directory and members that would
+  escape it through ``..`` traversal, absolute paths or drive letters raise a
+  :class:`ValueError`. Duplicate members (or names normalizing to the same
+  path) are handled through a new ``on_conflict`` argument with the explicit
+  strategies ``"error"`` (default), ``"overwrite"`` and ``"skip"``, exposed as
+  :data:`pooch.CONFLICT_STRATEGIES`.
+* Add :class:`pooch.SharedFileRegistry` to reference-count files shared by
+  several data packages in the same cache directory. :meth:`pooch.Pooch.fetch`
+  tracks references automatically and the new
+  :meth:`pooch.Pooch.remove_registry_file` removes a material from the current
+  package version only; a file still referenced by another package is kept on
+  disk and deleted once the last reference is released.
+
 Version 1.9.0
 -------------
 

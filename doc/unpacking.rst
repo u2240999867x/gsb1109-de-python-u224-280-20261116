@@ -74,3 +74,34 @@ To extract all files into a folder and return the path to each file, omit the
 
 Use :class:`pooch.Untar` to do the exact same for tar archives (with optional
 compression).
+
+Safe extraction and duplicate members
+-------------------------------------
+
+Archives are always extracted inside the output folder: member names that
+resolve outside of it through ``..`` traversal, absolute paths or Windows
+drive letters raise a :class:`ValueError` instead of writing files elsewhere
+on disk. Both ``/`` and ``\\`` separators are normalized, so backslash-based
+traversal is blocked on every platform.
+
+An archive can contain two members that end up at the same output path, either
+because the same name appears twice or because distinct names normalize to the
+same file (for example ``a/data.txt`` and ``./a/data.txt``). The
+``on_conflict`` argument selects the strategy explicitly:
+
+* ``on_conflict="error"`` (the default): raise a :class:`ValueError` so the
+  ambiguity is never resolved silently.
+* ``on_conflict="overwrite"``: the last member wins, matching the traditional
+  ``extractall`` behaviour.
+* ``on_conflict="skip"``: the first member wins and later duplicates are
+  ignored.
+
+.. code:: python
+
+    # Keep the first copy of every duplicated member
+    fnames = GOODBOY.fetch(
+        "zipped-archive.zip",
+        processor=Unzip(on_conflict="skip"),
+    )
+
+The available strategies are also exposed as :data:`pooch.CONFLICT_STRATEGIES`.

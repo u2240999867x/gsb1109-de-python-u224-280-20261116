@@ -15,12 +15,177 @@ import gzip
 import lzma
 import os
 import shutil
-import sys
 import typing
 from tarfile import TarFile
 from zipfile import ZipFile
 
 from .utils import get_logger
+
+
+# Conflict resolution strategies for archive members that would end up writing
+# to the same location on disk (duplicate members, or distinct member names
+# that normalize to the same output path).
+CONFLICT_STRATEGIES = ("error", "overwrite", "skip")
+
+
+def _normalize_member_name(member_name):
+    """
+    Normalize an archive member name using Unix-style path semantics.
+
+    Both ``/`` and ``\\`` separators are handled so backslash-based traversal
+    cannot slip through on POSIX systems.
+    """
+    return os.path.normpath(str(member_name).replace("\\", "/"))
+
+
+def _resolve_member_path(extract_dir, member_name):
+    """
+    Resolve an archive member name to an output path constrained to the root.
+
+    The member name is normalized and joined to *extract_dir*. A
+    :class:`ValueError` is raised if the resolved path escapes *extract_dir*
+    through absolute paths, drive letters or ``..`` directory traversal.
+
+    Parameters
+    ----------
+    extract_dir : str or pathlib.Path
+        Root directory the output path must stay within.
+    member_name : str
+        Member name as stored in the archive.
+
+    Returns
+    -------
+    destination : str
+        The absolute, root-constrained path the member would be written to.
+    """
+    root = os.path.abspath(os.fspath(extract_dir))
+    normalized = _normalize_member_name(member_name)
+    if os.path.isabs(str(member_name)) or os.path.splitdrive(str(member_name))[0]:
+        # An absolute member (or a Windows drive letter) must be rebased onto
+        # the extraction root instead of writing to its original location.
+        normalized = normalized.lstrip(os.path.sep)
+    destination = os.path.abspath(os.path.join(root, normalized))
+    if destination != root and not destination.startswith(root + os.path.sep):
+        message = (
+            f"Illegal archive member '{member_name}': it resolves outside of "
+            f"the extraction directory '{root}'."
+        )
+        raise ValueError(message)
+    return destination
+
+
+def _expand_requested_members(available_names, requested):
+    """
+    Expand requested member names against the archive's member list.
+
+    A requested name matches the identically named archive member and, for
+    directories, every member nested below it. Comparisons use normalized
+    names, so leading ``./`` segments and mixed separators are supported.
+
+    Parameters
+    ----------
+    available_names : list of str
+        Normalized names of every member in the archive, in archive order.
+    requested : list of str or None
+        Member names requested by the user. If None or empty, every available
+        member is returned.
+
+    Returns
+    -------
+    selected : list of str
+        The normalized archive names to extract, preserving archive order.
+    """
+    if not requested:
+        return list(available_names)
+    wanted = [_normalize_member_name(name) for name in requested]
+    selected = []
+    for available in available_names:
+        for name in wanted:
+            if available == name or available.startswith(name + os.path.sep):
+                selected.append(available)
+                break
+    return selected
+
+
+def _build_extraction_manifest(member_records, extract_dir, on_conflict):
+    """
+    Build a root-constrained manifest of what an extraction must write.
+
+    Each record is a ``(name, kind, payload)`` tuple where *kind* is
+    ``"file"`` or ``"dir"`` and *payload* is a callable taking the
+    destination path and materializing the member there (or ``None`` for
+    directories).
+
+    Parameters
+    ----------
+    member_records : iterable of tuple
+        The archive members in their original order.
+    extract_dir : str or pathlib.Path
+        Root directory for the extraction.
+    on_conflict : str
+        Strategy when two members resolve to the same output path:
+
+        * ``"error"``: raise :class:`ValueError`.
+        * ``"overwrite"``: keep the last member, mirroring the historical
+          behaviour of ``extractall``.
+        * ``"skip"``: keep the first member and ignore later duplicates.
+
+    Returns
+    -------
+    manifest : dict
+        Mapping of normalized absolute destination paths to
+        ``(destination, kind, payload)`` entries in first-seen order.
+    """
+    if on_conflict not in CONFLICT_STRATEGIES:
+        message = (
+            f"Invalid conflict strategy '{on_conflict}'. Must be one of "
+            f"{list(CONFLICT_STRATEGIES)}."
+        )
+        raise ValueError(message)
+    manifest = {}
+    for member_name, kind, payload in member_records:
+        destination = _resolve_member_path(extract_dir, member_name)
+        destination_key = os.path.normcase(os.path.abspath(destination))
+        if destination_key in manifest:
+            if on_conflict == "error":
+                message = (
+                    f"Duplicate archive member '{member_name}' resolves to "
+                    f"'{destination}' which is already provided by another "
+                    "member. Choose an explicit 'on_conflict' strategy "
+                    f"({list(CONFLICT_STRATEGIES)})."
+                )
+                raise ValueError(message)
+            if on_conflict == "skip":
+                get_logger().info(
+                    "Skipping duplicate archive member '%s' ('%s' exists).",
+                    member_name,
+                    destination,
+                )
+                continue
+            get_logger().info(
+                "Overwriting '%s' with duplicate archive member '%s'.",
+                destination,
+                member_name,
+            )
+        manifest[destination_key] = (destination, kind, payload)
+    return manifest
+
+
+def _materialize_manifest(manifest):
+    """
+    Write the members described by *manifest* to disk.
+
+    Directories are created first so file payloads can rely on them.
+    """
+    for destination, kind, _ in manifest.values():
+        if kind == "dir":
+            os.makedirs(destination, exist_ok=True)
+    for destination, kind, payload in manifest.values():
+        if kind == "file":
+            parent = os.path.dirname(destination)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            payload(destination)
 
 
 class ExtractorProcessor(abc.ABC):
@@ -44,12 +209,33 @@ class ExtractorProcessor(abc.ABC):
         Otherwise, files will be unpacked to ``extract_dir``, which is
         interpreted as a *relative path* (relative to the cache location
         provided by :func:`pooch.retrieve` or :meth:`pooch.Pooch.fetch`).
+    on_conflict : str
+        Strategy used when two archive members resolve to the same output
+        path inside the extraction directory (duplicate members or names that
+        normalize to the same file). One of:
+
+        * ``"error"`` (default): raise a :class:`ValueError` listing the
+          colliding members.
+        * ``"overwrite"``: the last member wins, matching the traditional
+          ``extractall`` behaviour.
+        * ``"skip"``: the first member wins and later duplicates are ignored.
+
+        Members whose resolved path would escape the extraction directory
+        through ``..`` traversal, absolute paths or drive letters are always
+        rejected with a :class:`ValueError`, regardless of this setting.
 
     """
 
-    def __init__(self, members=None, extract_dir=None):
+    def __init__(self, members=None, extract_dir=None, on_conflict="error"):
+        if on_conflict not in CONFLICT_STRATEGIES:
+            message = (
+                f"Invalid conflict strategy '{on_conflict}'. Must be one of "
+                f"{list(CONFLICT_STRATEGIES)}."
+            )
+            raise ValueError(message)
         self.members = members
         self.extract_dir = extract_dir
+        self.on_conflict = on_conflict
 
     @property
     @abc.abstractmethod
@@ -63,17 +249,25 @@ class ExtractorProcessor(abc.ABC):
     @abc.abstractmethod
     def _all_members(self, fname):
         """
-        Return all the members in the archive.
+        Return all the member names in the archive.
         MUST BE IMPLEMENTED BY CHILD CLASSES.
         """
 
     @abc.abstractmethod
     def _extract_file(self, fname, extract_dir):
         """
-        This method receives an argument for the archive to extract and the
-        destination path.
+        Extract the archive into *extract_dir* using a root-constrained
+        manifest and the configured conflict strategy.
         MUST BE IMPLEMENTED BY CHILD CLASSES.
         """
+
+    def _selected_members(self, fname):
+        """
+        Return the member names this processor is configured to unpack.
+        """
+        if self.members is None or not self.members:
+            return self._all_members(fname)
+        return list(self.members)
 
     def __call__(self, fname, action, pooch):  # noqa: ARG002
         """
@@ -105,34 +299,43 @@ class ExtractorProcessor(abc.ABC):
         else:
             archive_dir = fname.rsplit(os.path.sep, maxsplit=1)[0]
             self.extract_dir = os.path.join(archive_dir, self.extract_dir)
-        # Get a list of everyone who is supposed to be in the unpacked folder
-        # so we can check if they are all there or if we need to extract new
-        # files.
-        if self.members is None or not self.members:
-            members = self._all_members(fname)
-        else:
-            members = self.members
+        # Resolve the expected members against the extraction root. A
+        # malicious member name raises here instead of probing arbitrary
+        # paths during the existence check.
+        members = self._selected_members(fname)
+        expected_paths = [
+            _resolve_member_path(self.extract_dir, member) for member in members
+        ]
         if (
             (action in ("update", "download"))
             or (not os.path.exists(self.extract_dir))
-            or not all(
-                os.path.exists(os.path.join(self.extract_dir, m)) for m in members
-            )
+            or not all(os.path.exists(path) for path in expected_paths)
         ):
             # Make sure that the folder with the extracted files exists
             os.makedirs(self.extract_dir, exist_ok=True)
             self._extract_file(fname, self.extract_dir)
 
-        # Get a list of all file names (including subdirectories) in our folder
-        # of unzipped files, filtered by the given members list
+        # Return the files owned by this extraction. Matching is done on
+        # absolute, root-constrained paths with a directory boundary so that
+        # similarly named siblings cannot leak into the result.
+        resolved_members = None
+        if self.members:
+            resolved_members = [
+                os.path.normcase(
+                    os.path.abspath(_resolve_member_path(self.extract_dir, m))
+                )
+                for m in self.members
+            ]
         fnames = []
         for path, _, files in os.walk(self.extract_dir):
             for filename in files:
-                relpath = os.path.normpath(
-                    os.path.join(os.path.relpath(path, self.extract_dir), filename)
+                full_path = os.path.normcase(
+                    os.path.abspath(os.path.join(path, filename))
                 )
-                if self.members is None or any(
-                    relpath.startswith(os.path.normpath(m)) for m in self.members
+                if resolved_members is None or any(
+                    full_path == member_path
+                    or full_path.startswith(member_path + os.path.sep)
+                    for member_path in resolved_members
                 ):
                     fnames.append(os.path.join(path, filename))
 
@@ -163,6 +366,10 @@ class Unzip(ExtractorProcessor):
         ``extract_dir``, which is interpreted as a *relative path* (relative to
         the cache location provided by :func:`pooch.retrieve` or
         :meth:`pooch.Pooch.fetch`).
+    on_conflict : str
+        Strategy used when two archive members resolve to the same output
+        path. See :class:`ExtractorProcessor` for the available options.
+        Defaults to ``"error"``.
 
     """
 
@@ -181,34 +388,49 @@ class Unzip(ExtractorProcessor):
 
     def _extract_file(self, fname, extract_dir):
         """
-        This method receives an argument for the archive to extract and the
-        destination path.
+        Extract the zip archive into *extract_dir* using a root-constrained
+        manifest and the configured conflict strategy.
         """
-        with ZipFile(fname, "r") as zip_file:
-            if self.members is None:
+        if self.members:
+            for member in self.members:
                 get_logger().info(
-                    "Unzipping contents of '%s' to '%s'", fname, extract_dir
+                    "Extracting '%s' from '%s' to '%s'",
+                    member,
+                    fname,
+                    extract_dir,
                 )
-                # Unpack all files from the archive into our new folder
-                zip_file.extractall(path=extract_dir)
-            else:
-                for member in self.members:
-                    get_logger().info(
-                        "Extracting '%s' from '%s' to '%s'", member, fname, extract_dir
-                    )
-                    # If the member is a dir, we need to get the names of the
-                    # elements it contains for extraction (ZipFile does not
-                    # support dirs on .extract). If it's not a dir, this will
-                    # only include the member itself.
-                    # Based on:
-                    # https://stackoverflow.com/questions/8008829/extract-only-a-single-directory-from-tar
-                    subdir_members = [
-                        name
-                        for name in zip_file.namelist()
-                        if os.path.normpath(name).startswith(os.path.normpath(member))
-                    ]
-                    # Extract the data file from within the archive
-                    zip_file.extractall(members=subdir_members, path=extract_dir)
+        else:
+            get_logger().info(
+                "Unzipping contents of '%s' to '%s'", fname, extract_dir
+            )
+        with ZipFile(fname, "r") as zip_file:
+            infos = zip_file.infolist()
+            available = [_normalize_member_name(info.filename) for info in infos]
+            # Use a set for membership checks but keep iterating the original
+            # infos so duplicate member names keep their distinct payloads.
+            selected = set(_expand_requested_members(available, self.members))
+            records = []
+            for info, normalized_name in zip(infos, available):
+                if normalized_name not in selected:
+                    continue
+                if info.is_dir():
+                    records.append((info.filename, "dir", None))
+                    continue
+
+                def make_payload(zip_info):
+                    def payload(destination):
+                        with zip_file.open(zip_info) as source, open(
+                            destination, "w+b"
+                        ) as output:
+                            shutil.copyfileobj(source, output)
+
+                    return payload
+
+                records.append((info.filename, "file", make_payload(info)))
+            manifest = _build_extraction_manifest(
+                records, extract_dir, self.on_conflict
+            )
+            _materialize_manifest(manifest)
 
 
 class Untar(ExtractorProcessor):
@@ -216,9 +438,8 @@ class Untar(ExtractorProcessor):
     Processor that unpacks a tar archive and returns a list of all files.
 
     Use with :meth:`pooch.Pooch.fetch` or :func:`pooch.retrieve` to untar a
-    downloaded data file into a folder in the local data store. The
-    method/function will return a list with the names of the extracted files
-    instead of the archive.
+    downloaded data file into a folder in the local data store. It will return
+    a list with the names of the extracted files instead of the archive.
 
     The output folder is ``{fname}.untar``.
 
@@ -236,6 +457,10 @@ class Untar(ExtractorProcessor):
         ``extract_dir``, which is interpreted as a *relative path* (relative to
         the cache location  provided by :func:`pooch.retrieve` or
         :meth:`pooch.Pooch.fetch`).
+    on_conflict : str
+        Strategy used when two archive members resolve to the same output
+        path. See :class:`ExtractorProcessor` for the available options.
+        Defaults to ``"error"``.
     """
 
     @property
@@ -253,41 +478,61 @@ class Untar(ExtractorProcessor):
 
     def _extract_file(self, fname, extract_dir):
         """
-        This method receives an argument for the archive to extract and the
-        destination path.
+        Extract the tar archive into *extract_dir* using a root-constrained
+        manifest and the configured conflict strategy.
         """
-        filter_kwarg = {} if sys.version_info < (3, 12) else {"filter": "data"}
-        with TarFile.open(fname, "r") as tar_file:
-            if self.members is None:
+        if self.members:
+            for member in self.members:
                 get_logger().info(
-                    "Untarring contents of '%s' to '%s'", fname, extract_dir
+                    "Extracting '%s' from '%s' to '%s'",
+                    member,
+                    fname,
+                    extract_dir,
                 )
-                # Unpack all files from the archive into our new folder
-                tar_file.extractall(path=extract_dir, **filter_kwarg)
-            else:
-                for member in self.members:
-                    get_logger().info(
-                        "Extracting '%s' from '%s' to '%s'", member, fname, extract_dir
+        else:
+            get_logger().info(
+                "Untarring contents of '%s' to '%s'", fname, extract_dir
+            )
+        with TarFile.open(fname, "r") as tar_file:
+            infos = tar_file.getmembers()
+            available = [_normalize_member_name(info.name) for info in infos]
+            # Keep iterating the original members so duplicate names retain
+            # their distinct payloads instead of being collapsed in a dict.
+            selected = set(_expand_requested_members(available, self.members))
+            records = []
+            for info, normalized_name in zip(infos, available):
+                if normalized_name not in selected:
+                    continue
+                if info.isdir():
+                    records.append((info.name, "dir", None))
+                elif info.isfile():
+
+                    def make_payload(tar_info):
+                        def payload(destination):
+                            source = tar_file.extractfile(tar_info)
+                            if source is None:
+                                message = (
+                                    f"Cannot read tar member '{tar_info.name}' "
+                                    "from the archive."
+                                )
+                                raise ValueError(message)
+                            with source, open(destination, "w+b") as output:
+                                shutil.copyfileobj(source, output)
+
+                        return payload
+
+                    records.append((info.name, "file", make_payload(info)))
+                else:
+                    message = (
+                        f"Unsupported tar member '{info.name}' of type "
+                        f"'{info.type.decode('ascii', errors='replace')}'. "
+                        "Only regular files and directories can be extracted."
                     )
-                    # If the member is a dir, we need to get the names of the
-                    # elements it contains for extraction (TarFile does not
-                    # support dirs on .extract). If it's not a dir, this will
-                    # only include the member itself.
-                    # Based on:
-                    # https://stackoverflow.com/questions/8008829/extract-only-a-single-directory-from-tar
-                    # Can't use .getnames because extractall expects TarInfo
-                    # objects.
-                    subdir_members = [
-                        info
-                        for info in tar_file.getmembers()
-                        if os.path.normpath(info.name).startswith(
-                            os.path.normpath(member)
-                        )
-                    ]
-                    # Extract the data file from within the archive
-                    tar_file.extractall(
-                        members=subdir_members, path=extract_dir, **filter_kwarg
-                    )
+                    raise ValueError(message)
+            manifest = _build_extraction_manifest(
+                records, extract_dir, self.on_conflict
+            )
+            _materialize_manifest(manifest)
 
 
 class Decompress:

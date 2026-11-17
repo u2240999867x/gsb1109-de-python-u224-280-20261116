@@ -8,18 +8,25 @@
 Test the processor hooks
 """
 
+import io
+import os
 import re
+import tarfile
+import uuid
+import warnings
+import zipfile
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import pytest
 
 from .. import Pooch
-from ..processors import Decompress, Untar, Unzip
+from ..processors import CONFLICT_STRATEGIES, Decompress, Untar, Unzip
 from .utils import capture_log, check_tiny_data, pooch_test_registry, pooch_test_url
 
 REGISTRY = pooch_test_registry()
 BASEURL = pooch_test_url()
+DATA_DIR = Path(__file__).parent / "data"
 
 
 @pytest.mark.network
@@ -285,3 +292,227 @@ def test_unpacking_wrong_members_then_no_members(processor_class, extension):
         processor2 = processor_class()
         filenames2 = pup.fetch("store" + extension, processor=processor2)
         assert len(filenames2) > 0
+
+
+# ----------------------------------------------------------------------------
+# Offline tests for root-constrained extraction and explicit conflict handling
+# ----------------------------------------------------------------------------
+
+
+def _write_zip(path, members):
+    """
+    Create a zip archive with the given ``(name, content)`` members.
+
+    Duplicate names are allowed so the conflict strategies can be exercised.
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        with zipfile.ZipFile(path, "w") as archive:
+            for name, content in members:
+                archive.writestr(name, content)
+
+
+def _write_tar(path, members):
+    """
+    Create an uncompressed tar archive with the given ``(name, content)``
+    members. Duplicate names are allowed.
+    """
+    with tarfile.TarFile(path, "w") as archive:
+        for name, content in members:
+            info = tarfile.TarInfo(name)
+            info.size = len(content)
+            archive.addfile(info, io.BytesIO(content))
+
+
+@pytest.fixture
+def archive_factory(tmp_path):
+    """Return functions that build zip/tar archives inside a temp directory."""
+
+    def build_zip(members, name="archive.zip"):
+        path = tmp_path / name
+        _write_zip(path, members)
+        return path
+
+    def build_tar(members, name="archive.tar"):
+        path = tmp_path / name
+        _write_tar(path, members)
+        return path
+
+    return build_zip, build_tar
+
+
+@pytest.mark.parametrize(
+    ("processor_class", "build_index"),
+    [(Unzip, 0), (Untar, 1)],
+    ids=["Unzip", "Untar"],
+)
+def test_extraction_blocks_directory_traversal(
+    archive_factory, tmp_path, processor_class, build_index
+):
+    "Members escaping the extraction root must raise instead of writing files"
+    build_archive = archive_factory[build_index]
+    archive = build_archive(
+        [
+            ("safe.txt", b"safe\n"),
+            ("../escape.txt", b"evil\n"),
+            ("sub/../../escape2.txt", b"evil2\n"),
+        ]
+    )
+    extract_dir = tmp_path / "output"
+    processor = processor_class(extract_dir=str(extract_dir))
+    with pytest.raises(ValueError, match="resolves outside of the extraction"):
+        processor(str(archive), "download", None)
+    assert not (tmp_path / "escape.txt").exists()
+    assert not (tmp_path / "escape2.txt").exists()
+
+
+@pytest.mark.parametrize(
+    ("processor_class", "build_index"),
+    [(Unzip, 0), (Untar, 1)],
+    ids=["Unzip", "Untar"],
+)
+def test_extraction_blocks_backslash_traversal(
+    archive_factory, tmp_path, processor_class, build_index
+):
+    "Backslash-based traversal must be normalized and blocked on every platform"
+    build_archive = archive_factory[build_index]
+    archive = build_archive([("..\\escape.txt", b"evil\n")])
+    extract_dir = tmp_path / "output"
+    processor = processor_class(extract_dir=str(extract_dir))
+    with pytest.raises(ValueError, match="resolves outside of the extraction"):
+        processor(str(archive), "download", None)
+    assert not (tmp_path / "escape.txt").exists()
+
+
+@pytest.mark.parametrize(
+    ("processor_class", "build_index"),
+    [(Unzip, 0), (Untar, 1)],
+    ids=["Unzip", "Untar"],
+)
+def test_absolute_members_are_rebased_onto_root(
+    archive_factory, tmp_path, processor_class, build_index
+):
+    "Absolute member names must be written inside the extraction directory"
+    build_archive = archive_factory[build_index]
+    member_name = f"/pooch-test-{uuid.uuid4().hex}.txt"
+    archive = build_archive([(member_name, b"inside\n")])
+    extract_dir = tmp_path / "output"
+    processor = processor_class(extract_dir=str(extract_dir))
+    fnames = processor(str(archive), "download", None)
+    expected_name = os.path.basename(member_name)
+    assert fnames == [str(extract_dir / expected_name)]
+    assert (extract_dir / expected_name).read_bytes() == b"inside\n"
+    assert not Path(member_name).exists()
+
+
+@pytest.mark.parametrize(
+    ("processor_class", "build_index"),
+    [(Unzip, 0), (Untar, 1)],
+    ids=["Unzip", "Untar"],
+)
+def test_duplicate_members_fail_by_default(
+    archive_factory, tmp_path, processor_class, build_index
+):
+    "Duplicate members must raise unless an explicit conflict strategy is set"
+    build_archive = archive_factory[build_index]
+    archive = build_archive(
+        [("dup.txt", b"first\n"), ("dup.txt", b"second\n")]
+    )
+    extract_dir = tmp_path / "output"
+    processor = processor_class(extract_dir=str(extract_dir))
+    with pytest.raises(ValueError, match="Duplicate archive member"):
+        processor(str(archive), "download", None)
+
+
+@pytest.mark.parametrize(
+    ("processor_class", "build_index"),
+    [(Unzip, 0), (Untar, 1)],
+    ids=["Unzip", "Untar"],
+)
+@pytest.mark.parametrize(
+    ("strategy", "expected"),
+    [("overwrite", b"second\n"), ("skip", b"first\n")],
+    ids=["overwrite-keeps-last", "skip-keeps-first"],
+)
+def test_duplicate_member_conflict_strategies(
+    archive_factory, tmp_path, processor_class, build_index, strategy, expected
+):
+    "The explicit conflict strategy decides which duplicate payload survives"
+    build_archive = archive_factory[build_index]
+    archive = build_archive(
+        [("dup.txt", b"first\n"), ("dup.txt", b"second\n")]
+    )
+    extract_dir = tmp_path / f"output-{strategy}"
+    processor = processor_class(
+        extract_dir=str(extract_dir), on_conflict=strategy
+    )
+    fnames = processor(str(archive), "download", None)
+    assert fnames == [str(extract_dir / "dup.txt")]
+    assert (extract_dir / "dup.txt").read_bytes() == expected
+
+
+@pytest.mark.parametrize(
+    ("processor_class", "build_index"),
+    [(Unzip, 0), (Untar, 1)],
+    ids=["Unzip", "Untar"],
+)
+def test_members_normalizing_to_same_path_conflict(
+    archive_factory, tmp_path, processor_class, build_index
+):
+    "Distinct names that normalize to one path are treated as duplicates"
+    build_archive = archive_factory[build_index]
+    archive = build_archive(
+        [("a/data.txt", b"first\n"), ("./a/data.txt", b"second\n")]
+    )
+    extract_dir = tmp_path / "output"
+    with pytest.raises(ValueError, match="Duplicate archive member"):
+        processor_class(extract_dir=str(extract_dir))(
+            str(archive), "download", None
+        )
+    surviving = tmp_path / "output-skip"
+    processor_class(extract_dir=str(surviving), on_conflict="skip")(
+        str(archive), "download", None
+    )
+    assert (surviving / "a" / "data.txt").read_bytes() == b"first\n"
+
+
+def test_invalid_conflict_strategy():
+    "Only documented strategies are accepted"
+    for processor_class in (Unzip, Untar):
+        with pytest.raises(ValueError, match="Invalid conflict strategy"):
+            processor_class(on_conflict="replace-everything")
+    assert CONFLICT_STRATEGIES == ("error", "overwrite", "skip")
+
+
+@pytest.mark.parametrize(
+    ("processor_class", "archive_name"),
+    [(Unzip, "store.zip"), (Untar, "store.tar.gz")],
+    ids=["Unzip", "Untar"],
+)
+def test_shipped_archives_unpack_offline(tmp_path, processor_class, archive_name):
+    "The safe extraction path handles the archives shipped with the test suite"
+    archive = DATA_DIR / archive_name
+    work_archive = tmp_path / archive_name
+    work_archive.write_bytes(archive.read_bytes())
+
+    processor = processor_class()
+    fnames = processor(str(work_archive), "download", None)
+    assert len(fnames) == 2
+    for fname in fnames:
+        check_tiny_data(fname)
+
+    # Member filtering, including a directory member and a leading ./ prefix
+    for members in (
+        ["store/tiny-data.txt"],
+        ["store/subdir"],
+        ["./store/subdir/tiny-data.txt"],
+    ):
+        member_processor = processor_class(members=members)
+        member_files = member_processor(str(work_archive), "download", None)
+        assert member_files
+        for fname in member_files:
+            check_tiny_data(fname)
+
+    # Re-running with action='fetch' must not re-extract and returns the files
+    cached = processor(str(work_archive), "fetch", None)
+    assert sorted(cached) == sorted(fnames)

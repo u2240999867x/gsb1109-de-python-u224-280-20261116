@@ -17,7 +17,8 @@ from .downloaders import (
     SFTPDownloader,
 )
 from .hashes import file_hash, make_registry
-from .processors import Decompress, Untar, Unzip
+from .processors import CONFLICT_STRATEGIES, Decompress, Untar, Unzip
+from .references import SharedFileRegistry
 from .utils import check_version, get_logger, os_cache
 
 # Add a "v" to the version number

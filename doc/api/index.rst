@@ -56,6 +56,15 @@ Processors
     pooch.Unzip
     pooch.Untar
     pooch.Decompress
+    pooch.CONFLICT_STRATEGIES
+
+Shared files
+------------
+
+.. autosummary::
+    :toctree: generated/
+
+    pooch.SharedFileRegistry
 
 Miscellaneous
 -------------
