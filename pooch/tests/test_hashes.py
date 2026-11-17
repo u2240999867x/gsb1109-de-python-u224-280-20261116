@@ -27,7 +27,9 @@ except ImportError:
 from ..core import Pooch
 from ..hashes import (
     file_hash,
+    file_size,
     hash_matches,
+    is_weak_verifier,
     make_registry,
 )
 from .utils import check_tiny_data, mirror_directory
@@ -186,6 +188,56 @@ def test_hash_matches_none():
     assert hash_matches(fname="", known_hash=None)
     # strict should cause an error if this wasn't working
     assert hash_matches(fname, known_hash=None, strict=True)
+
+
+def test_file_size():
+    "Check that the file size calculation matches the OS"
+    fname = os.path.join(DATA_DIR, "tiny-data.txt")
+    assert file_size(fname) == os.path.getsize(fname)
+
+
+def test_is_weak_verifier():
+    "Check the classification of weak (non-cryptographic) verifiers"
+    assert is_weak_verifier("size:123")
+    assert is_weak_verifier("etag:AbCdEf123")
+    # Algorithm names are case-insensitive
+    assert is_weak_verifier("SIZE:123")
+    assert is_weak_verifier("ETag:abc")
+    assert not is_weak_verifier(None)
+    assert not is_weak_verifier("sha256:abc123")
+    assert not is_weak_verifier(
+        "baee0894dba14b12085eacb204284b97e362f4f3e5a5807693cc90ef415c1b2d"
+    )
+
+
+def test_hash_matches_size():
+    "The size weak verifier only checks the file length"
+    fname = os.path.join(DATA_DIR, "tiny-data.txt")
+    size = os.path.getsize(fname)
+    assert hash_matches(fname, f"size:{size}")
+    assert hash_matches(fname, f"size:{size}", strict=True)
+    assert not hash_matches(fname, f"size:{size + 1}")
+    msg = re.escape(
+        f"Size of downloaded file (Neverland) does not match the known size:"
+        f" expected size:{size + 1}"
+    )
+    with pytest.raises(ValueError, match=msg):
+        hash_matches(fname, f"size:{size + 1}", strict=True, source="Neverland")
+
+
+def test_hash_matches_size_invalid():
+    "A non-integer size verifier should raise a helpful error"
+    fname = os.path.join(DATA_DIR, "tiny-data.txt")
+    msg = re.escape("Invalid size verifier 'size:abc'")
+    with pytest.raises(ValueError, match=msg):
+        hash_matches(fname, "size:abc")
+
+
+def test_hash_matches_etag():
+    "ETags cannot be recomputed from local contents so they never mismatch"
+    fname = os.path.join(DATA_DIR, "tiny-data.txt")
+    assert hash_matches(fname, "etag:AbCdEf123")
+    assert hash_matches(fname, "etag:AbCdEf123", strict=True)
 
 
 @pytest.mark.parametrize(

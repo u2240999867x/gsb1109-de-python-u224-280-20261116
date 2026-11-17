@@ -10,8 +10,10 @@ Test the core class and factory function.
 """
 
 import hashlib
+import io
 import os
 import re
+import shutil
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -687,3 +689,111 @@ def test_wrong_load_registry_from_doi():
     msg = "only implemented for DOIs"
     with pytest.raises(ValueError, match=msg):
         pup.load_registry_from_doi()
+
+
+def copy_local_file(url, output_file, pooch):  # noqa: ARG001
+    "Downloader that copies a local file (the URL is a local path)"
+    shutil.copy(url, output_file)
+
+
+def test_pooch_load_registry_weak_verifiers():
+    "Weak verifier claims are kept verbatim (ETags are case-sensitive)"
+    pup = Pooch(path="", base_url="", registry={})
+    strong_hash = "BAEE0894DBA14B12085EACB204284B97E362F4F3E5A5807693CC90EF415C1B2D"
+    registry_file = io.StringIO(
+        "tiny-data.txt etag:AbCdEf123\n"
+        "large-data.txt size:12345\n"
+        f"other-data.txt {strong_hash}\n"
+    )
+    pup.load_registry(registry_file)
+    # Weak verifier values are claims made by the source and must not be
+    # normalized
+    assert pup.registry["tiny-data.txt"] == "etag:AbCdEf123"
+    assert pup.registry["large-data.txt"] == "size:12345"
+    # Strong hashes are still lowercased for comparison
+    assert pup.registry["other-data.txt"] == strong_hash.lower()
+
+
+def test_pooch_weak_verifier_download():
+    "A weakly verified download logs a fresh strong hash, not the old claim"
+    data_file = "tiny-data.txt"
+    size = os.path.getsize(os.path.join(DATA_DIR, data_file))
+    with TemporaryDirectory() as local_store:
+        path = Path(local_store)
+        pup = Pooch(
+            path=path,
+            base_url=DATA_DIR + os.sep,
+            registry={data_file: f"size:{size}"},
+        )
+        with capture_log() as log_file:
+            fname = pup.fetch(data_file, downloader=copy_local_file)
+            logs = log_file.getvalue()
+        check_tiny_data(fname)
+        # The log must offer a freshly computed strong hash of the new bytes
+        # so the entry can be upgraded; the old weak credential is not the
+        # identity of the new version.
+        assert "weak verifier" in logs
+        assert file_hash(fname) in logs
+
+
+def test_pooch_weak_verifier_fetch(data_dir_mirror):
+    "A weak verifier match accepts the local file but cannot prove identity"
+    data_file = "tiny-data.txt"
+    fname = str(data_dir_mirror / data_file)
+    size = os.path.getsize(fname)
+
+    def failing_downloader(url, output_file, pooch):  # noqa: ARG001
+        msg = "The downloader should not be called."
+        raise AssertionError(msg)
+
+    pup = Pooch(
+        path=data_dir_mirror,
+        base_url="some bogus URL",
+        registry={data_file: f"size:{size}"},
+    )
+    with capture_log() as log_file:
+        assert pup.fetch(data_file, downloader=failing_downloader) == fname
+        logs = log_file.getvalue()
+    assert "weak verifier" in logs
+    check_tiny_data(fname)
+
+
+def test_pooch_weak_verifier_update():
+    "A weak verifier mismatch triggers an update of the local file"
+    data_file = "tiny-data.txt"
+    size = os.path.getsize(os.path.join(DATA_DIR, data_file))
+    with TemporaryDirectory() as local_store:
+        path = Path(local_store)
+        true_path = path / data_file
+        # Local copy with a different size than the registry claim
+        true_path.write_text("different data", encoding="utf-8")
+        pup = Pooch(
+            path=path,
+            base_url=DATA_DIR + os.sep,
+            registry={data_file: f"size:{size}"},
+        )
+        with capture_log() as log_file:
+            fname = pup.fetch(data_file, downloader=copy_local_file)
+            logs = log_file.getvalue()
+        assert logs.split()[0] == "Updating"
+        check_tiny_data(fname)
+
+
+def test_pooch_weak_verifier_upgrade(data_dir_mirror):
+    "Replacing a weak verifier with a trusted digest upgrades verification"
+    data_file = "tiny-data.txt"
+    fname = str(data_dir_mirror / data_file)
+    size = os.path.getsize(fname)
+    pup = Pooch(
+        path=data_dir_mirror,
+        base_url="some bogus URL",
+        registry={data_file: f"size:{size}"},
+    )
+    with capture_log() as log_file:
+        pup.fetch(data_file)
+        assert "weak verifier" in log_file.getvalue()
+    # Upgrade the entry to a trusted digest: no more weak verification
+    pup.registry[data_file] = file_hash(fname)
+    with capture_log() as log_file:
+        assert pup.fetch(data_file) == fname
+        assert log_file.getvalue() == ""

@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Optional, Union
 
 from .downloaders import DOIDownloader, choose_downloader, doi_to_repository
-from .hashes import file_hash, hash_matches
+from .hashes import file_hash, hash_matches, is_weak_verifier
 from .typing import Action, Downloader, PathInputType, PathType, Processor
 from .utils import (
     cache_location,
@@ -246,6 +246,20 @@ def retrieve(
                 "Use this value as the 'known_hash' argument of 'pooch.retrieve'"
                 " to ensure that the file hasn't changed if it is downloaded again"
                 " in the future.",
+                file_hash(str(full_path)),
+            )
+        elif is_weak_verifier(known_hash):
+            # The weak verifier cannot vouch for the identity of the new
+            # version, so compute a strong hash of the actual bytes to allow
+            # upgrading the entry to cryptographic verification.
+            get_logger().info(
+                "File '%s' was checked against weak verifier '%s', which cannot"
+                " prove that its bytes are identical to the source.\n"
+                "SHA256 hash of downloaded file: %s\n"
+                "Use this value as the 'known_hash' argument of 'pooch.retrieve'"
+                " to upgrade this file to cryptographic verification.",
+                fname,
+                known_hash,
                 file_hash(str(full_path)),
             )
 
@@ -602,6 +616,29 @@ class Pooch:
                 retry_if_failed=self.retry_if_failed,
             )
 
+            if is_weak_verifier(known_hash):
+                # The weak verifier cannot vouch for the identity of the new
+                # version, so compute a strong hash of the actual bytes to
+                # allow upgrading the registry entry to cryptographic
+                # verification.
+                get_logger().info(
+                    "File '%s' was checked against weak verifier '%s', which"
+                    " cannot prove that its bytes are identical to the source."
+                    " SHA256 hash of the downloaded file: %s. Pin this value"
+                    " in the registry to upgrade the entry to cryptographic"
+                    " verification.",
+                    fname,
+                    known_hash,
+                    file_hash(str(full_path)),
+                )
+        elif is_weak_verifier(known_hash):
+            get_logger().info(
+                "File '%s' matches weak verifier '%s', which cannot prove that"
+                " its bytes are identical to the source.",
+                fname,
+                known_hash,
+            )
+
         if processor is not None:
             return processor(str(full_path), action, self)
 
@@ -639,6 +676,12 @@ class Pooch:
         Each line of the file should have file name and its hash separated by
         a space. Hash can specify checksum algorithm using "alg:hash" format.
         In case no algorithm is provided, SHA256 is used by default.
+        Weak verifiers ``size:<bytes>`` and ``etag:<value>`` can be used for
+        files that don't have a trusted digest yet. They are kept verbatim
+        (their values are claims made by the source and ETags are
+        case-sensitive) and a match with them does not prove that the file
+        bytes are identical to the source. Replace them with a cryptographic
+        hash as soon as one is available.
         Only one file per line is allowed. Custom download URLs for individual
         files can be specified as a third element on the line. Line comments
         can be added and must be prepended with ``#``.
@@ -680,7 +723,13 @@ class Pooch:
                     if len(elements) == 3:
                         file_url = elements[2]
                         self.urls[file_name] = file_url
-                    self.registry[file_name] = file_checksum.lower()
+                    if is_weak_verifier(file_checksum):
+                        # Keep weak verifier claims verbatim: their values are
+                        # issued by the source and ETags are case-sensitive,
+                        # so normalizing them would corrupt the claim.
+                        self.registry[file_name] = file_checksum
+                    else:
+                        self.registry[file_name] = file_checksum.lower()
 
     def load_registry_from_doi(self) -> None:
         """

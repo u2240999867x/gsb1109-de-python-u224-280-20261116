@@ -12,6 +12,13 @@ import functools
 import hashlib
 from pathlib import Path
 
+# Verifiers that are not cryptographic hashes. They record claims made by the
+# data source (file size or ETag) when no trusted digest is available yet. A
+# match with a weak verifier does NOT prove that two files have the same
+# bytes, so they should be replaced by a proper hash as soon as one can be
+# obtained.
+WEAK_VERIFIERS = ("size", "etag")
+
 # From the docs: https://docs.python.org/3/library/hashlib.html#hashlib.new
 #   The named constructors are much faster than new() and should be
 #   preferred.
@@ -39,6 +46,66 @@ try:
     }
 except ImportError:
     pass
+
+
+def file_size(fname):
+    """
+    Calculate the size of a given file in bytes.
+
+    Useful as a weak integrity check when no cryptographic hash of the file
+    is available. Note that a matching size does not prove that two files
+    have the same contents.
+
+    Parameters
+    ----------
+    fname : str
+        The name of the file.
+
+    Returns
+    -------
+    size : int
+        The size of the file in bytes.
+
+    """
+    return Path(fname).stat().st_size
+
+
+def is_weak_verifier(hash_string):
+    """
+    Check if a hash string uses a weak (non-cryptographic) verifier.
+
+    Weak verifiers (see ``WEAK_VERIFIERS``) record claims made by the data
+    source, like the file size (``size:123``) or an ETag (``etag:abc123``),
+    for files that don't have a trusted digest yet. A match with a weak
+    verifier cannot prove that the file bytes are identical to the source.
+
+    Parameters
+    ----------
+    hash_string : str or None
+        The hash string with optional algorithm prepended.
+
+    Returns
+    -------
+    is_weak : bool
+        True if the hash string uses a weak verifier, False otherwise
+        (including if *hash_string* is None).
+
+    Examples
+    --------
+
+    >>> print(is_weak_verifier("size:12345"))
+    True
+    >>> print(is_weak_verifier("etag:2c6b3c42b1d4f7b"))
+    True
+    >>> print(is_weak_verifier("md5:70e2afd3fd7e336ae478b1e740a5f08e"))
+    False
+    >>> print(is_weak_verifier(None))
+    False
+
+    """
+    if hash_string is None:
+        return False
+    return hash_algorithm(hash_string) in WEAK_VERIFIERS
 
 
 def file_hash(fname, alg="sha256"):
@@ -149,13 +216,25 @@ def hash_matches(fname, known_hash, strict=False, source=None):
     Coverts hashes to lowercase before comparison to avoid system specific
     mismatches between hashes in the registry and computed hashes.
 
+    Besides cryptographic hashes, the *known_hash* can be a weak verifier
+    that records a claim made by the data source (see ``WEAK_VERIFIERS``):
+
+    * ``size:N``: the file size in bytes. Checked against the actual size of
+      the local file. A match only proves that the file has the expected
+      length, not that its bytes are identical to the source.
+    * ``etag:value``: an HTTP ETag issued by the server. ETags are opaque
+      labels that cannot be recomputed from the local file contents, so they
+      cannot be checked here and this function will always return True for
+      them (no evidence of a mismatch).
+
     Parameters
     ----------
     fname : str or PathLike
         The path to the file.
     known_hash : str
         The known hash. Optionally, prepend ``alg:`` to the hash to specify the
-        hashing algorithm. Default is SHA256.
+        hashing algorithm. Default is SHA256. Weak verifiers can be specified
+        as ``size:N`` or ``etag:value``.
     strict : bool
         If True, will raise a :class:`ValueError` if the hash does not match
         informing the user that the file may be corrupted.
@@ -174,17 +253,46 @@ def hash_matches(fname, known_hash, strict=False, source=None):
     if known_hash is None:
         return True
     algorithm = hash_algorithm(known_hash)
-    new_hash = file_hash(fname, alg=algorithm)
-    matches = new_hash.lower() == known_hash.split(":")[-1].lower()
+    if algorithm == "etag":
+        # ETags are opaque labels issued by the server and cannot be
+        # recomputed from the local file contents, so there is nothing that
+        # can be checked here. Return True (no evidence of a mismatch) and
+        # keep the original claim in the registry until a trusted digest can
+        # replace it.
+        return True
+    if algorithm == "size":
+        new_hash = file_size(fname)
+        known_size = known_hash.split(":")[-1]
+        try:
+            matches = new_hash == int(known_size)
+        except ValueError:
+            msg = (
+                f"Invalid size verifier '{known_hash}': expected "
+                "'size:<bytes>' with an integer number of bytes."
+            )
+            raise ValueError(msg) from None
+        new_hash = str(new_hash)
+    else:
+        new_hash = file_hash(fname, alg=algorithm)
+        matches = new_hash.lower() == known_hash.split(":")[-1].lower()
     if strict and not matches:
         if source is None:
             source = str(fname)
-        msg = (
-            f"{algorithm.upper()} hash of downloaded file ({source}) does not match"
-            f" the known hash: expected {known_hash} but got {new_hash}. Deleted"
-            " download for safety. The downloaded file may have been corrupted or"
-            " the known hash may be outdated."
-        )
+        if algorithm == "size":
+            msg = (
+                f"Size of downloaded file ({source}) does not match the known"
+                f" size: expected {known_hash} but got {new_hash} bytes."
+                " Deleted download for safety. The downloaded file may have"
+                " been corrupted or the known size may be outdated."
+            )
+        else:
+            msg = (
+                f"{algorithm.upper()} hash of downloaded file ({source}) does"
+                f" not match the known hash: expected {known_hash} but got"
+                f" {new_hash}. Deleted download for safety. The downloaded"
+                " file may have been corrupted or the known hash may be"
+                " outdated."
+            )
         raise ValueError(msg)
     return matches
 
