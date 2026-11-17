@@ -62,6 +62,14 @@ from psrpcore._exceptions import (
 from psrpcore._host import ClientHostResponder, ServerHostRequestor
 from psrpcore._payload import PSRPPayload, StreamType
 from psrpcore._pipeline import GetMetadata, PowerShell
+from psrpcore._recording import (
+    Contradiction,
+    EvidenceGap,
+    RecordedEvent,
+    RecordingOutcome,
+    RecordingReport,
+    check_recording,
+)
 from psrpcore._server import ServerPipeline, ServerRunspacePool
 
 __all__ = [
@@ -74,11 +82,13 @@ __all__ = [
     "ClixmlShell",
     "Command",
     "ConnectRunspacePoolEvent",
+    "Contradiction",
     "CreatePipelineEvent",
     "DebugRecordEvent",
     "EncryptedSessionKeyEvent",
     "EndOfPipelineInputEvent",
     "ErrorRecordEvent",
+    "EvidenceGap",
     "GetAvailableRunspacesEvent",
     "GetCommandMetadataEvent",
     "GetMetadata",
@@ -102,6 +112,9 @@ __all__ = [
     "PublicKeyEvent",
     "PublicKeyRequestEvent",
     "PSRemotingCrypto",
+    "RecordedEvent",
+    "RecordingOutcome",
+    "RecordingReport",
     "ResetRunspaceStateEvent",
     "RunspacePoolHostCallEvent",
     "RunspacePoolHostResponseEvent",
@@ -119,4 +132,5 @@ __all__ = [
     "UserEventEvent",
     "VerboseRecordEvent",
     "WarningRecordEvent",
+    "check_recording",
 ]
