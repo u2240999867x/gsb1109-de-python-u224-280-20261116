@@ -2,4 +2,8 @@
 #
 # Distributed under the BSD license, see LICENSE.txt
 
-from .pyquery import PyQuery  # NOQA
+from .pyquery import (  # NOQA
+    PyQuery,
+    StreamCacheLimitError,
+    fromstream,
+)

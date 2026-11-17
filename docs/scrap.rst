@@ -31,4 +31,33 @@ Session
 
 When using the requests library you can instantiate a Session object which keeps state between http calls (for example - to keep cookies). You can set the session parameter to use this session object.
 
+Streaming input
+---------------
+
+A response body that can only be read once can be handed over directly.
+Pass it as the ``stream`` keyword, as the only positional argument, or use
+``PyQuery.fromstream()``.  Only what the parser asks for is read from the
+source; the data is cached along the way so the XML-to-HTML fallback can
+replay it from the beginning without touching the source again::
+
+  >>> from io import BytesIO
+  >>> from pyquery import PyQuery as pq
+  >>> stream = BytesIO(b'<root><p>hello</p></root>')
+  >>> pq(stream=stream, parser='xml')('p').text()
+  'hello'
+  >>> stream.closed
+  False
+
+The stream is borrowed: the caller remains responsible for closing it.
+Internal caches and any temporary file are released whether parsing
+succeeds, fails, or reading raises.
+
+``cache_limit`` caps the in-memory cache in bytes.  By default exceeding
+it raises ``StreamCacheLimitError``; pass ``allow_tempfile=True`` to spill
+the overflow to an anonymous temporary file instead::
+
+  >>> pq(stream=BytesIO(b'<root>' + b'x' * 100 + b'</root>'),
+  ...    cache_limit=16, allow_tempfile=True)('root').text()
+  'xxxx...'
+
 .. _requests: http://docs.python-requests.org/en/latest/

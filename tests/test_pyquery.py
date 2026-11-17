@@ -1,6 +1,7 @@
 # Copyright (C) 2008 - Olivier Lauzanne <olauzanne@gmail.com>
 #
 # Distributed under the BSD license, see LICENSE.txt
+import io
 import os
 import sys
 import time
@@ -13,6 +14,9 @@ from webtest.debugapp import debug_app
 
 from pyquery.openers import HAS_REQUEST
 from pyquery.pyquery import PyQuery as pq
+from pyquery.pyquery import StreamCacheLimitError
+from pyquery.pyquery import _StreamCache
+from pyquery.pyquery import fromstream as fromstream_instance
 from pyquery.pyquery import no_default
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
@@ -1016,3 +1020,188 @@ class TestWebScrappingTimeouts(TestCase):
 
     def tearDown(self):
         self.s.shutdown()
+
+
+class NonSeekableStream:
+    """A forward-only stream that fails the test if seek() is used."""
+
+    def __init__(self, data, chunk_size=None):
+        self.data = data
+        self.pos = 0
+        self.chunk_size = chunk_size
+        self.reads = []
+        self.consumed = 0
+        self.closed = False
+
+    def read(self, size=-1):
+        if self.closed:
+            raise AssertionError('read() on a closed stream')
+        self.reads.append(size)
+        if size is None or size < 0:
+            size = len(self.data) - self.pos
+        if self.chunk_size is not None:
+            size = min(size, self.chunk_size)
+        chunk = self.data[self.pos:self.pos + size]
+        self.pos += len(chunk)
+        self.consumed += len(chunk)
+        return chunk
+
+    def seek(self, *args):
+        raise AssertionError('the source stream must not be reused')
+
+    def close(self):
+        self.closed = True
+
+
+class TestStreamInput(TestCase):
+
+    xml = (
+        b'<?xml version="1.0" encoding="UTF-8"?>'
+        b'<root><item id="a">one</item><item id="b">two</item></root>'
+    )
+    broken_xml = b'<root><item>one</item><item>two</root>'
+
+    def test_explicit_stream_keyword(self):
+        stream = NonSeekableStream(self.xml)
+        doc = pq(stream=stream, parser='xml')
+        assert doc('item#b').text() == 'two'
+        assert stream.closed is False
+
+    def test_stream_classmethod(self):
+        stream = NonSeekableStream(self.xml)
+        doc = pq.fromstream(stream, parser='xml')
+        assert [e.text for e in doc('item')] == ['one', 'two']
+
+    def test_positional_stream_with_selector(self):
+        stream = NonSeekableStream(self.xml)
+        doc = pq('item#a', stream, parser='xml')
+        assert doc.text() == 'one'
+
+    def test_matches_seekable_input(self):
+        expected = str(pq(self.xml, parser='xml'))
+        doc = pq(stream=NonSeekableStream(self.xml, chunk_size=7),
+                 parser='xml')
+        assert str(doc) == expected
+
+    def test_xml_to_html_fallback_replays_from_start(self):
+        stream = NonSeekableStream(self.broken_xml, chunk_size=5)
+        doc = pq(stream=stream, parser=None)
+        assert doc('item').text() == 'one two'
+        # Every byte of the source was consumed exactly once, and the
+        # fallback replayed the cached prefix instead of re-reading it.
+        assert stream.consumed == len(self.broken_xml)
+
+    def test_source_is_not_closed_on_failure(self):
+        stream = NonSeekableStream(b'')
+        with pytest.raises(etree.XMLSyntaxError):
+            pq.fromstream(stream, parser='xml')
+        assert stream.closed is False
+
+    def test_read_failure_still_releases_cache(self):
+        class Broken(object):
+            def read(self, size=-1):
+                raise IOError('boom')
+
+        stream = Broken()
+        with pytest.raises(IOError):
+            pq(stream=stream)
+
+    def test_cache_limit_exceeded(self):
+        stream = NonSeekableStream(b'<root>' + b'x' * 500 + b'</root>')
+        with pytest.raises(StreamCacheLimitError):
+            pq(stream=stream, cache_limit=32)
+
+    def test_tempfile_allows_large_documents(self):
+        data = b'<root><p>' + b'x' * 5000 + b'</p></root>'
+        stream = NonSeekableStream(data, chunk_size=11)
+        doc = pq(stream=stream, cache_limit=16, allow_tempfile=True)
+        assert doc('p').text() == 'x' * 5000
+
+    def test_cache_options_require_stream(self):
+        with pytest.raises(ValueError):
+            pq('<div/>', cache_limit=10)
+
+    def test_single_read_stream(self):
+        class OneRead(object):
+            def __init__(self, data):
+                self.data = data
+                self.done = False
+
+            def read(self):
+                if self.done:
+                    return b''
+                self.done = True
+                return self.data
+
+        doc = pq(stream=OneRead(self.xml), parser='xml')
+        assert doc('item').text() == 'one two'
+
+
+
+class TestStreamInputResources:
+
+    def test_replay_starts_at_input_position(self):
+        payload = b'<root><p>one</p></root>'
+        prefix = b'ignored-prefix'
+        seekable = io.BytesIO(prefix + payload)
+        seekable.seek(len(prefix))
+        expected = fromstream_instance(seekable)
+        actual = fromstream_instance(NonSeekableStream(payload, chunk_size=4))
+        assert [etree.tostring(e) for e in actual] == [
+            etree.tostring(e) for e in expected]
+
+    def test_parse_success_releases_tempfile(self, monkeypatch):
+        created = []
+        original = _StreamCache._new_store
+
+        def tracking(self, sample):
+            store = original(self, sample)
+            created.append(store)
+            return store
+
+        monkeypatch.setattr(_StreamCache, '_new_store', tracking)
+        stream = NonSeekableStream(b'<root><p>ok</p></root>', chunk_size=3)
+        doc = pq(stream=stream, cache_limit=8, allow_tempfile=True)
+        assert doc('p').text() == 'ok'
+        assert created and created[0].closed
+        assert stream.closed is False
+
+    def test_parse_failure_releases_tempfile(self, monkeypatch):
+        created = []
+        original = _StreamCache._new_store
+
+        def tracking(self, sample):
+            store = original(self, sample)
+            created.append(store)
+            return store
+
+        monkeypatch.setattr(_StreamCache, '_new_store', tracking)
+        with pytest.raises(etree.XMLSyntaxError):
+            pq(stream=NonSeekableStream(b'<root><p>broken</root>',
+                                        chunk_size=3),
+               parser='xml', cache_limit=8, allow_tempfile=True)
+        assert created and created[0].closed
+
+    def test_read_failure_releases_tempfile(self, monkeypatch):
+        created = []
+        original = _StreamCache._new_store
+
+        def tracking(self, sample):
+            store = original(self, sample)
+            created.append(store)
+            return store
+
+        class BrokenAfterPrefix:
+            reads = 0
+
+            def read(self, size=-1):
+                self.reads += 1
+                if self.reads == 1:
+                    return b'<root><p>' + b'x' * 100
+                raise IOError('boom')
+
+        monkeypatch.setattr(_StreamCache, '_new_store', tracking)
+        with pytest.raises(IOError):
+            pq(stream=BrokenAfterPrefix(), cache_limit=8,
+               allow_tempfile=True)
+        assert created and created[0].closed

@@ -3,6 +3,11 @@
 
 - Return an empty selection for empty files with the default and HTML parsers.
 
+- Add ``fromstream()`` / ``PyQuery(stream=...)`` for forward-only input:
+  parsing pulls only what the parser needs, replays the XML-to-HTML fallback
+  from the cache, and leaves the caller's stream open. ``cache_limit`` and
+  ``allow_tempfile`` bound the cache and permit an anonymous temporary file.
+
 
 2.1.0 (2026-07-27)
 ------------------

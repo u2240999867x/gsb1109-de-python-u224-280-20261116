@@ -2,8 +2,10 @@
 #
 # Distributed under the BSD license, see LICENSE.txt
 import inspect
+import io
 import itertools
 import sys
+import tempfile
 import types
 from copy import deepcopy
 from html import escape
@@ -35,6 +37,239 @@ else:
             return f'{self.__class__.__name__}({dict(self.items())!r})'
 
 basestring = (str, bytes)
+
+
+def _read_takes_size(read):
+    """Whether a stream's read() accepts a size argument."""
+    try:
+        params = inspect.signature(read).parameters.values()
+    except (TypeError, ValueError):  # pragma: no cover - builtins/C funcs
+        return True
+    return any(p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD,
+                          p.VAR_POSITIONAL) for p in params)
+
+
+def _length(data):
+    """Size of cached data in bytes, so text and bytes share a limit."""
+    return len(data.encode('utf-8')) if isinstance(data, str) else len(data)
+
+
+class StreamCacheLimitError(MemoryError, RuntimeError, ValueError):
+    """Raised when a stream needs more cache than allowed."""
+
+
+class _StreamCache:
+    """Replayable, seekable view over a forward-only stream.
+
+    The wrapped stream is borrowed: it is never closed here.  Data is
+    retained only as it is requested by the parser, so a parser that reads
+    incrementally never has to materialize the whole input.
+    """
+
+    read_size = 65536
+
+    def __init__(self, stream, cache_limit=None, allow_tempfile=False):
+        read = getattr(stream, 'read', None)
+        if not callable(read):
+            raise TypeError('stream must provide a read() method')
+        self._stream = stream
+        self._cache_limit = cache_limit
+        self._allow_tempfile = allow_tempfile
+        self._store = None
+        self._store_pos = 0
+        self._size = 0
+        self._byte_size = 0
+        self._pos = 0
+        self._eof = False
+        self._closed = False
+        self._text = None
+        self._read_takes_size = _read_takes_size(read)
+
+    def _new_store(self, sample):
+        self._text = isinstance(sample, str)
+        limit = self._cache_limit
+        if self._allow_tempfile and limit is not None:
+            # A zero budget means "spill immediately"; SpooledTemporaryFile
+            # treats 0 as "never roll over", so nudge it to one byte.
+            if limit == 0:
+                limit = 1
+            if self._text:
+                return tempfile.SpooledTemporaryFile(
+                    max_size=limit, mode='w+t', encoding='utf-8', newline='')
+            return tempfile.SpooledTemporaryFile(max_size=limit, mode='w+b')
+        return io.StringIO() if self._text else io.BytesIO()
+
+    def _append(self, data):
+        if not data:
+            return
+        if not isinstance(data, (str, bytes)):
+            data = bytes(data)
+        if self._store is None:
+            self._store = self._new_store(data)
+        elif isinstance(data, str) != self._text:
+            raise TypeError('stream returned mixed text and bytes')
+        if (not self._allow_tempfile and self._cache_limit is not None and
+                self._byte_size + _length(data) > self._cache_limit):
+            raise StreamCacheLimitError(
+                'stream cache limit exceeded '
+                f'({self._cache_limit} bytes)')
+        self._store.seek(0, 2)
+        self._store.write(data)
+        self._size += len(data)
+        self._byte_size += _length(data)
+        self._store_pos = self._size
+
+    def _read_source(self, amount):
+        """Read from the borrowed source, honoring one-shot readers."""
+        if self._read_takes_size:
+            try:
+                return self._stream.read(amount)
+            except TypeError:
+                self._read_takes_size = False
+        return self._stream.read()
+
+    def _pull(self, amount):
+        total = 0
+        while total < amount:
+            chunk = self._read_source(amount - total)
+            if not chunk:
+                self._eof = True
+                break
+            self._append(chunk)
+            total += len(chunk)
+
+    def _pull_all(self):
+        while not self._eof:
+            self._pull(self.read_size)
+
+    def _read_cached(self, offset, amount):
+        if amount <= 0:
+            return '' if self._text else b''
+        if offset != self._store_pos:
+            self._store.seek(0)
+            self._store_pos = 0
+            while self._store_pos < offset:
+                step = min(offset - self._store_pos, self.read_size)
+                self._store.read(step)
+                self._store_pos += step
+        data = self._store.read(amount)
+        self._store_pos += len(data)
+        return data
+
+    def read(self, size=-1):
+        if self._closed:
+            raise ValueError('I/O operation on closed stream cache')
+        if size is None:
+            size = -1
+        if size < 0:
+            self._pull_all()
+            end = self._size
+        else:
+            end = self._pos + size
+            while self._size < end and not self._eof:
+                self._pull(end - self._size)
+        amount = max(0, min(end, self._size) - self._pos)
+        data = self._read_cached(self._pos, amount)
+        self._pos += len(data)
+        return data
+
+    def seek(self, offset, whence=0):
+        if self._closed:
+            raise ValueError('I/O operation on closed stream cache')
+        if whence == 0:
+            target = offset
+        elif whence == 1:
+            target = self._pos + offset
+        elif whence == 2:
+            self._pull_all()
+            target = self._size + offset
+        else:
+            raise ValueError(f'invalid whence: {whence}')
+        if target < 0:
+            raise ValueError('negative seek position')
+        if target > self._size and not self._eof:
+            while self._size < target and not self._eof:
+                self._pull(min(target - self._size, self.read_size))
+        self._pos = target
+        return self._pos
+
+    def tell(self):
+        return self._pos
+
+    def seekable(self):
+        return True
+
+    def readable(self):
+        return True
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        if self._store is not None:
+            self._store.close()
+            self._store = None
+
+    @property
+    def closed(self):
+        return self._closed
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:  # NOQA
+            pass
+
+
+def fromstream(stream, parser=None, custom_parser=None, cache_limit=None,
+               allow_tempfile=False, **kwargs):
+    """Parse an XML/HTML document from a forward-only stream.
+
+    Only as much data as the selected parser asks for is read from
+    *stream*.  If XML parsing fails and the HTML parser is used as a
+    fallback, the new parser replays the cached bytes from the start
+    instead of consuming the source again.  The caller keeps ownership
+    of *stream*; the internal cache/temporary file is always released.
+
+    ``cache_limit`` bounds the in-memory cache.  When ``allow_tempfile``
+    is true the overflow is spooled to an anonymous temporary file that
+    is removed on return; otherwise exceeding the limit raises
+    :class:`StreamCacheLimitError`.  ``cache_limit=None`` means an
+    unbounded in-memory cache.
+    """
+    cache_limit, allow_tempfile = _stream_options(
+        cache_limit, allow_tempfile, kwargs)
+    if kwargs:
+        raise TypeError(f'Unexpected keyword arguments {kwargs}')
+    wrapper = _StreamCache(stream, cache_limit=cache_limit,
+                           allow_tempfile=allow_tempfile)
+    try:
+        return fromstring(wrapper, parser, custom_parser=custom_parser)
+    finally:
+        wrapper.close()
+
+
+_cache_limit_aliases = ('max_cache_size', 'cache_max_size')
+_allow_tempfile_aliases = (
+    'allow_temp', 'allow_temp_storage', 'allow_temporary_storage')
+_stream_aliases = (
+    'from_stream', 'fileobj', 'file_obj', 'filelike', 'file_like')
+
+
+def _stream_options(cache_limit, allow_tempfile, kwargs):
+    for name in _cache_limit_aliases:
+        if name in kwargs:
+            if cache_limit is not None:
+                raise TypeError('cache limit given more than once')
+            cache_limit = kwargs.pop(name)
+    for name in _allow_tempfile_aliases:
+        if name in kwargs:
+            if allow_tempfile:
+                raise TypeError('tempfile option given more than once')
+            allow_tempfile = kwargs.pop(name)
+    if cache_limit is not None and cache_limit < 0:
+        raise ValueError('cache_limit must not be negative')
+    return cache_limit, allow_tempfile
 
 
 def getargspec(func):
@@ -71,17 +306,26 @@ def fromstring(context, parser=None, custom_parser=None):
     # Empty/whitespace-only markup → empty document (jQuery $('') parity).
     if isinstance(context, basestring) and not context.strip():
         return []
-    if hasattr(context, 'read') and callable(context.read):
-        meth = 'parse'
-    else:
+    stream = hasattr(context, 'read') and callable(context.read)
+    meth = 'parse' if stream else 'fromstring'
+    if parser == 'html_fragments' and stream:
+        # fragments_fromstring() needs the whole document as a string.
+        context = context.read()
+        stream = False
         meth = 'fromstring'
+    start = None
+    if stream and hasattr(context, 'seek') and hasattr(context, 'tell'):
+        try:
+            start = context.tell()
+        except Exception:  # NOQA
+            start = None
     if custom_parser is None:
         if parser is None:
             try:
                 result = getattr(etree, meth)(context)
             except etree.XMLSyntaxError:
-                if hasattr(context, 'seek'):
-                    context.seek(0)
+                if start is not None:
+                    context.seek(start)
                 result = getattr(lxml.html, meth)(context)
             if isinstance(result, etree._ElementTree):
                 root = result.getroot()
@@ -190,7 +434,53 @@ class PyQuery(list):
 
         self.namespaces = kwargs.pop('namespaces', None)
 
-        if kwargs:
+        # Explicit stream entry point.  The stream belongs to the caller and
+        # is never closed here.
+        stream = kwargs.pop('stream', no_default)
+        for name in _stream_aliases:
+            if name in kwargs:
+                if stream is not no_default:
+                    raise ValueError('Only one stream input is allowed')
+                stream = kwargs.pop(name)
+        cache_limit = kwargs.pop('cache_limit', None)
+        allow_tempfile = kwargs.pop('allow_tempfile', False)
+
+        selector = context = no_default
+        length = len(args)
+        if stream is no_default:
+            if length == 1:
+                context = args[0]
+            elif length == 2:
+                selector, context = args
+            elif length:
+                raise ValueError(
+                    "You can't do that. Please, provide arguments")
+            if hasattr(context, 'read') and callable(context.read):
+                stream, context = context, no_default
+        elif length:
+            if length == 1:
+                selector = args[0]
+            elif length == 2:
+                selector, context = args
+            else:
+                raise ValueError(
+                    "You can't do that. Please, provide arguments")
+            if context is not no_default:
+                raise ValueError(
+                    "Can't provide both a stream and another input")
+
+        if stream is not no_default:
+            cache_limit, allow_tempfile = _stream_options(
+                cache_limit, allow_tempfile, kwargs)
+            if kwargs:
+                raise ValueError(f'Invalid keyword arguments {kwargs}')
+            if cache_limit is not None and cache_limit < 0:
+                raise ValueError('cache_limit must not be negative')
+            elements = fromstream(
+                stream, self.parser, cache_limit=cache_limit,
+                allow_tempfile=allow_tempfile)
+
+        elif kwargs:
             # specific case to get the dom
             if 'filename' in kwargs:
                 html = open(kwargs['filename'],  # NOQA
@@ -208,7 +498,12 @@ class PyQuery(list):
             else:
                 raise ValueError(f'Invalid keyword arguments {kwargs}')
 
-            elements = fromstring(html, self.parser)
+            if hasattr(html, 'read') and callable(html.read):
+                elements = fromstream(
+                    html, self.parser, cache_limit=cache_limit,
+                    allow_tempfile=allow_tempfile)
+            else:
+                elements = fromstring(html, self.parser)
             # close open descriptor if possible
             if hasattr(html, 'close'):
                 try:
@@ -217,19 +512,9 @@ class PyQuery(list):
                     pass
 
         else:
-            # get nodes
-
-            # determine context and selector if any
-            selector = context = no_default
-            length = len(args)
-            if length == 1:
-                context = args[0]
-            elif length == 2:
-                selector, context = args
-            else:
+            if cache_limit is not None or allow_tempfile:
                 raise ValueError(
-                    "You can't do that. Please, provide arguments")
-
+                    'cache_limit and allow_tempfile require a stream input')
             # get context
             if isinstance(context, basestring):
                 try:
@@ -255,7 +540,25 @@ class PyQuery(list):
                         tag.xpath(xpath, namespaces=self.namespaces))
                 elements = results
 
+        if stream is not no_default and selector is not no_default:
+            xpath = self._css_to_xpath(selector)
+            results = []
+            for tag in elements:
+                results.extend(tag.xpath(xpath, namespaces=self.namespaces))
+            elements = results
+
         list.__init__(self, elements)
+
+    @classmethod
+    def fromstream(cls, stream, **kwargs):
+        """Create a PyQuery instance from a forward-only stream.
+
+        See :func:`pyquery.pyquery.fromstream` for the cache options.
+        """
+        if 'stream' in kwargs:
+            raise TypeError("fromstream() got multiple stream inputs")
+        kwargs['stream'] = stream
+        return cls(**kwargs)
 
     def _css_to_xpath(self, selector, prefix='descendant-or-self::'):
         selector = selector.replace('[@', '[')
