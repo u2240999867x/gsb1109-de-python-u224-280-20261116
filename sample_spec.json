@@ -1,0 +1,20 @@
+{
+  "languages": ["de"],
+  "date_range": {"start": "1900-01-01", "end": "1999-12-31"},
+  "rules": [
+    {"id": "R1", "from": "O", "to": "0", "cost": 2},
+    {"id": "R2", "from": "l", "to": "1", "cost": 1},
+    {"id": "R3", "from": "I", "to": "1", "cost": 1},
+    {"id": "R4", "from": "·", "to": "", "cost": 1},
+    {"id": "R5", "from": "S", "to": "5", "cost": 2},
+    {"id": "R6", "from": "S", "to": "8", "cost": 2}
+  ],
+  "rows": [
+    {"id": "A1", "batch": "A", "text": "l2. Okt. 199O"},
+    {"id": "A2", "batch": "A", "text": "03. Mai 1991", "verified": true, "verified_date": "1991-05-03"},
+    {"id": "A3", "batch": "A", "text": "3l. Feb. 199O"},
+    {"id": "A4", "batch": "A", "text": "S. Mai 1990"},
+    {"id": "B1", "batch": "B", "text": "1·7. Nov. I99I"},
+    {"id": "B2", "batch": "B", "text": "31. Feb. 199O"}
+  ]
+}

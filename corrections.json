@@ -1,0 +1,239 @@
+{
+  "total_cost": 8,
+  "failed_rows": 2,
+  "batches": [
+    {
+      "batch": "A",
+      "failed_rows": 1,
+      "cost": 5,
+      "optimal_solutions": 2,
+      "shared_rules": [
+        {
+          "id": "R1",
+          "from": "O",
+          "to": "0",
+          "cost": 2
+        },
+        {
+          "id": "R2",
+          "from": "l",
+          "to": "1",
+          "cost": 1
+        },
+        {
+          "id": "R5",
+          "from": "S",
+          "to": "5",
+          "cost": 2
+        },
+        {
+          "id": "R6",
+          "from": "S",
+          "to": "8",
+          "cost": 2
+        }
+      ]
+    },
+    {
+      "batch": "B",
+      "failed_rows": 1,
+      "cost": 3,
+      "optimal_solutions": 1,
+      "shared_rules": [
+        {
+          "id": "R3",
+          "from": "I",
+          "to": "1",
+          "cost": 1
+        },
+        {
+          "id": "R4",
+          "from": "·",
+          "to": "",
+          "cost": 1
+        }
+      ]
+    }
+  ],
+  "rows": [
+    {
+      "id": "A1",
+      "batch": "A",
+      "original": "l2. Okt. 199O",
+      "status": "auto",
+      "correction": "12. Okt. 1990",
+      "date": "1990-10-12",
+      "candidates": [
+        {
+          "text": "12. Okt. 1990",
+          "cost": 3,
+          "changes": [
+            {
+              "pos": 0,
+              "original": "l",
+              "replacement": "1",
+              "rule": "R2",
+              "cost": 1
+            },
+            {
+              "pos": 12,
+              "original": "O",
+              "replacement": "0",
+              "rule": "R1",
+              "cost": 2
+            }
+          ],
+          "languages": [
+            "de"
+          ],
+          "dates": [
+            "1990-10-12"
+          ]
+        }
+      ],
+      "evidence": [
+        "位置 0: 'l' → '1'（规则 R2，成本 1）",
+        "位置 12: 'O' → '0'（规则 R1，成本 2）",
+        "dateparser 以语言 ['de'] 解析为 ['1990-10-12']，落在允许范围内",
+        "该行替换总成本 3"
+      ]
+    },
+    {
+      "id": "A2",
+      "batch": "A",
+      "original": "03. Mai 1991",
+      "status": "verified",
+      "correction": "03. Mai 1991",
+      "date": "1991-05-03",
+      "candidates": [],
+      "evidence": [
+        "已核对行，按约束不作任何改动"
+      ]
+    },
+    {
+      "id": "A3",
+      "batch": "A",
+      "original": "3l. Feb. 199O",
+      "status": "failed",
+      "correction": null,
+      "date": null,
+      "candidates": [],
+      "evidence": [
+        "在批次共享规则下不存在落在允许范围内的合法日期"
+      ]
+    },
+    {
+      "id": "A4",
+      "batch": "A",
+      "original": "S. Mai 1990",
+      "status": "candidates",
+      "correction": null,
+      "date": null,
+      "candidates": [
+        {
+          "text": "5. Mai 1990",
+          "cost": 2,
+          "changes": [
+            {
+              "pos": 0,
+              "original": "S",
+              "replacement": "5",
+              "rule": "R5",
+              "cost": 2
+            }
+          ],
+          "languages": [
+            "de"
+          ],
+          "dates": [
+            "1990-05-05"
+          ]
+        },
+        {
+          "text": "8. Mai 1990",
+          "cost": 2,
+          "changes": [
+            {
+              "pos": 0,
+              "original": "S",
+              "replacement": "8",
+              "rule": "R6",
+              "cost": 2
+            }
+          ],
+          "languages": [
+            "de"
+          ],
+          "dates": [
+            "1990-05-08"
+          ]
+        }
+      ],
+      "evidence": [
+        "存在多个总成本相同的最优解释，仅列出候选，不自动采用"
+      ]
+    },
+    {
+      "id": "B1",
+      "batch": "B",
+      "original": "1·7. Nov. I99I",
+      "status": "auto",
+      "correction": "17. Nov. 1991",
+      "date": "1991-11-17",
+      "candidates": [
+        {
+          "text": "17. Nov. 1991",
+          "cost": 3,
+          "changes": [
+            {
+              "pos": 1,
+              "original": "·",
+              "replacement": "",
+              "rule": "R4",
+              "cost": 1
+            },
+            {
+              "pos": 10,
+              "original": "I",
+              "replacement": "1",
+              "rule": "R3",
+              "cost": 1
+            },
+            {
+              "pos": 13,
+              "original": "I",
+              "replacement": "1",
+              "rule": "R3",
+              "cost": 1
+            }
+          ],
+          "languages": [
+            "de"
+          ],
+          "dates": [
+            "1991-11-17"
+          ]
+        }
+      ],
+      "evidence": [
+        "位置 1: '·' → ∅（删除）（规则 R4，成本 1）",
+        "位置 10: 'I' → '1'（规则 R3，成本 1）",
+        "位置 13: 'I' → '1'（规则 R3，成本 1）",
+        "dateparser 以语言 ['de'] 解析为 ['1991-11-17']，落在允许范围内",
+        "该行替换总成本 3"
+      ]
+    },
+    {
+      "id": "B2",
+      "batch": "B",
+      "original": "31. Feb. 199O",
+      "status": "failed",
+      "correction": null,
+      "date": null,
+      "candidates": [],
+      "evidence": [
+        "在批次共享规则下不存在落在允许范围内的合法日期"
+      ]
+    }
+  ]
+}
