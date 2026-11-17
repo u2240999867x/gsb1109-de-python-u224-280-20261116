@@ -23,7 +23,6 @@
 #
 
 import logging
-from itertools import tee, zip_longest
 from reprlib import repr as _r
 from typing import Dict, Any, Sequence, Union
 
@@ -33,7 +32,7 @@ from .util import parse_read_reply, request_path, tag_request_path
 
 from ..cip import ClassCode, Services, DataTypes, UINT, UDINT, ULINT
 from ..const import STRUCTURE_READ_REPLY
-from ..exceptions import RequestError
+from ..exceptions import DataError, RequestError
 
 
 class TagServiceResponsePacket(SendUnitDataResponsePacket):
@@ -396,23 +395,117 @@ class MultiServiceResponsePacket(SendUnitDataResponsePacket):
         self.values = None
         self.request_statuses = None
         self.responses = []
+        #: embedded reply bytes that could not be matched to a sent request
+        self.unmatched_responses = []
+        #: number of sent requests that received no embedded reply
+        self.missing_reply_count = 0
+        #: description of any request/reply count mismatch, None when counts agree
+        self.attribution_error = None
         super().__init__(request, raw_data)
 
     def _parse_reply(self):
         super()._parse_reply()
-        num_replies = UINT.decode(self.data)
-        offset_data = self.data[2 : 2 + 2 * num_replies]
-        offsets = (UINT.decode(offset_data[i : i + 2]) for i in range(0, len(offset_data), 2))
-        start, end = tee(offsets)  # split offsets into start/end indexes
-        next(end)  # advance end by 1 so 2nd item is the end index for the first item
-        reply_data = [self.data[i:j] for i, j in zip_longest(start, end)]
+        if not self.is_valid() or self.data is None:
+            return
+
+        try:
+            num_replies = UINT.decode(self.data[:2])
+        except DataError as err:
+            self._error = f"Failed to parse reply - {err}"
+            return
+
+        table_end = 2 + (2 * num_replies)
+        if len(self.data) < table_end:
+            self._error = (
+                "Failed to parse reply - embedded reply count "
+                f"{num_replies} does not fit in {len(self.data)} response bytes"
+            )
+            return
+
+        offsets = [
+            UINT.decode(self.data[2 + (2 * i) : 4 + (2 * i)])
+            for i in range(num_replies)
+        ]
+        expected_start = table_end
+        data_len = len(self.data)
+
+        if num_replies == 0:
+            # parent service succeeded but no embedded replies were returned;
+            # do not fabricate empty successes, report every request as missing
+            self.missing_reply_count = len(self.request.requests)
+            if self.missing_reply_count:
+                self.__log.error(
+                    "Multi-service response contains no embedded replies for %s "
+                    "requests",
+                    self.missing_reply_count,
+                )
+            return
+
+        if offsets[0] != expected_start:
+            self._error = (
+                "Failed to parse reply - first embedded reply starts at "
+                f"{offsets[0]}, expected {expected_start}"
+            )
+            return
+
+        if any(curr <= prev for prev, curr in zip(offsets, offsets[1:])):
+            self._error = (
+                "Failed to parse reply - embedded reply offsets are not strictly "
+                f"monotonic: {tuple(offsets)}"
+            )
+            return
+
+        if offsets[-1] > data_len:
+            self._error = (
+                f"Failed to parse reply - embedded reply offset {offsets[-1]} "
+                f"exceeds response length {data_len}"
+            )
+            return
+
+        # each boundary is independent: a broken sub-reply cannot bleed into a
+        # neighbor's bytes, so well-bounded replies remain deliverable
+        boundaries = offsets + [data_len]
+        reply_data = [
+            self.data[boundaries[i] : boundaries[i + 1]] for i in range(num_replies)
+        ]
 
         padding = bytes(46)  # pad the front of the packet so it matches the size of
         # a read tag response, probably not the best idea but it works for now
 
-        for data, request in zip(reply_data, self.request.requests):
-            response = request.response_class(request, padding + data)
+        requests = self.request.requests
+        for index, data in enumerate(reply_data):
+            try:
+                sub_request = requests[index]
+            except IndexError:
+                self.__log.error(
+                    "Embedded reply %s cannot be attributed to a request: %s "
+                    "requests sent, %s replies received",
+                    index,
+                    len(requests),
+                    num_replies,
+                )
+                self.unmatched_responses.append(data)
+                continue
+
+            response = sub_request.response_class(sub_request, padding + data)
             self.responses.append(response)
+
+        self.missing_reply_count = max(0, len(requests) - num_replies)
+        if self.missing_reply_count:
+            self.__log.error(
+                "Multi-service response is missing %s of %s embedded replies",
+                self.missing_reply_count,
+                len(requests),
+            )
+
+        if self.unmatched_responses:
+            # keep the parent's own service status intact; the outer multi-service
+            # succeeded, only these embedded replies cannot be attributed
+            self.attribution_error = (
+                f"{len(self.unmatched_responses)} of {num_replies} embedded replies "
+                f"could not be matched to a request ({len(requests)} requests sent)"
+            )
+            self.__log.error(self.attribution_error)
 
     def __repr__(self):
         return f"{self.__class__.__name__}(values={_r(self.values)}, error={self.error!r})"

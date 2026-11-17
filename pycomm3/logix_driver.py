@@ -1358,8 +1358,10 @@ class LogixDriver(CIPDriver):
                 if request.type_ != "multi":
                     results[request.request_id] = Tag(request.tag, None, None, str(err))
                 else:
-                    for tag in request.tags:
-                        results[tag["request_id"]] = Tag(tag["tag"], None, None, str(err))
+                    for sub_request in request.requests:
+                        results[sub_request.request_id] = Tag(
+                            sub_request.tag, None, None, str(err)
+                        )
             else:
                 if request.type_ != "multi":
                     if response:
@@ -1372,8 +1374,10 @@ class LogixDriver(CIPDriver):
                     else:
                         results[request.request_id] = Tag(request.tag, None, None, response.error)
                 else:
+                    answered = set()
                     for resp in response.responses:
                         req = resp.request
+                        answered.add(req)
                         if resp:
                             results[req.request_id] = Tag(
                                 resp.tag, resp.value, resp.data_type, None
@@ -1382,6 +1386,24 @@ class LogixDriver(CIPDriver):
                             results[req.request_id] = Tag(
                                 req.tag, None, None, req.error or resp.error
                             )
+
+                    for sub_request in request.requests:
+                        if sub_request not in answered:
+                            results[sub_request.request_id] = Tag(
+                                sub_request.tag,
+                                None,
+                                None,
+                                sub_request.error
+                                or response.error
+                                or "No embedded reply received in multi-service response",
+                            )
+
+                    if response.unmatched_responses:
+                        self.__log.error(
+                            "Discarding %s embedded replies with no matching request: %s",
+                            len(response.unmatched_responses),
+                            response.attribution_error,
+                        )
         return results
 
     def send(self, request: RequestPacket):
