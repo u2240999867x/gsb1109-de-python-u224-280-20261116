@@ -3,6 +3,27 @@
 History
 =======
 
+Unreleased
+----------
+
+New features:
+
+- Add :func:`dateparser.parse_date_range` and the
+  :class:`~dateparser.interval.DateRangeParser` /
+  :class:`~dateparser.interval.DateRangeData` API for parsing a phrase that
+  joins two dates, such as "1月31日至2月2日" or "2024-12-30 - 2025-01-03".
+  The endpoints share the year, month or day written only once, every jointly
+  consistent reading is returned, an inverted range is never swapped, and a
+  phrase precise only to months or years keeps that precision instead of
+  inventing day boundaries
+
+Bug fixes:
+
+- Parse Chinese (``zh``, ``zh-Hans``, ``zh-Hant``) and Cantonese (``yue``)
+  dates without a year, such as "1月31日" or "12月30日", by simplifying
+  "M月D日/號" into a month name followed by the day; the previous translation
+  left a trailing "day" word that the parser could not read
+
 1.5.0 (2026-11-04)
 ------------------
 

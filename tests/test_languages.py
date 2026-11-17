@@ -148,7 +148,7 @@ class TestBundledLanguages(BaseTestCase):
             param("zh", "2013年04月08日", "2013-04-08"),
             param("zh", "3月前", "3 month ago"),
             param("zh", "5月2天前", "5 month 2 day ago"),
-            param("zh", "3月1日", "march 1 day"),
+            param("zh", "3月1日", "march 1"),
             param("zh", "周一", "monday"),
             param("zh", "礼拜一", "monday"),
             param("zh", "周二", "tuesday"),

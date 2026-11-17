@@ -186,6 +186,11 @@ info = {
     "locale_specific": {},
     "no_word_spacing": "True",
     "sentence_splitter_group": 4,
+    "simplifications": [
+        {
+            "(\\d++[.,]?\\d*+)\\s*月\\s*(\\d{1,2})\\s*日(?![前後])": "\\1月 \\2"
+        }
+    ],
     "skip": [
         " ",
         "'",
