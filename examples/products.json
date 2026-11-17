@@ -1,0 +1,36 @@
+{
+  "pages": [
+    {
+      "name": "page-1",
+      "html": "<html><body><h2 class=\"ad\" data-nid=\"ad-1\">Sponsored</h2><section class=\"card\" data-nid=\"root-1\"><h2 class=\"title\" data-nid=\"title-1\">Product one</h2><span class=\"price\" data-nid=\"price-1\">10</span><span class=\"ad\" data-nid=\"bad-1\">ad</span></section></body></html>",
+      "required": {
+        "title": ["title-1"],
+        "price": ["price-1"]
+      },
+      "excluded": ["ad-1", "bad-1"],
+      "entity_roots": ["root-1"]
+    },
+    {
+      "name": "page-2",
+      "html": "<html><body><div><h2 class=\"ad\" data-nid=\"ad-2\">Sponsored</h2><section class=\"card\" data-nid=\"root-2\"><h2 class=\"title\" data-nid=\"title-2\">Product two</h2><span class=\"price\" data-nid=\"price-2\">20</span><span class=\"ad\" data-nid=\"bad-2\">ad</span></span></section></div></body></html>",
+      "required": {
+        "title": ["title-2"],
+        "price": ["price-2"]
+      },
+      "excluded": ["ad-2", "bad-2"],
+      "entity_roots": ["root-2"]
+    }
+  ],
+  "root_candidates": [
+    {"selector": "section", "cost": 1},
+    {"selector": ".card", "cost": 2}
+  ],
+  "candidates": [
+    {"field": "title", "selector": "h2", "cost": 1},
+    {"field": "title", "selector": ".title", "cost": 2},
+    {"field": "title", "selector": ".card .title", "cost": 3},
+    {"field": "price", "selector": "span", "cost": 1},
+    {"field": "price", "selector": ".price", "cost": 2},
+    {"field": "price", "selector": ".card .price", "cost": 3}
+  ]
+}
