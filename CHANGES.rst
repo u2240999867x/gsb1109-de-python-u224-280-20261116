@@ -1,3 +1,21 @@
+Unreleased
+----------
+
+-   ``Tree.yield_from_files()`` can deliver self-contained tree records
+    (``records=True``): each record carries the exact source range of its tree,
+    its ``TREES``-block identity, and the translation table actually in effect
+    for that tree. Translation tables are scoped to their own block, so equal
+    tokens in a later block never reuse an earlier table.
+-   Tree iteration is resumable. The yielder exposes a ``checkpoint`` that can
+    be passed back as ``resume_from``; an unterminated tree at the end of the
+    source is exposed as ``tail`` but never committed, so resuming after the
+    source is completed reads it exactly once.
+-   Checkpoints validate the source prefix and raise ``ResumeCheckpointError``
+    if the source before the cursor changed.
+-   Truncated ``TAXA``/``TAXLABELS`` statements no longer hang or raise a bare
+    ``AttributeError``; a tree without a terminating semi-colon before a block
+    keyword is no longer accepted with the keyword absorbed as a taxon label.
+
 Release 4.5.2
 -------------
 

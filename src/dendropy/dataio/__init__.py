@@ -33,7 +33,14 @@ from dendropy.dataio import nexmlyielder
 from dendropy.dataio import phylipreader
 from dendropy.dataio import phylipwriter
 from dendropy.dataio import multiphylipreader
+from dendropy.dataio import treerecords
 from dendropy.utility import container
+
+from dendropy.dataio.treerecords import SourceRange
+from dendropy.dataio.treerecords import TreeRecord
+from dendropy.dataio.treerecords import CollectionCheckpoint
+from dendropy.dataio.treerecords import ResumeCheckpoint
+from dendropy.dataio.treerecords import ResumeCheckpointError
 
 _IOServices = collections.namedtuple(
         "_IOServices",
@@ -79,6 +86,8 @@ def get_tree_yielder(
         schema,
         taxon_namespace,
         tree_type,
+        records=False,
+        resume_from=None,
         **kwargs):
     try:
         yielder_type =_IO_SERVICE_REGISTRY[schema].tree_yielder
@@ -88,6 +97,8 @@ def get_tree_yielder(
                 files=files,
                 taxon_namespace=taxon_namespace,
                 tree_type=tree_type,
+                records=records,
+                resume_from=resume_from,
                 **kwargs)
         return yielder
     except KeyError:

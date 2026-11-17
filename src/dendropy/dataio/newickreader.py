@@ -274,12 +274,24 @@ class NewickReader(ioservice.DataReader):
         if self.is_assign_internal_labels_to_edges and not self.suppress_internal_node_taxa:
             raise ValueError("Conflicting options: cannot simultaneously assign internal labels to edges and to internal taxa")
         self.terminating_semicolon_required = kwargs.pop("terminating_semicolon_required", True)
+        # Tokens that cannot be taxon labels within a tree statement: when one
+        # is encountered, the statement was not terminated by a semi-colon.
+        terminator_tokens = kwargs.pop("statement_terminator_tokens", None)
+        if terminator_tokens is None:
+            self.statement_terminator_tokens = frozenset()
+        else:
+            self.statement_terminator_tokens = frozenset(
+                    t.upper() for t in terminator_tokens)
         self.check_for_unused_keyword_arguments(kwargs)
 
         # per-tree book-keeping
         self._tree_statement_complete = None
         self._parenthesis_nesting_level = None
         self._seen_taxa = None
+        self.last_tree_seen_taxa = None
+        self.last_tree_terminated_by_keyword = None
+        self.tree_statement_start_position = None
+        self.tree_statement_end_position = None
 
     def tree_iter(self,
             stream,
@@ -368,11 +380,16 @@ class NewickReader(ioservice.DataReader):
         """
         current_token = nexus_tokenizer.current_token
         tree_comments = nexus_tokenizer.pull_captured_comments()
+        self.tree_statement_start_position = None
+        self.tree_statement_end_position = None
+        self.last_tree_terminated_by_keyword = None
         while (current_token == ";" or current_token is None) and not nexus_tokenizer.is_eof():
             current_token = nexus_tokenizer.require_next_token()
             tree_comments = nexus_tokenizer.pull_captured_comments()
         if nexus_tokenizer.is_eof():
             return None
+        self.tree_statement_start_position = nexus_tokenizer.token_position
+        self.tree_statement_end_position = None
         if current_token != "(":
             # allow for possibility of single node tree, e.g.: T0:10;
             self._parenthesis_nesting_level = 0
@@ -400,6 +417,8 @@ class NewickReader(ioservice.DataReader):
                     line_num=nexus_tokenizer.token_line_num,
                     col_num=nexus_tokenizer.token_column_num,
                     stream=nexus_tokenizer.src)
+        self.tree_statement_end_position = nexus_tokenizer.last_semicolon_position
+        self.last_tree_seen_taxa = set(self._seen_taxa)
         self._seen_taxa = None
         self._parenthesis_nesting_level = None
         self._tree_statement_complete = None
@@ -686,6 +705,20 @@ class NewickReader(ioservice.DataReader):
                 else:
                     # Label
                     label = nexus_tokenizer.current_token
+                    if (self._parenthesis_nesting_level == 0
+                            and not nexus_tokenizer.is_token_quoted
+                            and label is not None
+                            and label.upper() in self.statement_terminator_tokens):
+                        # A block-level keyword where a tree label or the
+                        # terminating semi-colon was expected: the tree
+                        # statement was never closed. Do not absorb the
+                        # keyword as a taxon label.
+                        self.last_tree_terminated_by_keyword = label.upper()
+                        raise NewickReader.NewickReaderIncompleteTreeStatementError(
+                                message="Incomplete or improperly-terminated tree statement (found '{}' instead of a semi-colon ';')".format(label),
+                                line_num=nexus_tokenizer.token_line_num,
+                                col_num=nexus_tokenizer.token_column_num,
+                                stream=nexus_tokenizer.src)
                     if ( (is_internal_node and self.suppress_internal_node_taxa)
                             or ((not is_internal_node) and self.suppress_leaf_node_taxa) ):
                         if self.is_assign_internal_labels_to_edges:

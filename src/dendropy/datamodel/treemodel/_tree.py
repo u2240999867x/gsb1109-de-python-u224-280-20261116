@@ -240,7 +240,7 @@ class Tree(
         return cls._get_from(**kwargs)
 
     @classmethod
-    def yield_from_files(cls, files, schema, taxon_namespace=None, **kwargs):
+    def yield_from_files(cls, files, schema, taxon_namespace=None, records=False, resume_from=None, **kwargs):
         r"""
         Iterates over trees from files, returning them one-by-one instead of
         instantiating all of them in memory at once.
@@ -267,13 +267,27 @@ class Tree(
         taxon_namespace : |TaxonNamespace| instance
             The operational taxonomic unit concept namespace to use to manage
             taxon definitions.
+        records : bool
+            If |True|, yields :class:`~dendropy.dataio.treerecords.TreeRecord`
+            objects rather than bare |Tree| objects.  Each record carries its
+            own source range, TREES-block identity, and the translation table
+            that was in effect for that tree, so it can be delivered and
+            interpreted independently.  The tree itself remains available as
+            ``record.tree``.
+        resume_from : |CollectionCheckpoint| or dict
+            Checkpoint from a previous iteration (see the yielder's
+            ``checkpoint`` attribute).  Iteration resumes at the next
+            uncommitted record.  With NEXUS sources, an unterminated tree at
+            the end of the source is never committed; the checkpoint continues
+            to point at its start so it can be re-read after the source is
+            completed.
         \*\*kwargs : keyword arguments
             These will be passed directly to the schema-parser implementation.
 
         Yields
         ------
-        t : |Tree|
-            Trees as read from the file.
+        t : |Tree| or |TreeRecord|
+            Trees (or records) as read from the file.
 
         Examples
         --------
@@ -319,7 +333,13 @@ class Tree(
                 " the client code side"
             )
         tree_yielder = dataio.get_tree_yielder(
-            files, schema, taxon_namespace=taxon_namespace, tree_type=cls, **kwargs
+            files,
+            schema,
+            taxon_namespace=taxon_namespace,
+            tree_type=cls,
+            records=records,
+            resume_from=resume_from,
+            **kwargs
         )
         return tree_yielder
 

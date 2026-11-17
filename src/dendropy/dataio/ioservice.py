@@ -20,6 +20,7 @@
 
 import collections
 from dendropy.datamodel import taxonmodel
+from dendropy.dataio import treerecords
 from dendropy.utility import deprecate
 from dendropy.utility import textprocessing
 
@@ -528,17 +529,20 @@ class DataWriter(IOService):
 
 class DataYielder(IOService):
 
-    def __init__(self, files=None):
+    def __init__(self, files=None, records=False, resume_from=None):
         IOService.__init__(self)
         self.files = files
+        self.records = records
+        self._stop_iteration = False
+        self._resume_checkpoint = treerecords.CollectionCheckpoint.from_dict(resume_from)
         self._current_file_index = None
         self._current_file = None
         self._current_file_name = None
 
     def reset(self):
-        self.current_file_index = None
-        self.current_file = None
-        self.current_file_name = None
+        self._current_file_index = None
+        self._current_file = None
+        self._current_file_name = None
 
     def _get_current_file_index(self):
         return self._current_file_index
@@ -553,10 +557,28 @@ class DataYielder(IOService):
     current_file_name = property(_get_current_file_name)
 
     def __iter__(self):
+        resume = self._resume_checkpoint
+        resume_file_index = None if resume is None else resume.file_index
         for current_file_index, current_file in enumerate(self.files):
+            if getattr(self, "_stop_iteration", False):
+                # A yielder can halt the whole run (e.g. an uncommitted tail
+                # that must be resumed before later sources are delivered).
+                break
+            if resume_file_index is not None and current_file_index < resume_file_index:
+                # Checkpoint is further into the source: earlier sources were
+                # already delivered in the interrupted run.
+                continue
             self._current_file_index = current_file_index
             for item in self.iterate_over_file(current_file):
-                yield item
+                yield self._export_item(item)
+        else:
+            if not getattr(self, "_stop_iteration", False):
+                self._finalize_checkpoint()
+
+    def _finalize_checkpoint(self):
+        """
+        Hook called after all sources have been consumed normally.
+        """
 
     def iterate_over_file(self, current_file):
         if textprocessing.is_str_type(current_file):
@@ -574,12 +596,20 @@ class DataYielder(IOService):
         if hasattr(self._current_file, "__exit__"):
             with self._current_file:
                 for item in self._yield_items_from_stream(stream=self._current_file):
-                    yield item
+                    yield self._export_item(item)
         else:
             # StringIO does not support ``with``
             for item in self._yield_items_from_stream(stream=self._current_file):
-                yield item
+                yield self._export_item(item)
         self._current_file = None
+
+    def _export_item(self, item):
+        if not self.records:
+            return item
+        record = getattr(item, "tree_record", None)
+        if record is None:
+            record = item
+        return record
 
 ###############################################################################
 ## DataYielder
@@ -589,8 +619,13 @@ class TreeDataYielder(DataYielder):
     def __init__(self,
             files=None,
             taxon_namespace=None,
-            tree_type=None):
-        DataYielder.__init__(self, files=files)
+            tree_type=None,
+            records=False,
+            resume_from=None):
+        DataYielder.__init__(self,
+                files=files,
+                records=records,
+                resume_from=resume_from)
         self.taxon_namespace = taxon_namespace
         assert self.taxon_namespace is not None
         self.attached_taxon_namespace = self.taxon_namespace

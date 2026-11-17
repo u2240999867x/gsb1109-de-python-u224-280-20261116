@@ -333,7 +333,11 @@ class NexusReader(ioservice.DataReader):
         # self.extract_comment_metadata = kwargs.pop('extract_comment_metadata', True)
         # kwargs["extract_comment_metadata"] = self.extract_comment_metadata
 
-        # Create newick handler
+        # Create newick handler. Block-level keywords end a tree statement
+        # even when its terminating semi-colon is missing, rather than being
+        # absorbed as a taxon label.
+        kwargs.setdefault("statement_terminator_tokens",
+                ("END", "ENDBLOCK", "TREE"))
         self.newick_reader = newickreader.NewickReader(**kwargs)
 
         # Set up parsing meta-variables
@@ -638,6 +642,9 @@ class NexusReader(ioservice.DataReader):
         #    and not token==None:
         while not (token == 'END' or token == 'ENDBLOCK'):
             token = self._nexus_tokenizer.next_token_ucase()
+            if self._nexus_tokenizer.is_eof() or token is None:
+                # Truncated source: no END statement ever arrives.
+                break
             if token == "TITLE":
                 token = self._parse_title_statement()
                 taxon_namespace = self._new_taxon_namespace(token)
@@ -690,6 +697,10 @@ class NexusReader(ioservice.DataReader):
                 label_set.add(taxon.lower_cased_label)
 
         while token != ';':
+            if token is None or self._nexus_tokenizer.is_eof():
+                raise self._nexus_error(
+                        "Unexpected end of TAXLABELS statement (missing terminating ';')",
+                        NexusReader.IncompleteBlockError)
             label = token
 
             # Convert the token to the appropriate case to check against label set

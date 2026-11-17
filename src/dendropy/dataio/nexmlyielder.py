@@ -24,6 +24,7 @@ Implementation of NEXML-schema tree iterator.
 
 from dendropy.dataio import ioservice
 from dendropy.dataio import nexmlreader
+from dendropy.dataio import treerecords
 from dendropy.dataio import xmlprocessing
 
 class NexmlTreeDataYielder(
@@ -34,6 +35,8 @@ class NexmlTreeDataYielder(
             files=None,
             taxon_namespace=None,
             tree_type=None,
+            records=False,
+            resume_from=None,
             **kwargs):
         r"""
 
@@ -47,6 +50,10 @@ class NexmlTreeDataYielder(
         taxon_namespace : |TaxonNamespace| instance
             The operational taxonomic unit concept namespace to use to manage
             taxon definitions.
+        records : bool
+            If |True|, iteration yields
+            :class:`~dendropy.dataio.treerecords.TreeRecord` objects, each
+            carrying its trees-block/tree identity.
         \*\*kwargs : keyword arguments
             These will be passed directly to the base `nexmlreader.NexusReader`
             class. See `nexmlreader.NexusReader` for details.
@@ -54,10 +61,13 @@ class NexmlTreeDataYielder(
         ioservice.TreeDataYielder.__init__(self,
                 files=files,
                 taxon_namespace=taxon_namespace,
-                tree_type=tree_type)
+                tree_type=tree_type,
+                records=records,
+                resume_from=resume_from)
         nexmlreader.NexmlReader.__init__(self,
                 **kwargs)
         self.attached_taxon_namespace = self.taxon_namespace
+        self._tree_record_index = 0
 
     ###########################################################################
     ## Implementation of DataYielder interface
@@ -81,7 +91,18 @@ class NexmlTreeDataYielder(
             taxon_namespace = self._id_taxon_namespace_map.get(otus_id, None)
             if not taxon_namespace:
                 raise Exception("Tree block '{}': Taxa block '{}' not found".format(trees_id, otus_id))
-            for tree_element in trees_element.findall_tree():
+            for tree_index_in_block, tree_element in enumerate(trees_element.findall_tree()):
                 tree_obj = self.tree_factory()
                 tree_parser.build_tree(tree_obj, tree_element, otus_id)
+                record = treerecords.TreeRecord(
+                        tree=tree_obj,
+                        record_index=self._tree_record_index,
+                        block_index=trees_idx,
+                        tree_index_in_block=tree_index_in_block,
+                        source_file=self.current_file_name,
+                        label=tree_obj.label,
+                        block_title=trees_label,
+                        link_title=otus_id)
+                tree_obj.tree_record = record
+                self._tree_record_index += 1
                 yield tree_obj

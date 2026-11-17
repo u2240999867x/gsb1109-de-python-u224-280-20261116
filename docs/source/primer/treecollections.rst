@@ -106,3 +106,70 @@ If this was not done, then each tree would have its own distinct |TaxonNamespace
 
 When the number of trees are large or the trees themselves are large or both, iterating over trees in files using :meth:`~dendropy.datamodel.treemodel.Tree.yield_from_files` is almost always going to give the best performance, sometimes orders of magnitude faster.
 This is due to avoiding the Python virtual machine itself from slowing down due to memory usage.
+
+Independently Deliverable Tree Records
+--------------------------------------
+
+NEXUS sources often contain several ``TREES`` blocks, each with its own ``TRANSLATE`` table.
+When trees are delivered one at a time, a tree must not be interpreted with a translation table that belonged to a different block.
+Pass ``records=True`` to obtain a :class:`~dendropy.dataio.treerecords.TreeRecord` for each tree instead of a bare :class:`~dendropy.datamodel.treemodel.Tree`::
+
+    import dendropy
+    yielder = dendropy.Tree.yield_from_files(
+            files=["posterior.trees.nex"],
+            schema="nexus",
+            taxon_namespace=dendropy.TaxonNamespace(),
+            records=True)
+    for record in yielder:
+        print(record.tree_label, record.source_range, record.translate)
+
+Each record carries:
+
+- ``source_range``: the exact character range of the ``TREE`` statement (the
+  statement text is ``source[start_offset:end_offset]``);
+- ``translate``: the translation tokens to taxon labels actually in effect for
+  that tree, snapshotted from its own ``TREES`` block;
+- ``translate_range`` and ``block_range``: the ranges of the translation
+  statement and the containing ``TREES`` block;
+- ``block_index``/``tree_index_in_block`` and a source-wide ``record_index``;
+- ``tree``: the parsed |Tree| itself (also bound to ``record.tree``).
+
+The record is serializable with ``record.as_dict()``, which is suitable for
+writing one JSON line per tree.
+Bare |Tree| objects yielded by the default mode also carry these fields as
+attributes (e.g., ``tree.translate`` and ``tree.source_range``), with the full
+record on ``tree.tree_record``.
+
+Resumable Collection
+--------------------
+
+A yielder exposes ``checkpoint`` after iteration. The checkpoint names the next
+uncommitted record and can be passed back as ``resume_from`` to continue::
+
+    yielder = dendropy.Tree.yield_from_files(
+            files=[source],
+            schema="nexus",
+            taxon_namespace=dendropy.TaxonNamespace(),
+            records=True)
+    for record in yielder:
+        handle(record)
+    checkpoint = yielder.checkpoint
+
+    # Later, possibly in another process:
+    yielder = dendropy.Tree.yield_from_files(
+            files=[source],
+            schema="nexus",
+            taxon_namespace=dendropy.TaxonNamespace(),
+            records=True,
+            resume_from=checkpoint)
+
+If the source ends in the middle of a tree statement, that tail is not
+yielded: an incomplete tree is never presented as a delivered record. Instead
+``yielder.tail`` describes the uncommitted region, and the checkpoint continues
+to point at its beginning. Once the source has been completed, resuming from the
+checkpoint reads the tree exactly once.
+
+Checkpoints include a digest of the source prefix. Resuming from a source whose
+text before the cursor has changed raises
+:class:`~dendropy.dataio.treerecords.ResumeCheckpointError` rather than
+silently parsing the wrong text.
