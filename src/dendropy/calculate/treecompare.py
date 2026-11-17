@@ -26,6 +26,7 @@ import math
 import collections
 import itertools
 from dendropy.utility import error
+from dendropy.datamodel.treemodel import _bipartition
 
 ###############################################################################
 ## Public Functions
@@ -399,8 +400,305 @@ def find_missing_bipartitions(reference_tree, comparison_tree, is_bipartitions_u
             missing.append(bipartition)
     return missing
 
-##############################################################################
-### TreeshapeKernel
+###############################################################################
+## Explicit Rooted/Unrooted Split Comparison
+
+class BipartitionEdgeRecord(object):
+    """
+    Records a single non-trivial split of a tree together with the source
+    edge(s) that induce it, compiled under an explicit rooted or unrooted
+    comparison convention.
+
+    If multiple edges of the same tree map to the same split (e.g., the two
+    edges flanking the basal bifurcation of a rooted tree read under the
+    unrooted convention, or the edges above and below a unifurcation), they
+    are merged into a single record: all source edges are retained in
+    ``edges`` and their lengths migrate with them, i.e. ``edge_length`` is
+    the sum of the lengths of the merged edges (|None| if none of the merged
+    edges has a length).
+    """
+
+    def __init__(self, tree, split_bitmask, leafset_bitmask, tree_leafset_bitmask):
+        self.tree = tree
+        self.split_bitmask = split_bitmask
+        self.leafset_bitmask = leafset_bitmask
+        self.tree_leafset_bitmask = tree_leafset_bitmask
+        self.edges = []
+        self.edge_length = None
+
+    def add_edge(self, edge, edge_length_attr="length"):
+        self.edges.append(edge)
+        length = getattr(edge, edge_length_attr)
+        if length is not None:
+            if self.edge_length is None:
+                self.edge_length = length
+            else:
+                self.edge_length += length
+
+    @property
+    def taxa(self):
+        """
+        list[|Taxon|] : the taxa on the leaf-set (descending) side of the
+        split.
+        """
+        return self.tree.taxon_namespace.bitmask_taxa_list(self.leafset_bitmask)
+
+    @property
+    def label(self):
+        """
+        str : a human-readable rendering of the split, e.g. ``{A, B} | {C, D}``.
+        """
+        taxon_namespace = self.tree.taxon_namespace
+        side1 = sorted(
+            t.label for t in taxon_namespace.bitmask_taxa_list(self.leafset_bitmask))
+        complement = self.leafset_bitmask ^ self.tree_leafset_bitmask
+        side2 = sorted(
+            t.label for t in taxon_namespace.bitmask_taxa_list(complement))
+        return "{{{}}} | {{{}}}".format(", ".join(side1), ", ".join(side2))
+
+    def __str__(self):
+        return self.label
+
+    def __repr__(self):
+        return "BipartitionEdgeRecord({}, edges={})".format(
+                self.label, len(self.edges))
+
+class TreeBipartitionComparison(object):
+    """
+    The result of comparing the splits of two trees under an explicitly
+    specified rooted or unrooted convention.
+
+    Attributes
+    ----------
+    is_rooted : bool
+        The comparison convention used: |True| if the trees were compared as
+        rooted trees (splits are clades, i.e. leaf-sets below each edge,
+        relative to each tree's current root), or |False| if compared as
+        unrooted trees (splits are normalized bipartitions of the leaf set).
+    common : list[tuple[BipartitionEdgeRecord, BipartitionEdgeRecord]]
+        Splits found in both trees, as ``(record_from_tree1,
+        record_from_tree2)`` pairs. Branch lengths migrate with their edges:
+        each record carries the length(s) of its own tree's edge(s).
+    only_in_tree1 : list[BipartitionEdgeRecord]
+        The truly changed splits found only in the first tree, with their
+        source edges.
+    only_in_tree2 : list[BipartitionEdgeRecord]
+        The truly changed splits found only in the second tree, with their
+        source edges.
+    tree1_root_edge, tree2_root_edge : |Edge|
+        The seed (root) edge of each tree. The root edge does not define a
+        split and is therefore stored separately, under its own convention,
+        rather than being conflated with the compared splits.
+    tree1_root_edge_length, tree2_root_edge_length
+        The lengths of the respective root edges (|None| if unset).
+    """
+
+    def __init__(self,
+            tree1,
+            tree2,
+            is_rooted,
+            records1,
+            records2,
+            tree1_root_edge,
+            tree2_root_edge,
+            edge_length_attr="length"):
+        self.tree1 = tree1
+        self.tree2 = tree2
+        self.is_rooted = is_rooted
+        keys1 = set(records1)
+        keys2 = set(records2)
+        self.common = [
+                (records1[key], records2[key])
+                for key in sorted(keys1 & keys2)]
+        self.only_in_tree1 = [records1[key] for key in sorted(keys1 - keys2)]
+        self.only_in_tree2 = [records2[key] for key in sorted(keys2 - keys1)]
+        self.tree1_root_edge = tree1_root_edge
+        self.tree2_root_edge = tree2_root_edge
+        self.tree1_root_edge_length = (
+                getattr(tree1_root_edge, edge_length_attr)
+                if tree1_root_edge is not None else None)
+        self.tree2_root_edge_length = (
+                getattr(tree2_root_edge, edge_length_attr)
+                if tree2_root_edge is not None else None)
+
+    @property
+    def symmetric_difference(self):
+        """
+        int : the number of splits found in one tree but not the other
+        (the unweighted Robinson-Foulds distance under the comparison
+        convention used).
+        """
+        return len(self.only_in_tree1) + len(self.only_in_tree2)
+
+    @property
+    def is_identical(self):
+        """
+        bool : |True| if the two trees have exactly the same splits under the
+        comparison convention used.
+        """
+        return self.symmetric_difference == 0
+
+    def __str__(self):
+        convention = "rooted" if self.is_rooted else "unrooted"
+        lines = [
+                "Tree bipartition comparison ({} convention):".format(convention),
+                "  shared splits: {}".format(len(self.common)),
+                "  splits only in tree 1: {}".format(len(self.only_in_tree1)),
+                ]
+        lines.extend("    {}".format(record.label) for record in self.only_in_tree1)
+        lines.append("  splits only in tree 2: {}".format(len(self.only_in_tree2)))
+        lines.extend("    {}".format(record.label) for record in self.only_in_tree2)
+        return "\n".join(lines)
+
+def _compile_bipartition_edge_records(tree, is_rooted, edge_length_attr="length"):
+    """
+    Compiles a dictionary mapping split bitmasks to |BipartitionEdgeRecord|
+    instances for ``tree`` under the given convention, without modifying the
+    tree. Returns the dictionary and the tree's seed (root) edge, which is
+    reported separately as it does not define a split.
+    """
+    taxon_namespace = tree.taxon_namespace
+    leafset_bitmasks = {}
+    for node in tree.postorder_node_iter():
+        leafset_bitmask = 0
+        child_nodes = node._child_nodes
+        if not child_nodes:
+            if node.taxon is not None:
+                leafset_bitmask = taxon_namespace.taxon_bitmask(node.taxon)
+        else:
+            for child in child_nodes:
+                leafset_bitmask |= leafset_bitmasks[child]
+        leafset_bitmasks[node] = leafset_bitmask
+    tree_leafset_bitmask = leafset_bitmasks[tree.seed_node]
+    records = {}
+    for edge in tree.preorder_edge_iter():
+        head_node = edge.head_node
+        if head_node is tree.seed_node:
+            # The root edge does not define a split; it is stored separately.
+            continue
+        leafset_bitmask = leafset_bitmasks[head_node]
+        if is_rooted:
+            # Rooted convention: a split is identified by the clade (the
+            # leaf-set descending from the edge). Trivial splits are leaf
+            # edges and edges spanning the entire leaf set.
+            split_bitmask = leafset_bitmask
+            if (leafset_bitmask == 0
+                    or leafset_bitmask == tree_leafset_bitmask
+                    or (leafset_bitmask & (leafset_bitmask - 1)) == 0):
+                continue
+        else:
+            # Unrooted convention: a split is identified by the normalized
+            # bipartition of the leaf set, irrespective of rooting.
+            split_bitmask = _bipartition.Bipartition.normalize_bitmask(
+                    bitmask=leafset_bitmask,
+                    fill_bitmask=tree_leafset_bitmask)
+            if _bipartition.Bipartition.is_trivial_bitmask(
+                    split_bitmask, tree_leafset_bitmask):
+                continue
+        record = records.get(split_bitmask)
+        if record is None:
+            record = BipartitionEdgeRecord(
+                    tree=tree,
+                    split_bitmask=split_bitmask,
+                    leafset_bitmask=leafset_bitmask,
+                    tree_leafset_bitmask=tree_leafset_bitmask)
+            records[split_bitmask] = record
+        # Multiple edges may map to the same split (e.g., the pair of edges
+        # flanking a basal bifurcation read as unrooted, or edges separated
+        # by unifurcations): their lengths migrate with them and are summed.
+        record.add_edge(edge, edge_length_attr=edge_length_attr)
+    return records, tree.seed_node.edge
+
+def compare_tree_bipartitions(tree1, tree2, is_rooted=False, edge_length_attr="length"):
+    """
+    Compares the splits of two trees under an explicitly specified rooted or
+    unrooted convention, and reports the splits that actually differ together
+    with the source edges that induce them.
+
+    Two trees that differ only in the ordering of child nodes, or -- under
+    the unrooted convention -- only in the placement of the root, are
+    reported as identical: only genuinely changed splits are reported. Note
+    that unrooted equivalence does *not* imply rooted equivalence: two trees
+    with identical unrooted topologies but different rootings define
+    different ancestor-descendant (clade) relationships, and will be reported
+    as different under the rooted convention.
+
+    Neither tree is modified: bipartitions are compiled directly from the
+    current tree structures, so no re-rooting, collapsing of basal
+    bifurcations, or suppression of unifurcations is performed. Instead,
+    edges that map to the same split within a tree (such as the pair of edges
+    flanking the basal bifurcation of a rooted tree read under the unrooted
+    convention) are merged into a single record, with their lengths migrating
+    with them (i.e., summed). The seed (root) edge of each tree does not
+    define a split and is stored separately in the result.
+
+    Parameters
+    ----------
+    tree1 : |Tree| object
+        The first tree of the two trees being compared. This must share the
+        same |TaxonNamespace| reference as ``tree2``.
+    tree2 : |Tree| object
+        The second tree of the two trees being compared. This must share the
+        same |TaxonNamespace| reference as ``tree1``.
+    is_rooted : bool
+        The comparison convention. If |True|, the trees are compared as
+        rooted trees: a split is identified by the clade (leaf-set) below its
+        edge, so trees that differ only in rooting are reported as different.
+        If |False| (default), the trees are compared as unrooted trees: a
+        split is identified by the normalized bipartition of the leaf set, so
+        trees that differ only in rooting or child order are reported as
+        identical.
+    edge_weight_attr : string
+        Name of attribute on edges of trees to be used as the weight
+        (defaults to ``length``).
+
+    Returns
+    -------
+    comparison : TreeBipartitionComparison
+        The comparison result, with the splits common to both trees, the
+        splits unique to each tree (with their source edges and lengths), and
+        the root edge of each tree stored separately.
+
+    Examples
+    --------
+
+    ::
+
+        import dendropy
+        from dendropy.calculate import treecompare
+        tns = dendropy.TaxonNamespace()
+        tree1 = dendropy.Tree.get_from_string(
+                "((A:1,B:1):2,(C:1,D:1):2);", "newick", taxon_namespace=tns)
+        tree2 = dendropy.Tree.get_from_string(
+                "(A:1,B:1,(C:1,D:1):2);", "newick", taxon_namespace=tns)
+        # same unrooted topology, different rooting: no difference under the
+        # unrooted convention ...
+        comparison = treecompare.compare_tree_bipartitions(tree1, tree2)
+        assert comparison.is_identical
+        # ... but different clades under the rooted convention
+        comparison = treecompare.compare_tree_bipartitions(
+                tree1, tree2, is_rooted=True)
+        assert not comparison.is_identical
+
+    """
+    if tree1.taxon_namespace is not tree2.taxon_namespace:
+        raise error.TaxonNamespaceIdentityError(tree1, tree2)
+    records1, tree1_root_edge = _compile_bipartition_edge_records(
+            tree1, is_rooted=is_rooted, edge_length_attr=edge_length_attr)
+    records2, tree2_root_edge = _compile_bipartition_edge_records(
+            tree2, is_rooted=is_rooted, edge_length_attr=edge_length_attr)
+    return TreeBipartitionComparison(
+            tree1=tree1,
+            tree2=tree2,
+            is_rooted=is_rooted,
+            records1=records1,
+            records2=records2,
+            tree1_root_edge=tree1_root_edge,
+            tree2_root_edge=tree2_root_edge,
+            edge_length_attr=edge_length_attr)
+
+###############################################################################
+## TreeshapeKernel
 
 class TreeShapeKernel(object):
 
