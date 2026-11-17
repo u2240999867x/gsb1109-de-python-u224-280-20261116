@@ -33,7 +33,7 @@ from psrpcore._exceptions import (
     InvalidRunspacePoolState,
     PSRPCoreError,
 )
-from psrpcore._payload import EMPTY_UUID, ProtocolVersion, PSRPPayload, StreamType
+from psrpcore._payload import EMPTY_UUID, DispatchPolicy, ProtocolVersion, PSRPPayload, StreamType
 from psrpcore.types import (
     ApplicationPrivateData,
     DebugRecord,
@@ -74,16 +74,25 @@ class ServerRunspacePool(RunspacePool["ServerPipeline"]):
     Args:
         application_private_data: Any data about the server which is sent to the
             client during negotiation.
+        dispatch_policy: The policy used to pick which buffered messages are
+            sent first.
+        prompt_response_burst: The number of prompt response messages sent
+            before normal data when using the ``prompt_response_first``
+            policy.
     """
 
     def __init__(
         self,
         application_private_data: typing.Optional[typing.Dict] = None,
+        dispatch_policy: typing.Union[DispatchPolicy, str] = DispatchPolicy.fifo,
+        prompt_response_burst: int = 4,
     ) -> None:
         super().__init__(
             EMPTY_UUID,
             application_arguments={},
             application_private_data=application_private_data or {},
+            dispatch_policy=dispatch_policy,
+            prompt_response_burst=prompt_response_burst,
         )
 
         # Pwsh uses the app private data in some places to determine what the remote protocol is. This isn't consistent

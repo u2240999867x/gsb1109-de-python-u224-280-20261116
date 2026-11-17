@@ -37,7 +37,7 @@ from psrpcore._exceptions import (
     InvalidProtocolVersion,
     InvalidRunspacePoolState,
 )
-from psrpcore._payload import ProtocolVersion, StreamType
+from psrpcore._payload import DispatchPolicy, ProtocolVersion, StreamType
 from psrpcore._pipeline import GetMetadata, PowerShell
 from psrpcore.types import (
     ApartmentState,
@@ -89,6 +89,11 @@ class ClientRunspacePool(RunspacePool["_ClientPipeline"]):
         max_runspaces: The maximum number of Runspaces a pool can hold.
         runspace_pool_id: Manually set the Runspace Pool ID, used when
             reconnecting to an existing Runspace Pool.
+        dispatch_policy: The policy used to pick which buffered messages are
+            sent first.
+        prompt_response_burst: The number of prompt response messages sent
+            before normal data when using the ``prompt_response_first``
+            policy.
     """
 
     def __init__(
@@ -100,11 +105,15 @@ class ClientRunspacePool(RunspacePool["_ClientPipeline"]):
         min_runspaces: int = 1,
         max_runspaces: int = 1,
         runspace_pool_id: typing.Optional[uuid.UUID] = None,
+        dispatch_policy: typing.Union[DispatchPolicy, str] = DispatchPolicy.fifo,
+        prompt_response_burst: int = 4,
     ) -> None:
         super().__init__(
             runspace_pool_id or uuid.uuid4(),
             application_arguments=application_arguments or {},
             application_private_data={},
+            dispatch_policy=dispatch_policy,
+            prompt_response_burst=prompt_response_burst,
         )
         self.apartment_state = apartment_state
         self.host = host

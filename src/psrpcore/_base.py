@@ -15,9 +15,11 @@ from psrpcore._exceptions import (
     PSRPCoreError,
 )
 from psrpcore._payload import (
+    DispatchPolicy,
     ProtocolVersion,
     PSRPMessage,
     PSRPPayload,
+    SentFragment,
     StreamType,
     create_fragment,
     create_message,
@@ -62,6 +64,12 @@ class RunspacePool(typing.Generic[T1]):
         ps_version: The PowerShell version.
         protocol_version: The PSRP protocol version that the pool understands.
         serialization_version: The serialization version used by the pool.
+        dispatch_policy: The policy used to pick which buffered messages to
+            send first. Defaults to sending messages in the order they were
+            queued.
+        prompt_response_burst: When using the ``prompt_response_first``
+            policy this is the number of prompt response messages dispatched
+            before normal data is serviced to avoid starving it.
 
     Attributes:
         runspace_pool_id: See args.
@@ -105,12 +113,17 @@ class RunspacePool(typing.Generic[T1]):
         ps_version: typing.Optional[PSVersion] = None,
         protocol_version: typing.Optional[PSVersion] = None,
         serialization_version: typing.Optional[PSVersion] = None,
+        dispatch_policy: typing.Union[DispatchPolicy, str] = DispatchPolicy.fifo,
+        prompt_response_burst: int = 4,
     ) -> None:
         log.debug(
             "Creating Runspace Pool - RPID: %s, Type: %s",
             runspace_pool_id,
             type(self).__name__,
         )
+
+        if prompt_response_burst < 1:
+            raise ValueError("prompt_response_burst must be 1 or larger")
 
         self.runspace_pool_id = runspace_pool_id
         self.our_capability = SessionCapability(
@@ -137,6 +150,19 @@ class RunspacePool(typing.Generic[T1]):
         self._min_runspaces = 0
         self._max_runspaces = 0
         self._send_buffer: typing.List[PSRPMessage] = []
+        self._dispatch_policy = DispatchPolicy(dispatch_policy)
+        self._prompt_response_burst = prompt_response_burst
+        self._prompt_response_burst_used = 0
+
+        # A message partially sent by the previous data_to_send call. It is
+        # finished before the dispatch policy is evaluated again.
+        self._in_flight: typing.Optional[PSRPMessage] = None
+
+        # Fragments that have been handed to the transport, including those for
+        # pipelines that have since been cancelled. This is kept so the
+        # identity of data that has already been sent can still be accounted
+        # for.
+        self._sent_fragments: typing.List[SentFragment] = []
 
         # Raw bytes received but not yet processed.
         self._receive_buffer = bytearray()
@@ -224,9 +250,164 @@ class RunspacePool(typing.Generic[T1]):
 
         self._change_state(RunspacePoolState.Opened)
 
+    @property
+    def dispatch_policy(
+        self,
+    ) -> DispatchPolicy:
+        """The policy used to pick the next message to send."""
+        return self._dispatch_policy
+
+    @dispatch_policy.setter
+    def dispatch_policy(
+        self,
+        value: typing.Union[DispatchPolicy, str],
+    ) -> None:
+        self._dispatch_policy = DispatchPolicy(value)
+        self._prompt_response_burst_used = 0
+
+    @property
+    def prompt_response_burst(
+        self,
+    ) -> int:
+        """The number of prompt response messages sent before normal data.
+
+        This only applies when :attr:`dispatch_policy` is set to
+        :attr:`DispatchPolicy.prompt_response_first`. A value of ``1``
+        alternates between prompt responses and normal data whenever both are
+        available.
+        """
+        return self._prompt_response_burst
+
+    @prompt_response_burst.setter
+    def prompt_response_burst(
+        self,
+        value: int,
+    ) -> None:
+        if value < 1:
+            raise ValueError("prompt_response_burst must be 1 or larger")
+
+        self._prompt_response_burst = value
+        self._prompt_response_burst_used = 0
+
+    @property
+    def sent_fragments(
+        self,
+    ) -> typing.List[SentFragment]:
+        """The fragments that have been handed to the transport.
+
+        This includes fragments belonging to pipelines that have since been
+        cancelled or closed so the identity of data that has already been sent
+        can still be accounted for.
+        """
+        return list(self._sent_fragments)
+
+    def get_sent_fragments(
+        self,
+        pipeline_id: typing.Optional[uuid.UUID] = None,
+    ) -> typing.List[SentFragment]:
+        """Get the fragments that have been sent for a pipeline.
+
+        Args:
+            pipeline_id: The pipeline to filter on or ``None`` to get the
+                fragments for the Runspace Pool itself.
+
+        Returns:
+            typing.List[SentFragment]: The fragments that have been sent.
+        """
+        return [f for f in self._sent_fragments if f.pipeline_id == pipeline_id]
+
+    def clear_sent_fragments(
+        self,
+    ) -> None:
+        """Clear the record of fragments that have been sent.
+
+        The sent fragment record is normally retained so data that has already
+        been handed to the transport can be accounted for after a pipeline has
+        been cancelled.
+        """
+        self._sent_fragments.clear()
+
+    def set_dispatch_policy(
+        self,
+        policy: typing.Union[DispatchPolicy, str],
+        prompt_response_burst: typing.Optional[int] = None,
+    ) -> None:
+        """Set how buffered messages are dispatched.
+
+        Args:
+            policy: The dispatch policy to use.
+            prompt_response_burst: The number of prompt response messages to
+                send before servicing normal data when using the
+                ``prompt_response_first`` policy.
+        """
+        self.dispatch_policy = policy
+        if prompt_response_burst is not None:
+            self.prompt_response_burst = prompt_response_burst
+
+    def cancel_pipeline(
+        self,
+        pipeline_id: uuid.UUID,
+    ) -> typing.List[PSRPMessage]:
+        """Remove the unsent data for a pipeline.
+
+        Any message that has not been fully sent is removed from the send
+        buffer. Fragments that have already been sent are still available
+        through :attr:`sent_fragments` so they can be accounted for.
+
+        Args:
+            pipeline_id: The pipeline whose unsent data should be removed.
+
+        Returns:
+            typing.List[PSRPMessage]: The messages that were removed.
+        """
+        if not isinstance(pipeline_id, uuid.UUID):
+            pipeline = getattr(pipeline_id, "pipeline_id", None)
+            if not isinstance(pipeline, uuid.UUID):
+                raise ValueError("pipeline_id must be a UUID")
+            pipeline_id = pipeline
+
+        removed = []
+        remaining = []
+        for message in self._send_buffer:
+            if message.pipeline_id == pipeline_id:
+                removed.append(message)
+            else:
+                remaining.append(message)
+
+        if self._in_flight is not None and self._in_flight.pipeline_id == pipeline_id:
+            if self._in_flight not in removed:
+                removed.append(self._in_flight)
+            self._in_flight = None
+
+        self._send_buffer = remaining
+        return removed
+
+    def cancel_pending(
+        self,
+        pipeline_id: uuid.UUID,
+    ) -> typing.List[PSRPMessage]:
+        """Alias for :meth:`cancel_pipeline`."""
+        return self.cancel_pipeline(pipeline_id)
+
+    def get_pending_messages(
+        self,
+        pipeline_id: typing.Optional[uuid.UUID] = None,
+    ) -> typing.List[PSRPMessage]:
+        """Get the messages that have not been fully sent.
+
+        Args:
+            pipeline_id: The pipeline to filter on or ``None`` to get the
+                messages for the Runspace Pool itself.
+
+        Returns:
+            typing.List[PSRPMessage]: The messages still in the send buffer.
+        """
+        return [m for m in self._send_buffer if m.pipeline_id == pipeline_id]
+
     def data_to_send(
         self,
         amount: typing.Optional[int] = None,
+        policy: typing.Optional[typing.Union[DispatchPolicy, str]] = None,
     ) -> typing.Optional[PSRPPayload]:
         """Gets the next PSRP payload.
 
@@ -235,9 +416,17 @@ class RunspacePool(typing.Generic[T1]):
         implementer to get the next PSRP payload that is then sent over it's
         transport.
 
+        The returned payload only contains fragments for a single target
+        (pipeline and stream type). When the
+        :attr:`DispatchPolicy.prompt_response_first` policy is used messages
+        on the ``prompt_response`` stream are picked before normal data but
+        normal data is still serviced after at most
+        :attr:`prompt_response_burst` prompt response messages.
+
         Args:
             amount: The maximum size of the data fragment that can be sent.
                 This must be 22 or larger to fit the fragment headers.
+            policy: Overrides :attr:`dispatch_policy` for this call only.
 
         Returns:
              typing.Optional[PSRPPayload]: The payload (if any) that needs to
@@ -246,29 +435,54 @@ class RunspacePool(typing.Generic[T1]):
         if amount is not None and amount < 22:
             raise ValueError("amount must be 22 or larger to fit a PSRP fragment")
 
+        active_policy = self._dispatch_policy if policy is None else DispatchPolicy(policy)
+
+        # The dispatch policy is only evaluated once the previous fragment was
+        # an end fragment. While a message is still being fragmented the rest
+        # of it is sent first so a message's fragments stay contiguous and the
+        # order within a pipeline is preserved.
+        if self._in_flight is not None:
+            message = self._in_flight
+            chose_message = False
+        else:
+            message = self._select_message(active_policy)
+            if message is None:
+                return None
+            chose_message = True
+
         current_buffer = bytearray()
-        stream_type = StreamType.default
-        pipeline_id = None
+        stream_type = message.stream_type
+        pipeline_id = message.pipeline_id
         fragment_size = 21
-        # TODO: prioritise prompt_response over default if the last fragment was an end fragment.
+        budget = amount
 
-        for message in list(self._send_buffer):
-            if amount is not None and amount < fragment_size:
+        # The payload can only contain fragments for a single target. Messages
+        # for the selected target are packed in queue order until the target
+        # changes or the transport budget is exhausted.
+        index = self._send_buffer.index(message)
+        while index < len(self._send_buffer):
+            message = self._send_buffer[index]
+
+            if message.stream_type != stream_type or message.pipeline_id != pipeline_id:
                 break
 
-            if not current_buffer:
-                stream_type = message.stream_type
-                pipeline_id = message.pipeline_id
-
-            # We can only combine fragments if they are for the same target.
-            if pipeline_id != message.pipeline_id:
+            if budget is not None and budget < fragment_size:
                 break
 
-            if amount is None:
-                allowed_length = len(message)
+            message_length = len(message)
+
+            if budget is None:
+                allowed_length = message_length
             else:
-                allowed_length = amount - fragment_size
-                amount -= fragment_size + len(message)
+                allowed_length = budget - fragment_size
+                if message_length:
+                    if allowed_length <= 0:
+                        # Fragment headers must be followed by at least 1 byte
+                        # of data to make progress.
+                        break
+                    allowed_length = min(message_length, allowed_length)
+                else:
+                    allowed_length = 0
 
             fragment = message.fragment(allowed_length)
             log.debug(
@@ -281,11 +495,87 @@ class RunspacePool(typing.Generic[T1]):
             )
 
             current_buffer += create_fragment(fragment.object_id, fragment.fragment_id, fragment.data, fragment.end)
+            self._sent_fragments.append(
+                SentFragment(
+                    fragment.object_id,
+                    fragment.fragment_id,
+                    pipeline_id,
+                    stream_type,
+                    fragment.start,
+                    fragment.end,
+                    len(fragment.data),
+                )
+            )
+
+            if budget is not None:
+                budget -= fragment_size + len(fragment.data)
 
             if len(message) == 0:
-                self._send_buffer.remove(message)
+                self._send_buffer.pop(index)
+                if self._in_flight is message:
+                    self._in_flight = None
 
-        return PSRPPayload(bytes(current_buffer), stream_type, pipeline_id) if current_buffer else None
+                if active_policy == DispatchPolicy.prompt_response_first and any(
+                    m.stream_type == StreamType.prompt_response for m in self._send_buffer
+                ):
+                    # This message ended; let the next call pick the pending
+                    # prompt response before packing more normal data.
+                    break
+
+                continue
+
+            # Only a partially sent message may be continued on the next call
+            # so its remaining fragments are not interleaved with another
+            # target.
+            self._in_flight = message
+            break
+
+        if not current_buffer:
+            return None
+
+        if active_policy == DispatchPolicy.prompt_response_first and chose_message:
+            if stream_type == StreamType.prompt_response:
+                self._prompt_response_burst_used += 1
+            else:
+                self._prompt_response_burst_used = 0
+
+        return PSRPPayload(bytes(current_buffer), stream_type, pipeline_id)
+
+    def _select_message(
+        self,
+        policy: typing.Optional[DispatchPolicy] = None,
+    ) -> typing.Optional[PSRPMessage]:
+        """Pick the next message to dispatch based on the dispatch policy."""
+        if not self._send_buffer:
+            return None
+
+        if policy is None:
+            policy = self._dispatch_policy
+
+        if policy != DispatchPolicy.prompt_response_first:
+            return self._send_buffer[0]
+
+        prompt_message = next(
+            (m for m in self._send_buffer if m.stream_type == StreamType.prompt_response),
+            None,
+        )
+        if prompt_message is None:
+            self._prompt_response_burst_used = 0
+            return self._send_buffer[0]
+
+        default_message = next(
+            (m for m in self._send_buffer if m.stream_type != StreamType.prompt_response),
+            None,
+        )
+        if default_message is None:
+            return prompt_message
+
+        if self._prompt_response_burst_used >= self._prompt_response_burst:
+            # Avoid starving normal data by servicing it after a bounded
+            # number of prompt response messages.
+            return default_message
+
+        return prompt_message
 
     def receive_data(
         self,
@@ -552,6 +842,23 @@ class Pipeline(typing.Generic[T2]):
         if self.state not in valid_state:
             raise InvalidPipelineState("closing a pipeline", self.state, valid_state)
         self.runspace_pool.pipeline_table.pop(self.pipeline_id, None)
+
+    def cancel(self) -> typing.List[PSRPMessage]:
+        """Cancel the unsent data for this pipeline.
+
+        Removes any message for this pipeline that has not been fully sent
+        from the Runspace Pool send buffer. Data that has already been handed
+        to the transport is left in place and its identity can still be
+        retrieved through :attr:`RunspacePool.sent_fragments`.
+
+        Returns:
+            typing.List[PSRPMessage]: The messages that were removed.
+        """
+        return self.runspace_pool.cancel_pipeline(self.pipeline_id)
+
+    def cancel_pending(self) -> typing.List[PSRPMessage]:
+        """Alias for :meth:`cancel`."""
+        return self.cancel()
 
     def prepare_message(
         self,

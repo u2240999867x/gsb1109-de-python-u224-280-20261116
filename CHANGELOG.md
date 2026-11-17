@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+* Added a configurable `DispatchPolicy` for outgoing messages
+  * `fifo` (default) preserves the existing ordering
+  * `prompt_response_first` sends host call/responses before normal output at message boundaries
+  * A configurable prompt response burst prevents normal data from being starved
+* `data_to_send()` payloads are limited to a single pipeline and stream type
+  * The transport byte budget is now respected exactly, including when a message needs multiple fragments
+* Added `RunspacePool.sent_fragments`/`get_sent_fragments()` to account for fragments handed to the transport
+* Added `RunspacePool.cancel_pipeline()`/`Pipeline.cancel()` to remove only the unsent data of a pipeline
+
 ## 0.3.1 - 2024-11-11
 
 * Fixed CLIXML string pattern matching to only match valid hex sequences and not just any alphanumeric character

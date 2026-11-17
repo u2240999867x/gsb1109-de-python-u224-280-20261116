@@ -228,6 +228,29 @@ s_ps.close()
 One key thing to note is that the data is still exchanged on the underlying Runspace Pool.
 A call to ``data_to_send()`` is guaranteed to not mix messages targeted towards different pipelines or the pool in general.
 
+## Sending priorities
+
+By default messages are sent in the order they were queued.
+When a large amount of pipeline output is being sent while the peer is waiting on a host response, that response can be stuck behind the output.
+The ``prompt_response_first`` dispatch policy sends ``prompt_response`` messages (host calls/responses) first so they are not delayed by normal output:
+
+```python
+client_pool = psrpcore.ClientRunspacePool(dispatch_policy=psrpcore.DispatchPolicy.prompt_response_first)
+```
+
+The policy is evaluated at message boundaries, so a message is never split apart and a payload never contains fragments for more than one pipeline and stream type.
+Within each pipeline and stream type messages are still sent in the order they were queued.
+Normal data cannot be starved: after at most ``prompt_response_burst`` prompt response messages a normal data message is sent.
+The burst can be configured with ``prompt_response_burst`` or ``set_dispatch_policy()`` and the policy can also be supplied for a single call with ``data_to_send(policy=...)``.
+
+When a pipeline is cancelled only its unsent data is removed from the send buffer:
+
+```python
+pipeline.cancel()
+```
+
+Fragments that have already been handed to the transport are not removed and can still be accounted for through ``runspace_pool.sent_fragments`` or ``runspace_pool.get_sent_fragments(pipeline_id)``.
+
 ### Exchanged Events
 
 |Message|Role|Purpose|

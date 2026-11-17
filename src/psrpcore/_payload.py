@@ -94,6 +94,64 @@ class StreamType(enum.Enum):
     prompt_response = enum.auto()  #: Used for host call/responses PSRP messages.
 
 
+class DispatchPolicy(enum.Enum):
+    """The policy used to pick the messages to send.
+
+    This controls the order that buffered PSRP messages are dispatched in when
+    :meth:`psrpcore.RunspacePool.data_to_send` is called.
+
+    The ``fifo`` policy sends messages in the order they were queued. The
+    ``prompt_response_first`` policy prefers messages on the
+    :attr:`StreamType.prompt_response` stream so a host response is not stuck
+    behind a large amount of normal pipeline output. Messages are still sent
+    in the order they were queued within each stream and starvation of the
+    default stream is avoided by only dispatching a bounded burst of prompt
+    responses before servicing normal data.
+
+    ``priority`` and ``prompt_response`` are aliases of
+    ``prompt_response_first`` and ``default`` is an alias of ``fifo``.
+    """
+
+    fifo = "fifo"
+    default = "fifo"
+    prompt_response_first = "prompt_response_first"
+    priority = "prompt_response_first"
+    prompt_response = "prompt_response_first"
+
+    @classmethod
+    def _missing_(cls, value: typing.Any) -> typing.Optional["DispatchPolicy"]:
+        if isinstance(value, str):
+            normalized = value.strip().lower().replace("-", "_")
+            aliases = {
+                "default": cls.fifo,
+                "fifo": cls.fifo,
+                "priority": cls.prompt_response_first,
+                "prompt_response": cls.prompt_response_first,
+                "promptresponse": cls.prompt_response_first,
+                "prompt_response_first": cls.prompt_response_first,
+            }
+            if normalized in aliases:
+                return aliases[normalized]
+
+        return None
+
+
+class SentFragment(typing.NamedTuple):
+    """A fragment that has been handed to the transport.
+
+    The identity of a fragment is retained after a pipeline has been cancelled
+    so callers can still account for any data that was already sent.
+    """
+
+    object_id: int  #: The PSRP message object id the fragment belongs to.
+    fragment_id: int  #: The fragment id within the PSRP message.
+    pipeline_id: typing.Optional[uuid.UUID]  #: The target pipeline, if any.
+    stream_type: "StreamType"  #: The stream the fragment was sent on.
+    start: bool  #: Whether this is the first fragment of the PSRP message.
+    end: bool  #: Whether this is the last fragment of the PSRP message.
+    length: int  #: The number of PSRP message bytes in the fragment.
+
+
 class PSRPMessage:
     """PSRP Message in the outgoing queue.
 

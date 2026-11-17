@@ -60,7 +60,7 @@ from psrpcore._exceptions import (
     PSRPCoreError,
 )
 from psrpcore._host import ClientHostResponder, ServerHostRequestor
-from psrpcore._payload import PSRPPayload, StreamType
+from psrpcore._payload import DispatchPolicy, PSRPPayload, SentFragment, StreamType
 from psrpcore._pipeline import GetMetadata, PowerShell
 from psrpcore._server import ServerPipeline, ServerRunspacePool
 
@@ -76,6 +76,7 @@ __all__ = [
     "ConnectRunspacePoolEvent",
     "CreatePipelineEvent",
     "DebugRecordEvent",
+    "DispatchPolicy",
     "EncryptedSessionKeyEvent",
     "EndOfPipelineInputEvent",
     "ErrorRecordEvent",
@@ -110,6 +111,7 @@ __all__ = [
     "ServerHostRequestor",
     "ServerPipeline",
     "ServerRunspacePool",
+    "SentFragment",
     "SessionCapabilityEvent",
     "SetMaxRunspacesEvent",
     "SetMinRunspacesEvent",
