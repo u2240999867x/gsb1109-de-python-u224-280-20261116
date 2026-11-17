@@ -3,6 +3,10 @@
 
 - Return an empty selection for empty files with the default and HTML parsers.
 
+- Add ``merge_fragment`` and ``merge_fragments`` to update one replacement
+  region from page fragments, matching records by a unique identity key and
+  keeping short fragments additive.
+
 
 2.1.0 (2026-07-27)
 ------------------

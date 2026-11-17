@@ -695,6 +695,160 @@ Bacon</textarea>
         self.assertEqual(d.html(), inner_html)
 
 
+class TestMergeFragment(TestCase):
+
+    html = '''
+        <div id="document">
+          <ul id="open">
+            <li id="a">A</li>
+            <li id="b">B</li>
+            <li id="c">C</li>
+          </ul>
+          <ul id="closed">
+            <li id="b">B closed</li>
+          </ul>
+        </div>
+    '''
+
+    def test_update_in_place_keeps_identity(self):
+        d = pq(self.html)
+        old = d('#open li')[1]
+        d.merge_fragment('<li id="b">B2</li>', '#open')
+        self.assertIs(d('#open li')[1], old)
+        self.assertEqual(d('#open li').eq(1).text(), 'B2')
+
+    def test_only_target_region_changes(self):
+        d = pq(self.html)
+        d.merge_fragment('<li id="b">B2</li><li id="d">D</li>', '#open')
+        self.assertEqual([e.text for e in d('#open li')],
+                         ['A', 'B2', 'D', 'C'])
+        self.assertEqual(d('#closed').text(), 'B closed')
+
+    def test_partial_fragment_keeps_absent_records(self):
+        d = pq(self.html)
+        d.merge_fragment('<li id="b">B2</li>', '#open')
+        self.assertEqual(d('#open li').length, 3)
+        self.assertEqual([e.text for e in d('#open li')], ['A', 'B2', 'C'])
+
+    def test_complete_fragment_removes_only_absent_keyed_records(self):
+        d = pq(self.html)
+        d.merge_fragment('<li id="b">B2</li>', '#open', complete=True)
+        self.assertEqual([e.text for e in d('#open li')], ['B2'])
+        self.assertEqual(d('#closed').text(), 'B closed')
+
+    def test_complete_fragment_with_unkeyed_record_is_additive(self):
+        d = pq(self.html)
+        d.merge_fragment('<li>B2</li>', '#open', complete=True)
+        self.assertEqual(d('#open li').length, 4)
+        self.assertEqual(d('#open li').eq(3).text(), 'B2')
+
+    def test_complete_fragment_drops_old_unkeyed_and_duplicate_rows(self):
+        d = pq('<ul id="rows"><li id="a">A</li><li>U</li>'
+               '<li id="x">1</li><li id="x">2</li></ul>')
+        d.merge_fragment('<li id="a">A2</li>', '#rows', complete=True)
+        self.assertEqual([e.get('id') for e in d('li')], ['a'])
+        self.assertEqual(d('li').text(), 'A2')
+
+    def test_complete_fragment_with_duplicate_incoming_is_additive(self):
+        d = pq('<ul id="rows"><li id="a">A</li><li id="b">B</li></ul>')
+        d.merge_fragment('<li id="a">A2</li><li id="a">A3</li>',
+                         '#rows', complete=True)
+        self.assertEqual([e.text for e in d('li')],
+                         ['A', 'B', 'A2', 'A3'])
+
+    def test_batches_update_records_added_by_earlier_batch(self):
+        d = pq('<ul id="rows"></ul>')
+        d.merge_fragments([
+            ('<li id="a">A</li><li id="b">B</li>', '#rows'),
+            ('<li id="b">B2</li><li id="c">C</li>', '#rows'),
+        ])
+        self.assertEqual([e.text for e in d('li')], ['A', 'B2', 'C'])
+
+    def test_empty_fragment_needs_explicit_allow_empty(self):
+        d = pq(self.html)
+        d.merge_fragment('', '#open', complete=True)
+        self.assertEqual(d('#open li').length, 3)
+        d.merge_fragment('', '#open', complete=True, allow_empty=True)
+        self.assertEqual(d('#open li').length, 0)
+
+    def test_shared_fragment_is_not_moved(self):
+        d = pq(self.html)
+        closed = d('#closed li')[0]
+        d.merge_fragment(d('#closed li'), '#open')
+        self.assertIs(d('#closed li')[0], closed)
+        self.assertEqual(d('#closed').text(), 'B closed')
+        self.assertEqual(d('#open li').eq(1).text(), 'B closed')
+
+    def test_unkeyed_equal_rows_stay_independent(self):
+        d = pq('<ul id="rows"><li>A</li></ul>')
+        d.merge_fragment('<li>A</li><li>A</li>', '#rows')
+        self.assertEqual(d('li').length, 3)
+        self.assertIsNot(d('li')[0], d('li')[1])
+        self.assertIsNot(d('li')[0], d('li')[2])
+
+    def test_ambiguous_keys_are_not_forced_to_continue(self):
+        d = pq('<ul id="rows"><li id="x">1</li><li id="x">2</li></ul>')
+        d.merge_fragment('<li id="x">3</li>', '#rows')
+        self.assertEqual([e.text for e in d('li')], ['1', '2', '3'])
+
+        d = pq('<ul id="rows"><li id="x">1</li></ul>')
+        d.merge_fragment('<li id="x">2</li><li id="x">3</li>', '#rows')
+        self.assertEqual([e.text for e in d('li')], ['1', '2', '3'])
+
+    def test_fragment_order_is_kept_between_anchors(self):
+        d = pq('<ul id="rows"><li id="a">A</li><li id="b">B</li></ul>')
+        d.merge_fragment(
+            '<li id="x">X</li><li id="a">A2</li>'
+            '<li id="y">Y</li><li id="b">B2</li><li id="z">Z</li>',
+            '#rows')
+        self.assertEqual([e.get('id') for e in d('li')],
+                         ['x', 'a', 'y', 'b', 'z'])
+        self.assertEqual([e.text for e in d('li')],
+                         ['X', 'A2', 'Y', 'B2', 'Z'])
+
+    def test_record_selector_limits_the_region(self):
+        d = pq('<div id="r"><p class="rec" id="a">A</p>'
+               '<span id="keep">K</span></div>')
+        d.merge_fragment(
+            '<p class="rec" id="a">A2</p><p class="rec" id="b">B</p>'
+            '<div id="other">O</div>', '#r', selector='p.rec')
+        self.assertEqual(d('#r > p.rec').length, 2)
+        self.assertEqual(d('#keep').text(), 'K')
+        self.assertEqual(d('#other').length, 0)
+
+    def test_key_can_be_an_attribute_or_callable(self):
+        d = pq('<ul id="rows"><li data-k="a">A</li></ul>')
+        d.merge_fragment('<li data-k="a">A2</li>', '#rows', key='data-k')
+        self.assertEqual(d('li').text(), 'A2')
+
+        d = pq('<ul id="rows"><li data-k="a">A</li></ul>')
+        d.merge_fragment('<li data-k="a">A3</li>', '#rows',
+                         key=lambda el: el.get('data-k'))
+        self.assertEqual(d('li').text(), 'A3')
+
+    def test_region_must_be_unambiguous(self):
+        d = pq('<div><ul class="rows"><li id="a">A</li></ul>'
+               '<ul class="rows"><li id="a">B</li></ul></div>')
+        self.assertRaises(ValueError, d.merge_fragment,
+                          '<li id="a">C</li>', '.rows')
+
+    def test_merge_fragments_batch(self):
+        d = pq('<div><ul id="a"><li id="x">X</li></ul>'
+               '<ul id="b"><li id="y">Y</li></ul></div>')
+        d.merge_fragments([
+            ('<li id="x">X2</li>', '#a'),
+            {'fragment': '<li id="y">Y2</li>', 'region': '#b',
+             'complete': True},
+        ])
+        self.assertEqual(d('#a').text(), 'X2')
+        self.assertEqual(d('#b').text(), 'Y2')
+
+    def test_camel_case_alias(self):
+        d = pq('<ul id="rows"><li id="a">A</li></ul>')
+        d.mergeFragment('<li id="a">A2</li>', '#rows')
+        self.assertEqual(d('li').text(), 'A2')
+
+
 class TestAjax(TestCase):
 
     html = '''

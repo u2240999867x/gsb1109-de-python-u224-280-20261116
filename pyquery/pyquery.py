@@ -1511,6 +1511,219 @@ class PyQuery(list):
             results.remove()
         return self
 
+    def _merge_region(self, region):
+        if isinstance(region, basestring):
+            selected = self(region)
+        elif isinstance(region, self.__class__):
+            selected = region
+        elif isinstance(region, etree._Element):
+            selected = [region]
+        else:
+            raise TypeError(region)
+        if len(selected) != 1:
+            raise ValueError(
+                f'Region must select exactly one element, got {len(selected)}')
+        return selected[0]
+
+    def _merge_records(self, elements, selector):
+        records = [e for e in elements
+                   if isinstance(getattr(e, 'tag', None), str)]
+        if selector is not None:
+            records = list(self._filter_only(selector, records))
+        return records
+
+    def _fragment_records(self, fragment, selector):
+        if isinstance(fragment, self.__class__):
+            elements = list(fragment)
+        elif isinstance(fragment, etree._Element):
+            elements = [fragment]
+        elif isinstance(fragment, etree._ElementTree):
+            elements = [fragment.getroot()]
+        elif isinstance(fragment, (list, tuple)):
+            elements = list(fragment)
+        elif isinstance(fragment, basestring):
+            root, _ = self._get_root(fragment)
+            elements = list(root)
+        else:
+            raise TypeError(fragment)
+        return self._merge_records(elements, selector)
+
+    @staticmethod
+    def _record_identity(element, key):
+        if key is None:
+            return None
+        identity = key(element) if callable(key) else element.get(key)
+        if identity is None:
+            return None
+        if isinstance(identity, str):
+            identity = identity.strip()
+            if not identity:
+                return None
+        try:
+            hash(identity)
+        except TypeError:
+            raise TypeError('Record key must be hashable') from None
+        return identity
+
+    @staticmethod
+    def _replace_record(target, source):
+        source = deepcopy(source)
+        target.tag = source.tag
+        target.attrib.clear()
+        target.attrib.update(source.attrib)
+        target.text = source.text
+        target[:] = []
+        target.extend(source)
+
+    @with_camel_case_alias
+    def merge_fragment(self, fragment, region, key='id', selector=None,
+                       complete=False, allow_empty=False):
+        """Merge a page fragment into one replacement region.
+
+        Only direct record children of ``region`` are considered.  A record
+        whose ``key`` is unique both in the region and in the fragment is
+        updated in place, so existing element references stay valid.  New
+        records are inserted in fragment order; unkeyed or ambiguously keyed
+        records are always independent occurrences instead of being matched
+        by position or content.
+
+        By default missing records are kept.  Pass ``complete=True`` when the
+        fragment is known to be complete for the region; every old record not
+        matched by a unique key is then removed.  This is refused when any
+        incoming record lacks a unique key, because a truncated or ambiguous
+        fragment must not wipe the region.  An empty fragment removes nothing
+        unless ``allow_empty=True`` is also given.
+
+            >>> d = PyQuery('<ul id="items"><li id="a">A</li>'
+            ...             '<li id="b">B</li></ul>')
+            >>> d.merge_fragment('<li id="b">B2</li><li id="c">C</li>',
+            ...                  '#items')
+            [<ul#items>]
+            >>> print(d('#items').html())
+            <li id="a">A</li><li id="b">B2</li><li id="c">C</li>
+        """
+        region_element = self._merge_region(region)
+        incoming = self._fragment_records(fragment, selector)
+        old_records = self._merge_records(list(region_element), selector)
+
+        old_by_key = {}
+        for element in old_records:
+            identity = self._record_identity(element, key)
+            if identity is not None:
+                old_by_key.setdefault(identity, []).append(element)
+
+        incoming_keys = [
+            self._record_identity(element, key) for element in incoming
+        ]
+        key_counts = {}
+        for identity in incoming_keys:
+            if identity is not None:
+                key_counts[identity] = key_counts.get(identity, 0) + 1
+
+        claimed = set()
+        matched = []
+        for identity in incoming_keys:
+            target = None
+            if identity is not None and key_counts[identity] == 1:
+                candidates = old_by_key.get(identity)
+                if (candidates is not None and len(candidates) == 1
+                        and id(candidates[0]) not in claimed):
+                    target = candidates[0]
+                    claimed.add(id(target))
+            matched.append(target)
+
+        previous = None
+        for index, (source, target) in enumerate(zip(incoming, matched)):
+            if target is not None:
+                self._replace_record(target, source)
+                previous = target
+                continue
+            node = deepcopy(source)
+            if previous is not None and previous.getparent() is region_element:
+                position = region_element.index(previous) + 1
+            else:
+                next_target = None
+                for later in matched[index + 1:]:
+                    if (later is not None
+                            and later.getparent() is region_element):
+                        next_target = later
+                        break
+                if next_target is not None:
+                    position = region_element.index(next_target)
+                elif old_records:
+                    last = old_records[-1]
+                    position = (region_element.index(last) + 1
+                                if last.getparent() is region_element
+                                else len(region_element))
+                else:
+                    position = len(region_element)
+            region_element.insert(position, node)
+            previous = node
+
+        if complete and allow_empty and not incoming:
+            for element in old_records:
+                self._copy(element).remove()
+        elif complete and incoming:
+            keyed = all(identity is not None for identity in incoming_keys)
+            unambiguous = all(count == 1 for count in key_counts.values())
+            if keyed and unambiguous:
+                matched_ids = {id(target) for target in matched
+                               if target is not None}
+                for element in old_records:
+                    if id(element) not in matched_ids:
+                        self._copy(element).remove()
+
+        return self
+
+    @with_camel_case_alias
+    def merge_fragments(self, fragments, key='id', selector=None,
+                        complete=False, allow_empty=False):
+        """Merge several fragments into their replacement regions.
+
+        ``fragments`` is an iterable of ``(fragment, region)`` (or
+        ``(fragment, region, key)``) tuples or dictionaries with
+        ``fragment`` and ``region`` keys.  Per-item dictionaries may also
+        override ``key``, ``selector``, ``complete`` and ``allow_empty``.
+        All items are merged against the same document, so a fragment that
+        references an element in another region does not move or remove that
+        element.
+
+            >>> d = PyQuery('<div><ul id="a"><li id="x">X</li></ul>'
+            ...             '<ul id="b"><li id="y">Y</li></ul></div>')
+            >>> d.merge_fragments([
+            ...     ('<li id="x">X2</li>', '#a'),
+            ...     {'fragment': '<li id="y">Y2</li>', 'region': '#b'},
+            ... ])
+            [<div>]
+            >>> print(d('#a').html(), '|', d('#b').html())
+            <li id="x">X2</li> | <li id="y">Y2</li>
+        """
+        defaults = {
+            'key': key,
+            'selector': selector,
+            'complete': complete,
+            'allow_empty': allow_empty,
+        }
+        for spec in fragments:
+            if isinstance(spec, dict):
+                if 'fragment' not in spec or 'region' not in spec:
+                    raise ValueError('fragment and region are required')
+                fragment = spec['fragment']
+                region = spec['region']
+                options = defaults.copy()
+                options.update(
+                    (name, spec[name]) for name in defaults if name in spec)
+            else:
+                if len(spec) < 2:
+                    raise ValueError('Expected (fragment, region)')
+                fragment = spec[0]
+                region = spec[1]
+                options = defaults.copy()
+                if len(spec) > 2:
+                    options['key'] = spec[2]
+            self.merge_fragment(fragment, region, **options)
+        return self
+
     class Fn:
         """Hook for defining custom function (like the jQuery.fn):
 
