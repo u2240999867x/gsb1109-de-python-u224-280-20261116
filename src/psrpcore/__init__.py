@@ -62,6 +62,18 @@ from psrpcore._exceptions import (
 from psrpcore._host import ClientHostResponder, ServerHostRequestor
 from psrpcore._payload import PSRPPayload, StreamType
 from psrpcore._pipeline import GetMetadata, PowerShell
+from psrpcore._rpa import (
+    CollectedRecord,
+    CollectionOutcome,
+    CommandDeclaration,
+    FailureClassification,
+    ObservedStream,
+    PipelineDeclaration,
+    PipelineResult,
+    StatementDeclaration,
+    StreamCollector,
+    StreamDeclaration,
+)
 from psrpcore._server import ServerPipeline, ServerRunspacePool
 
 __all__ = [
@@ -72,13 +84,17 @@ __all__ = [
     "ClientRunspacePool",
     "ClixmlOutput",
     "ClixmlShell",
+    "CollectedRecord",
+    "CollectionOutcome",
     "Command",
+    "CommandDeclaration",
     "ConnectRunspacePoolEvent",
     "CreatePipelineEvent",
     "DebugRecordEvent",
     "EncryptedSessionKeyEvent",
     "EndOfPipelineInputEvent",
     "ErrorRecordEvent",
+    "FailureClassification",
     "GetAvailableRunspacesEvent",
     "GetCommandMetadataEvent",
     "GetMetadata",
@@ -92,10 +108,13 @@ __all__ = [
     "PSRPCoreError",
     "PSRPEvent",
     "PSRPPayload",
+    "ObservedStream",
+    "PipelineDeclaration",
     "PipelineHostCallEvent",
     "PipelineHostResponseEvent",
     "PipelineInputEvent",
     "PipelineOutputEvent",
+    "PipelineResult",
     "PipelineStateEvent",
     "PowerShell",
     "ProgressRecordEvent",
@@ -114,6 +133,9 @@ __all__ = [
     "SetMaxRunspacesEvent",
     "SetMinRunspacesEvent",
     "SetRunspaceAvailabilityEvent",
+    "StatementDeclaration",
+    "StreamCollector",
+    "StreamDeclaration",
     "StreamType",
     "types",
     "UserEventEvent",

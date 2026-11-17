@@ -17,6 +17,7 @@ brief and will be expanded upon in the future.
    minishell
    scenarios
    transport
+   rpa
    types
 
 .. toctree::

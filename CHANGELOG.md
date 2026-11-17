@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+* Added the RPA stream collection helpers (`psrpcore.StreamCollector` and friends)
+  * Stores the pipeline stream declaration (native, merged to output or discarded to `$null`) separately from the PSRP events actually received
+  * Each collected record carries its observed channel, a provable origin and the origins that cannot be ruled out; an error-shaped output object is never treated as proof of an error stream record
+  * Streams discarded remotely are reported through the declaration rather than fabricated as records, and query results distinguish an explicit pipeline failure from error-shaped ordinary output
+
 ## 0.3.1 - 2024-11-11
 
 * Fixed CLIXML string pattern matching to only match valid hex sequences and not just any alphanumeric character
