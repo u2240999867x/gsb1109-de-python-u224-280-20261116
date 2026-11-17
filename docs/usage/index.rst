@@ -7,3 +7,4 @@ Driver Usage
     cipdriver
     logixdriver
     slcdriver
+    offline

@@ -8,3 +8,4 @@ API Reference
     logix_driver
     slc_driver
     data_types
+    offline
