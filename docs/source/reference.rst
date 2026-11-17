@@ -7,6 +7,7 @@ Reference
    reference/base.rst
    reference/compress.rst
    reference/copy.rst
+   reference/copyplan.rst
    reference/enums.rst
    reference/errors.rst
    reference/glob.rst

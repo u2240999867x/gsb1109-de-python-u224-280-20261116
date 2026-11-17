@@ -342,6 +342,8 @@ class MemoryFS(FS):
         "invalid_path_chars": "\0",
         "network": False,
         "read_only": False,
+        "supports_modified_time": True,
+        "supports_permissions": False,
         "thread_safe": True,
         "unicode_paths": True,
         "virtual": False,

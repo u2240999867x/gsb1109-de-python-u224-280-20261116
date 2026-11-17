@@ -144,6 +144,8 @@ class OSFS(FS):
             "network": False,
             "read_only": False,
             "supports_rename": True,
+            "supports_modified_time": True,
+            "supports_permissions": False,
             "thread_safe": True,
             "unicode_paths": os.path.supports_unicode_filenames,
             "virtual": False,

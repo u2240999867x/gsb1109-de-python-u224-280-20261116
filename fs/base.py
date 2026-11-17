@@ -761,6 +761,12 @@ class FS(object):
         read_only           `True` if this filesystem is read only.
         supports_rename     `True` if this filesystem supports an
                             `os.rename` operation.
+        supports_modified_time  `True` if this filesystem honors
+                            ``details.modified`` set with
+                            `~fs.base.FS.setinfo`.
+        supports_permissions    `True` if this filesystem honors
+                            ``access.permissions`` set with
+                            `~fs.base.FS.setinfo`.
         =================== ============================================
 
         Most builtin filesystems will provide all these keys, and third-

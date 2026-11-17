@@ -694,6 +694,8 @@ class FTPFS(FS):
             _meta = self._meta.copy()
             _meta["unicode_paths"] = "UTF8" in self.features
             _meta["supports_mtime"] = "MDTM" in self.features
+            _meta["supports_modified_time"] = "MFMT" in self.features
+            _meta["supports_permissions"] = False
         return _meta
 
     def getmodified(self, path):
