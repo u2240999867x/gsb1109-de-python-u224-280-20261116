@@ -9,6 +9,7 @@ Protocol.
 """
 
 import psrpcore.types as types
+from psrpcore._capacity import RunspacePoolCapacity, RunspacePoolChange
 from psrpcore._client import (
     ClientGetCommandMetadata,
     ClientPowerShell,
@@ -103,6 +104,8 @@ __all__ = [
     "PublicKeyRequestEvent",
     "PSRemotingCrypto",
     "ResetRunspaceStateEvent",
+    "RunspacePoolCapacity",
+    "RunspacePoolChange",
     "RunspacePoolHostCallEvent",
     "RunspacePoolHostResponseEvent",
     "RunspacePoolInitDataEvent",

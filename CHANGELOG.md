@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+* Added `RunspacePool.capacity` with a `RunspacePoolCapacity` snapshot for the
+  confirmed min/max counts, the pending and deferred changes, and the admitted
+  pipelines
+* A min/max change is only adopted once the pair is legal. A rejected change
+  no longer affects a different outstanding change
+* Lowering the maximum only affects new pipeline admission, admitted pipelines
+  keep running
+* Responses for a previous connection or a different Runspace Pool are ignored
+
 ## 0.3.1 - 2024-11-11
 
 * Fixed CLIXML string pattern matching to only match valid hex sequences and not just any alphanumeric character

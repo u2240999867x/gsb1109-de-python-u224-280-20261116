@@ -115,6 +115,11 @@ class ServerRunspacePool(RunspacePool["ServerPipeline"]):
         # TODO: Verify there are no incoming fragments/messages not processed.
         self._ci_count = 1
         self._fragment_count = 1
+        # Requests from the previous connection cannot be answered by the new
+        # one, drop them so a late response cannot touch this connection.
+        self._ci_events.clear()
+        self._ci_handlers.clear()
+        self._invalidate_capacity()
         self._change_state(RunspacePoolState.Connecting)
 
     def send_event(
@@ -279,8 +284,14 @@ class ServerRunspacePool(RunspacePool["ServerPipeline"]):
 
         del self._ci_events[ci]
         handler = self._ci_handlers.pop(ci, None)
-        if handler and response is True:
+        if handler:
             handler(event)
+
+        if isinstance(event, (SetMaxRunspacesEvent, SetMinRunspacesEvent)):
+            # The confirmed value is only changed once the min/max pair is
+            # legal. An acknowledged side that is not legal yet stays in the
+            # deferred list and is adopted when the other side arrives.
+            self._resolve_capacity_change(ci, response)
 
         self.prepare_message(RunspaceAvailability(SetMinMaxRunspacesResponse=response, ci=ci))
 
@@ -319,8 +330,11 @@ class ServerRunspacePool(RunspacePool["ServerPipeline"]):
         event: ConnectRunspacePoolEvent,
     ) -> None:
         # FIXME: Verify this behaviour when the props aren't set or when invalid ones are
-        self._max_runspaces = event.max_runspaces or self.max_runspaces
-        self._min_runspaces = event.min_runspaces or self.min_runspaces
+        self._invalidate_capacity()
+        self._set_confirmed_runspaces(
+            min_runspaces=event.min_runspaces or self.min_runspaces,
+            max_runspaces=event.max_runspaces or self.max_runspaces,
+        )
 
         self.prepare_message(
             RunspacePoolInitData(
@@ -371,8 +385,11 @@ class ServerRunspacePool(RunspacePool["ServerPipeline"]):
         self.application_arguments = event.application_arguments
         self.host = event.host_info
         self.thread_options = event.ps_thread_options
-        self._max_runspaces = event.max_runspaces
-        self._min_runspaces = event.min_runspaces
+        self._invalidate_capacity()
+        self._set_confirmed_runspaces(
+            min_runspaces=event.min_runspaces,
+            max_runspaces=event.max_runspaces,
+        )
 
         self.prepare_message(ApplicationPrivateData(ApplicationPrivateData=self.application_private_data))
         self._change_state(RunspacePoolState.Opened)
@@ -433,14 +450,16 @@ class ServerRunspacePool(RunspacePool["ServerPipeline"]):
         event: SetMaxRunspacesEvent,
     ) -> None:
         self._ci_events[event.ci] = event
-        self._ci_handlers[event.ci] = lambda e: setattr(self, "_max_runspaces", event.count)
+        self._ci_handlers[event.ci] = None
+        self._track_capacity_change("max", event.count, event.ci)
 
     def _process_SetMinRunspaces(
         self,
         event: SetMinRunspacesEvent,
     ) -> None:
         self._ci_events[event.ci] = event
-        self._ci_handlers[event.ci] = lambda e: setattr(self, "_min_runspaces", event.count)
+        self._ci_handlers[event.ci] = None
+        self._track_capacity_change("min", event.count, event.ci)
 
 
 class ServerPipeline(Pipeline["ServerRunspacePool"]):
@@ -456,7 +475,9 @@ class ServerPipeline(Pipeline["ServerRunspacePool"]):
 
         This marks the pipeline has completed and generates a
         :class:`psrpcore.types.PipelineState` message to be sent to the client.
+        The runspace it occupied becomes available for new pipelines.
         """
+        self.runspace_pool._release_pipeline(self)
         self._change_state(PSInvocationState.Completed)
 
     def start(self) -> None:
@@ -464,6 +485,18 @@ class ServerPipeline(Pipeline["ServerRunspacePool"]):
         valid_states = [PSInvocationState.NotStarted, PSInvocationState.Stopped, PSInvocationState.Completed]
         if self.state not in valid_states:
             raise InvalidPipelineState("start a pipeline", self.state, valid_states)
+
+        # Starting a pipeline is the point where it occupies a runspace. A
+        # nested pipeline runs inside the runspace of its parent so it does
+        # not require a separate one. Lowering the maximum does not affect
+        # pipelines that are already admitted, it only refuses new ones.
+        nested = bool(getattr(self.metadata, "is_nested", False))
+        if not self.runspace_pool._admit_pipeline(self, enforce=not nested, count=not nested):
+            raise PSRPCoreError(
+                f"Cannot start pipeline, the Runspace Pool capacity is exhausted: "
+                f"{self.runspace_pool.capacity.admitted_pipeline_count} of "
+                f"{self.runspace_pool.max_runspaces} runspaces in use"
+            )
 
         self._change_state(PSInvocationState.Running)
 
@@ -501,6 +534,7 @@ class ServerPipeline(Pipeline["ServerRunspacePool"]):
             ),
             FullyQualifiedErrorId="PipelineStopped",
         )
+        self.runspace_pool._release_pipeline(self)
         self._change_state(PSInvocationState.Stopped, error=stopped_error)
 
     def host_call(

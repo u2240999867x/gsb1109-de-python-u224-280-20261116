@@ -164,6 +164,43 @@ assert avail_resp.success
 |[SetMaxRunspaces](psrpcore.SetMaxRunspacesEvent)|Server|Request to adjust the max runspace count|
 |[RunspaceAvailability](psrpcore.SetRunspaceAvailabilityEvent)|Client|Whether the count was adjusted or not|
 
+### Capacity View
+
+While a pool is running the change request and its response can be
+interleaved with other traffic. The `capacity` property returns a
+[RunspacePoolCapacity](psrpcore.RunspacePoolCapacity) snapshot that keeps the
+different pieces apart:
+
+```python
+capacity = client_pool.capacity
+
+capacity.confirmed_max_runspaces  # The max the peer has confirmed
+capacity.pending_max_runspaces    # A request not answered yet, or None
+capacity.deferred_max_runspaces   # Acknowledged but waiting for the other limit
+capacity.admitted_pipeline_count  # Pipelines currently occupying the pool
+capacity.available_runspaces      # Confirmed max minus the admitted pipelines
+```
+
+`pending_changes` and `deferred_changes` expose the same information as
+[RunspacePoolChange](psrpcore.RunspacePoolChange) records with the `field`,
+`value` and `ci` for each request. A snapshot is a point in time copy, a later
+response does not modify a snapshot that was already returned.
+
+A response only applies to the request with the matching call id. If a change
+was rejected, the confirmed value stays as it was and a different outstanding
+change is not withdrawn. When the min and max are raised in separate requests,
+the acknowledged value is kept in `deferred_changes` until the pair is legal
+and both are then adopted together.
+
+Lowering the maximum does not cancel pipelines that are already admitted to
+the pool. It only affects the admission of new pipelines, which are refused
+with `PSRPCoreError` once the confirmed maximum is reached. The runspace is
+released when the pipeline completes, stops, or is closed.
+
+An acknowledgement that belongs to another Runspace Pool is ignored. Reusing
+a pool id after a disconnect also clears the outstanding requests so a late
+response from the previous connection cannot change the new one.
+
 
 ## Running a PowerShell Pipeline
 

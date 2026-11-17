@@ -111,6 +111,7 @@ class ClientRunspacePool(RunspacePool["_ClientPipeline"]):
         self.thread_options = thread_options
         self._min_runspaces = min_runspaces
         self._max_runspaces = max_runspaces
+        self._capacity.set_confirmed(min_runspaces=min_runspaces, max_runspaces=max_runspaces)
         self._exchange_key: typing.Optional[rsa.RSAPrivateKey] = None
 
     def open(self) -> None:
@@ -126,6 +127,7 @@ class ClientRunspacePool(RunspacePool["_ClientPipeline"]):
         host = self.host or HostInfo()
         self._change_state(RunspacePoolState.Opening)
 
+        self._set_confirmed_runspaces(min_runspaces=self._min_runspaces, max_runspaces=self._max_runspaces)
         self.prepare_message(self.our_capability)
         self.prepare_message(
             InitRunspacePool(
@@ -149,6 +151,9 @@ class ClientRunspacePool(RunspacePool["_ClientPipeline"]):
             raise InvalidRunspacePoolState("connect to Runspace Pool", self.state, [RunspacePoolState.BeforeOpen])
 
         self._change_state(RunspacePoolState.Connecting)
+        # A new connection has its own call id sequence so responses for the
+        # previous connection must not be applied to this one.
+        self._invalidate_capacity()
         self.prepare_message(self.our_capability)
         self.prepare_message(ConnectRunspacePool())
 
@@ -264,7 +269,8 @@ class ClientRunspacePool(RunspacePool["_ClientPipeline"]):
 
         Build a request to set the maximum number of Runspaces the pool
         maintains. The `max_runspaces` property is updated once the
-        :class:`SetMaxRunspacesEvent` is received.
+        :class:`SetMaxRunspacesEvent` is received and the new min/max pair is
+        valid. A rejected request leaves the confirmed value untouched.
 
         Args:
             value: The maximum number of runspaces in a pool to change to.
@@ -273,12 +279,16 @@ class ClientRunspacePool(RunspacePool["_ClientPipeline"]):
             Optional[int]: The command id for this request or ``None`` if no
                 request was created.
         """
-        if self.state == RunspacePoolState.BeforeOpen or self._max_runspaces == value:
-            self._max_runspaces = value
+        if self.state == RunspacePoolState.BeforeOpen:
+            self._set_preopen_runspaces(max_runspaces=value)
+            return None
+
+        if self._max_runspaces == value and not self._capacity.has_uncommitted("max"):
             return None
 
         ci = self._ci_counter
-        self._ci_handlers[ci] = functools.partial(self._set_runspaces_handler, "max", value)
+        self._track_capacity_change("max", value, ci)
+        self._ci_handlers[ci] = functools.partial(self._set_runspaces_handler, ci)
         self.prepare_message(SetMaxRunspaces(MaxRunspaces=value, ci=ci))
 
         return ci
@@ -291,7 +301,8 @@ class ClientRunspacePool(RunspacePool["_ClientPipeline"]):
 
         Build a request to set the minimum number of Runspaces the pool
         maintains. The `min_runspaces` property is updated once the
-        :class:`SetMinRunspacesEvent` is fired.
+        :class:`SetMinRunspacesEvent` is fired and the new min/max pair is
+        valid. A rejected request leaves the confirmed value untouched.
 
         Args:
             value: The minimum number of runspaces in a pool to change to.
@@ -300,12 +311,16 @@ class ClientRunspacePool(RunspacePool["_ClientPipeline"]):
             Optional[int]: The command id for this request or ``None`` if no
                 request was created.
         """
-        if self.state == RunspacePoolState.BeforeOpen or self._min_runspaces == value:
-            self._min_runspaces = value
+        if self.state == RunspacePoolState.BeforeOpen:
+            self._set_preopen_runspaces(min_runspaces=value)
+            return None
+
+        if self._min_runspaces == value and not self._capacity.has_uncommitted("min"):
             return None
 
         ci = self._ci_counter
-        self._ci_handlers[ci] = functools.partial(self._set_runspaces_handler, "min", value)
+        self._track_capacity_change("min", value, ci)
+        self._ci_handlers[ci] = functools.partial(self._set_runspaces_handler, ci)
         self.prepare_message(SetMinRunspaces(MinRunspaces=value, ci=ci))
 
         return ci
@@ -367,6 +382,20 @@ class ClientRunspacePool(RunspacePool["_ClientPipeline"]):
         pipeline = self.pipeline_table[pipeline_id]
         pipeline.state = event.state
 
+        # The server admits a pipeline when it starts it. Mirror that on the
+        # client so the capacity view shows the same admitted pipelines once
+        # the acknowledgement has been processed.
+        if event.state == PSInvocationState.Running:
+            pipeline._capacity_admitted = True
+            pipeline._capacity_counted = not getattr(pipeline.metadata, "is_nested", False)
+        elif event.state in [
+            PSInvocationState.Stopped,
+            PSInvocationState.Completed,
+            PSInvocationState.Failed,
+        ]:
+            pipeline._capacity_admitted = False
+            pipeline._capacity_counted = False
+
     def _process_ProgressRecord(
         self,
         event: ProgressRecordEvent,
@@ -383,7 +412,12 @@ class ClientRunspacePool(RunspacePool["_ClientPipeline"]):
         self,
         event: RunspaceAvailabilityEvent,
     ) -> None:
-        handler = self._ci_handlers.pop(event.ci)
+        # A response for a previous pool must not update this pool even when
+        # its call id happens to collide with a local request.
+        if event.runspace_pool_id != self.runspace_pool_id:
+            return
+
+        handler = self._ci_handlers.pop(event.ci, None)
         if handler is not None:
             handler(event)
 
@@ -398,8 +432,10 @@ class ClientRunspacePool(RunspacePool["_ClientPipeline"]):
         self,
         event: RunspacePoolInitDataEvent,
     ) -> None:
-        self._min_runspaces = event.min_runspaces
-        self._max_runspaces = event.max_runspaces
+        self._set_confirmed_runspaces(
+            min_runspaces=event.min_runspaces,
+            max_runspaces=event.max_runspaces,
+        )
 
     def _process_RunspacePoolState(
         self,
@@ -427,13 +463,11 @@ class ClientRunspacePool(RunspacePool["_ClientPipeline"]):
 
     def _set_runspaces_handler(
         self,
-        field: str,
-        value: int,
+        ci: int,
         event: SetRunspaceAvailabilityEvent,
     ) -> None:
-        """Changes the runspace count based on the result."""
-        if event.success:
-            setattr(self, f"_{field}_runspaces", value)
+        """Applies the response to the request identified by the call id."""
+        self._resolve_capacity_change(ci, event.success)
 
 
 class _ClientPipeline(Pipeline["ClientRunspacePool"]):

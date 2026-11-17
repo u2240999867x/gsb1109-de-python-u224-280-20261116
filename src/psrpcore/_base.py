@@ -7,6 +7,11 @@ import typing
 import uuid
 from xml.etree import ElementTree
 
+from psrpcore._capacity import (
+    RunspacePoolCapacity,
+    RunspacePoolChange,
+    _RunspaceCapacityTracker,
+)
 from psrpcore._crypto import PSRemotingCrypto
 from psrpcore._events import PSRPEvent, SessionCapabilityEvent
 from psrpcore._exceptions import (
@@ -82,6 +87,9 @@ class RunspacePool(typing.Generic[T1]):
             invocation.
         pipeline_table: A dictionary that contains associated pipelines with
             this Runspace Pool.
+        capacity: A snapshot of the confirmed runspace limits, the changes
+            that are not confirmed yet and the pipelines that are admitted to
+            the pool.
     """
 
     def __new__(
@@ -134,6 +142,8 @@ class RunspacePool(typing.Generic[T1]):
         self._fragment_count = 1
         self._key_requested = False
         self._cipher = PSRemotingCrypto()
+        self._capacity = _RunspaceCapacityTracker()
+        self._capacity_cis: typing.Set[int] = set()
         self._min_runspaces = 0
         self._max_runspaces = 0
         self._send_buffer: typing.List[PSRPMessage] = []
@@ -160,6 +170,220 @@ class RunspacePool(typing.Generic[T1]):
     ) -> int:
         """The minimum number of runspaces the pool maintains."""
         return self._min_runspaces
+
+    @property
+    def capacity(
+        self,
+    ) -> RunspacePoolCapacity:
+        """A snapshot of the pool capacity.
+
+        The snapshot separates the confirmed min/max counts from changes that
+        are still waiting for a response and from the pipelines that have been
+        admitted into the pool. It is a point in time copy, later changes to
+        the pool do not modify a snapshot that was already returned.
+        """
+        admitted = self._counted_admitted_ids()
+        return RunspacePoolCapacity(
+            runspace_pool_id=self.runspace_pool_id,
+            min_runspaces=self._min_runspaces,
+            max_runspaces=self._max_runspaces,
+            pending_changes=self._capacity.pending_changes(),
+            deferred_changes=self._capacity.deferred_changes(),
+            admitted_pipeline_ids=admitted,
+        )
+
+    @property
+    def pending_capacity_changes(
+        self,
+    ) -> typing.Tuple[RunspacePoolChange, ...]:
+        """Changes that are still waiting for a response from the peer."""
+        return self._capacity.pending_changes()
+
+    @property
+    def deferred_capacity_changes(
+        self,
+    ) -> typing.Tuple[RunspacePoolChange, ...]:
+        """Acknowledged changes that are not adopted because of the other limit."""
+        return self._capacity.deferred_changes()
+
+    @property
+    def confirmed_min_runspaces(
+        self,
+    ) -> int:
+        """The minimum runspace count confirmed by the peer."""
+        return self._min_runspaces
+
+    @property
+    def confirmed_max_runspaces(
+        self,
+    ) -> int:
+        """The maximum runspace count confirmed by the peer."""
+        return self._max_runspaces
+
+    @property
+    def pending_min_runspaces(
+        self,
+    ) -> typing.Optional[int]:
+        """The latest minimum count still waiting for a response."""
+        return self.capacity.pending_min_runspaces
+
+    @property
+    def pending_max_runspaces(
+        self,
+    ) -> typing.Optional[int]:
+        """The latest maximum count still waiting for a response."""
+        return self.capacity.pending_max_runspaces
+
+    @property
+    def admitted_pipeline_ids(
+        self,
+    ) -> typing.Tuple[uuid.UUID, ...]:
+        """The identifiers of the pipelines that occupy the pool."""
+        return self.capacity.admitted_pipeline_ids
+
+    @property
+    def admitted_pipelines(
+        self,
+    ) -> typing.Tuple[T1, ...]:
+        """Pipelines that currently occupy a runspace in this pool."""
+        return tuple(p for p in self.pipeline_table.values() if getattr(p, "_capacity_admitted", False))
+
+    @property
+    def available_runspaces(
+        self,
+    ) -> int:
+        """How many further pipelines the confirmed maximum allows."""
+        return self.capacity.available_runspaces
+
+    def _set_preopen_runspaces(
+        self,
+        min_runspaces: typing.Optional[int] = None,
+        max_runspaces: typing.Optional[int] = None,
+    ) -> None:
+        """Sets the limits used when the pool is opened.
+
+        Before the pool is opened there is no peer to confirm a change yet, so
+        both values are just recorded as the initial configuration.
+        """
+        if min_runspaces is not None:
+            self._min_runspaces = min_runspaces
+        if max_runspaces is not None:
+            self._max_runspaces = max_runspaces
+
+        self._capacity.invalidate()
+        self._capacity.set_confirmed(
+            min_runspaces=self._min_runspaces,
+            max_runspaces=self._max_runspaces,
+        )
+        self._capacity_cis.clear()
+
+    def _set_confirmed_runspaces(
+        self,
+        min_runspaces: typing.Optional[int] = None,
+        max_runspaces: typing.Optional[int] = None,
+    ) -> None:
+        """Sets the confirmed min/max counts.
+
+        A pair that is not legal together is ignored as a whole. Outstanding
+        requests for a side whose confirmed value is replaced are dropped, the
+        requests for the other side stay intact.
+        """
+        candidate_min = self._min_runspaces if min_runspaces is None else min_runspaces
+        candidate_max = self._max_runspaces if max_runspaces is None else max_runspaces
+        if candidate_min > candidate_max:
+            return
+
+        if min_runspaces is not None:
+            self._min_runspaces = min_runspaces
+            self._capacity.set_confirmed(min_runspaces=min_runspaces)
+        if max_runspaces is not None:
+            self._max_runspaces = max_runspaces
+            self._capacity.set_confirmed(max_runspaces=max_runspaces)
+
+        outstanding = {c.ci for c in self._capacity.unresolved_changes()}
+        self._capacity_cis.intersection_update(outstanding)
+
+    def _track_capacity_change(
+        self,
+        field: str,
+        value: int,
+        ci: int,
+    ) -> RunspacePoolChange:
+        """Records a min/max request so its response can be matched later."""
+        self._capacity_cis.add(ci)
+        return self._capacity.issue(field, value, ci)
+
+    def _resolve_capacity_change(
+        self,
+        ci: int,
+        success: bool,
+    ) -> bool:
+        """Applies a response to the matching request.
+
+        Returns ``False`` when the call id is not an outstanding request, e.g.
+        a late response for a different connection or pool. Such a response
+        must not change any confirmed value.
+        """
+        if ci not in self._capacity_cis:
+            return False
+
+        self._capacity_cis.discard(ci)
+        matched = self._capacity.resolve(ci, success)
+        if matched:
+            self._min_runspaces = self._capacity.min_runspaces
+            self._max_runspaces = self._capacity.max_runspaces
+        return matched
+
+    def _invalidate_capacity(self) -> None:
+        """Drops outstanding requests when the connection generation changes."""
+        self._capacity_cis.clear()
+        self._capacity.invalidate()
+
+    def _admit_pipeline(
+        self,
+        pipeline: T1,
+        enforce: bool = True,
+        count: bool = True,
+    ) -> bool:
+        """Marks a pipeline as occupying the pool if the confirmed max allows it.
+
+        Lowering the maximum never stops pipelines that are already admitted.
+        A nested pipeline runs inside the runspace of its parent so it is
+        tracked but does not consume another slot. Returns whether the
+        pipeline was admitted.
+        """
+        if getattr(pipeline, "_capacity_admitted", False):
+            return True
+
+        if enforce and len(self._counted_pipelines()) >= self._max_runspaces:
+            return False
+
+        pipeline._capacity_admitted = True
+        pipeline._capacity_counted = count
+        return True
+
+    def _release_pipeline(
+        self,
+        pipeline: T1,
+    ) -> None:
+        """Releases the runspace held by a pipeline."""
+        pipeline._capacity_admitted = False
+        pipeline._capacity_counted = False
+
+    def _counted_pipelines(
+        self,
+    ) -> typing.Tuple[T1, ...]:
+        """Admitted pipelines that occupy a runspace of their own."""
+        return tuple(
+            p
+            for p in self.pipeline_table.values()
+            if getattr(p, "_capacity_admitted", False) and getattr(p, "_capacity_counted", True)
+        )
+
+    def _counted_admitted_ids(
+        self,
+    ) -> typing.Tuple[uuid.UUID, ...]:
+        return tuple(p.pipeline_id for p in self._counted_pipelines())
 
     @property
     def _ci_counter(
@@ -526,6 +750,8 @@ class Pipeline(typing.Generic[T2]):
         self.pipeline_id = pipeline_id
         self.state = PSInvocationState.NotStarted
         self.metadata: typing.Optional[PSObject] = None
+        self._capacity_admitted = False
+        self._capacity_counted = False
         runspace_pool.pipeline_table[self.pipeline_id] = self
 
     def begin_stop(self) -> None:
@@ -551,6 +777,7 @@ class Pipeline(typing.Generic[T2]):
         ]
         if self.state not in valid_state:
             raise InvalidPipelineState("closing a pipeline", self.state, valid_state)
+        self.runspace_pool._release_pipeline(self)
         self.runspace_pool.pipeline_table.pop(self.pipeline_id, None)
 
     def prepare_message(
