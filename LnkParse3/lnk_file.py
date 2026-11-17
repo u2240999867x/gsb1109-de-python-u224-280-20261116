@@ -19,6 +19,9 @@ from LnkParse3.lnk_header import LnkHeader
 from LnkParse3.lnk_info import LnkInfo
 from LnkParse3.lnk_targets import LnkTargets
 from LnkParse3.string_data import StringData
+from LnkParse3.string_editor import LnkEditError
+from LnkParse3.string_editor import LnkStringEditor
+from LnkParse3.string_editor import load as load_string_editor
 
 
 class LnkFile:
@@ -59,6 +62,18 @@ class LnkFile:
 
     def force_no_link_info(self):
         return bool("ForceNoLinkInfo" in self.header.link_flags())
+
+    def string_editor(self, unrepresentable="error", cp=None):
+        """Return an editor over the original bytes of this shortcut.
+
+        The editor never modifies ``self.indata`` or the source file; call
+        ``editor.set(...)`` and ``editor.write(path)`` to produce a new copy.
+        """
+        return LnkStringEditor(
+            self.indata,
+            cp=cp or self.cp,
+            unrepresentable=unrepresentable,
+        )
 
     def process(self):
         index = 0
@@ -370,7 +385,74 @@ def main():
         action="store_true",
         help="print all extracted data (i.e. offsets and sizes)",
     )
+    arg_parser.add_argument(
+        "-o",
+        "--output",
+        metavar="FILE",
+        help="write a corrected copy to FILE instead of printing",
+    )
+    arg_parser.add_argument(
+        "--working-dir",
+        metavar="TEXT",
+        help="replace the WORKING_DIR StringData value",
+    )
+    arg_parser.add_argument(
+        "--arguments",
+        metavar="TEXT",
+        help="replace the COMMAND_LINE_ARGUMENTS StringData value",
+    )
+    arg_parser.add_argument(
+        "--description",
+        metavar="TEXT",
+        help="replace the NAME_STRING StringData value",
+    )
+    arg_parser.add_argument(
+        "--relative-path",
+        metavar="TEXT",
+        help="replace the RELATIVE_PATH StringData value",
+    )
+    arg_parser.add_argument(
+        "--icon-location",
+        metavar="TEXT",
+        help="replace the ICON_LOCATION StringData value",
+    )
+    arg_parser.add_argument(
+        "--on-unrepresentable",
+        dest="unrepresentable",
+        choices=sorted(
+            ("error", "replace", "ignore", "xmlcharrefreplace", "backslashreplace")
+        ),
+        default="error",
+        help="policy for characters the code page cannot encode (default: error)",
+    )
     args = arg_parser.parse_args()
+
+    replacements = {
+        "working_directory": args.working_dir,
+        "command_line_arguments": args.arguments,
+        "description": args.description,
+        "relative_path": args.relative_path,
+        "icon_location": args.icon_location,
+    }
+    replacements = {name: text for name, text in replacements.items() if text is not None}
+
+    if args.output or replacements:
+        if not args.output:
+            arg_parser.error("--output is required when replacing StringData")
+        if not replacements:
+            arg_parser.error("At least one replacement option is required with --output")
+        editor = load_string_editor(
+            args.file,
+            cp=args.cp,
+            unrepresentable=args.unrepresentable,
+        )
+        try:
+            for name, text in replacements.items():
+                editor.set(name, text)
+            editor.write(args.output)
+        except LnkEditError as e:
+            arg_parser.error(str(e))
+        return
 
     with open(args.file, "rb") as file:
         lnk = LnkFile(fhandle=file, cp=args.cp)

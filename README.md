@@ -8,13 +8,14 @@ Windows Shortcut file (LNK) parser
 [![PyPi Python Versions](https://img.shields.io/pypi/pyversions/LnkParse3.svg?style=for-the-badge)](https://pypi.python.org/pypi/LnkParse3/)
 [![GitHub last commit](https://img.shields.io/github/last-commit/Matmaus/LnkParse3.svg?style=for-the-badge)](https://github.com/Matmaus/LnkParse3/commits/master)
 
-LnkParse3 is a minimalistic python package for **forensics** of a binary file with [LNK](https://fileinfo.com/extension/lnk) extension aka [Microsoft Shell Link](https://docs.microsoft.com/en-us/openspecs/windows_protocols/ms-shllink/16cb4ca1-9339-4d0c-a68d-bf1d6cc0f943) aka Windows shortcut. It is aimed to dig up as much data as possible and to process even **malformed files**. It is not able to create or modify files.
+LnkParse3 is a minimalistic python package for **forensics** of a binary file with [LNK](https://fileinfo.com/extension/lnk) extension aka [Microsoft Shell Link](https://docs.microsoft.com/en-us/openspecs/windows_protocols/ms-shllink/16cb4ca1-9339-4d0c-a68d-bf1d6cc0f943) aka Windows shortcut. It is aimed to dig up as much data as possible and to process even **malformed files**. Parsing never modifies the input; an opt-in editor can derive a corrected copy without changing the original.
 
 ## Features
 
 - easy to use
 - CLI tool & package
 - JSON output
+- byte-preserving StringData copy editor
 
 # Background
 
@@ -39,7 +40,11 @@ pip install LnkParse3
 Can be used as a package or as a command line tool. It accepts several arguments, including setting the output format to JSON or a more human-readable form. For all parameters, see the program description below.
 
 ```
-usage: lnkparse [-h] [-t] [-j] [-c CP] [-a] FILE
+usage: lnkparse [-h] [-t] [-j] [-c CP] [-a] [-o FILE] [--working-dir TEXT]
+                [--arguments TEXT] [--description TEXT]
+                [--relative-path TEXT] [--icon-location TEXT]
+                [--on-unrepresentable {backslashreplace,error,ignore,replace,xmlcharrefreplace}]
+                FILE
 
 Windows Shortcut file (LNK) parser
 
@@ -52,7 +57,46 @@ optional arguments:
   -j, --json            print output in JSON
   -c CP, --codepage CP  set codepage of ASCII strings
   -a, --all             print all extracted data (i.e. offsets and sizes)
+  -o FILE, --output FILE
+                        write a corrected copy to FILE instead of printing
+  --working-dir TEXT    replace the WORKING_DIR StringData value
+  --arguments TEXT      replace the COMMAND_LINE_ARGUMENTS StringData value
+  --description TEXT    replace the NAME_STRING StringData value
+  --relative-path TEXT  replace the RELATIVE_PATH StringData value
+  --icon-location TEXT  replace the ICON_LOCATION StringData value
+  --on-unrepresentable {...}
+                        policy for characters the code page cannot encode
+                        (default: error)
 ```
+
+## Rewriting StringData
+
+The parser itself never modifies a file. To correct a working directory or the
+command-line arguments, let the editor build a separate copy:
+
+```console
+$ lnkparse shortcut.lnk -o corrected.lnk --working-dir 'C:\work'
+```
+
+The same is available from Python:
+
+```python
+>>> from LnkParse3.string_editor import load
+>>> editor = load('shortcut.lnk')
+>>> editor.set('working_directory', 'C:\\work')
+>>> editor.write('corrected.lnk')
+```
+
+Only the requested StringData field is re-encoded. The header, LinkTargetIDList,
+LinkInfo, all other StringData fields and every ExtraData block are copied
+byte-for-byte, so a newly parsed copy reports the same structure and values as
+the original apart from the edit. `CountCharacters` is written according to the
+`IsUnicode` flag (UTF-16 code units for Unicode links, encoded bytes for ANSI
+links), an empty value is written as a zero count, and embedded NULs or lone
+surrogates are rejected. When a declared field length would make the following
+field start inside the current one, or when the ExtraData chain does not end
+exactly at the end of the file, no copy is produced. The original is opened
+read-only, and the destination must be a different path.
 
 ## CLI tool
 

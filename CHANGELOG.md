@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html) since v1.0.0.
 
 ## [Unreleased]
+### Added
+- Add a byte-preserving StringData editor (`LnkParse3.string_editor`), the
+  `lnkparse -o FILE` CLI options, and `LnkFile.string_editor()` to correct
+  WORKING_DIR or COMMAND_LINE_ARGUMENTS in a new copy while leaving the
+  original file untouched.
 
 ## [1.6.0] - 2026-02-27
 ### Added
