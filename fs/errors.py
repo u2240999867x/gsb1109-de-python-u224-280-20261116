@@ -49,6 +49,7 @@ __all__ = [
     "ResourceError",
     "ResourceInvalid",
     "ResourceLocked",
+    "ResourceModified",
     "ResourceNotFound",
     "ResourceReadOnly",
     "Unsupported",
@@ -324,6 +325,30 @@ class ResourceReadOnly(ResourceError):
     """Attempting to modify a read-only resource."""
 
     default_message = "resource '{path}' is read only"
+
+
+class ResourceModified(ResourceError):
+    """A resource changed between two reads of the same object.
+
+    Raised when sparse byte ranges fetched in separate reads can no
+    longer be assembled into a single object because the underlying
+    resource was modified after the first read started.
+
+    """
+
+    default_message = (
+        "resource '{path}' was modified while its byte ranges "
+        "were being read"
+    )
+
+    def __init__(self, path, expected=None, observed=None, msg=None):  # noqa: D107
+        # type: (Text, object, object, Optional[Text]) -> None
+        self.expected = expected
+        self.observed = observed
+        super(ResourceModified, self).__init__(path, msg=msg)
+
+    def __reduce__(self):
+        return type(self), (self.path, self.expected, self.observed, self._msg)
 
 
 class IllegalBackReference(ValueError):
