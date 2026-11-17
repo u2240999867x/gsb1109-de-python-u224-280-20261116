@@ -17,6 +17,12 @@ from .downloaders import (
     SFTPDownloader,
 )
 from .hashes import file_hash, make_registry
+from .mirrors import (
+    MirrorAttempt,
+    MirrorDownloadCancelled,
+    MirrorDownloadError,
+    retrieve_from_mirrors,
+)
 from .processors import Decompress, Untar, Unzip
 from .utils import check_version, get_logger, os_cache
 

@@ -24,6 +24,17 @@ Core
     pooch.Pooch
     pooch.retrieve
 
+Mirrors
+-------
+
+.. autosummary::
+    :toctree: generated/
+
+    pooch.retrieve_from_mirrors
+    pooch.MirrorAttempt
+    pooch.MirrorDownloadError
+    pooch.MirrorDownloadCancelled
+
 Utilities
 ---------
 
