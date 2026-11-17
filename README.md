@@ -39,7 +39,8 @@ pip install LnkParse3
 Can be used as a package or as a command line tool. It accepts several arguments, including setting the output format to JSON or a more human-readable form. For all parameters, see the program description below.
 
 ```
-usage: lnkparse [-h] [-t] [-j] [-c CP] [-a] FILE
+usage: lnkparse [-h] [-t] [-j] [-c CP] [-a] [--machine-profile JSON]
+                [--policy JSON] FILE
 
 Windows Shortcut file (LNK) parser
 
@@ -52,6 +53,11 @@ optional arguments:
   -j, --json            print output in JSON
   -c CP, --codepage CP  set codepage of ASCII strings
   -a, --all             print all extracted data (i.e. offsets and sizes)
+  --machine-profile JSON
+                        resolve the target offline against this machine profile
+                        (environment, volumes, shares, catalog)
+  --policy JSON         overrides the resolution policy embedded in
+                        --machine-profile
 ```
 
 ## CLI tool
@@ -110,6 +116,84 @@ Windows Shortcut Information:
     },
 	...more data...
 }
+```
+
+## Offline target resolution
+
+Parsing tells you which fields a link contains; resolution asks which target
+those fields select on a *particular* machine. The resolver is strictly
+offline: it never opens the target, enumerates a directory, or reads the
+machine it runs on. Everything it knows about the machine comes from a
+profile supplied by the caller.
+
+```console
+$ lnkparse --machine-profile machine.json tests/samples/microsoft_example
+{
+  "status": "confirmed",
+  "selected_target": "C:\\test\\a.txt",
+  "profile_fingerprint": "…",
+  "target": { "id": "C01", "sources": ["idlist", "link_info_local", "relative_path"], … },
+  "candidates": [ … ],
+  "branches": [],
+  "conflicts": []
+}
+```
+
+A profile describes the environment, volumes, share mappings and the files or
+directories that are known to exist. Paths use Windows syntax and are matched
+case-insensitively; the catalog is exact-path evidence, so entries should be
+listed as the target machine would spell them:
+
+```json
+{
+  "environment": { "USERPROFILE": "C:\\Users\\alice", "SystemRoot": "C:\\Windows" },
+  "volumes": [
+    { "drive": "C:", "label": "OS", "serial_number": "0x307a8a81", "drive_type": "DRIVE_FIXED" },
+    { "drive": "D:", "guid": "374DE290-123F-4565-9164-39C4925E467B" }
+  ],
+  "shares": [
+    { "unc": "\\\\fileserver\\share", "drive": "Z:" }
+  ],
+  "catalog": [
+    "C:\\test\\a.txt",
+    { "path": "C:\\Users\\alice\\Downloads", "kind": "directory" },
+    { "path": "D:\\data\\x.txt", "object_id": "file-42", "aliases": ["C:\\data\\x.txt"] }
+  ],
+  "policy": {
+    "disabled_sources": ["link_info_network"],
+    "preferred_sources": ["environment"]
+  }
+}
+```
+
+Resolution combines the target ID list, the local and network halves of
+LinkInfo (ANSI and Unicode read independently), the EnvironmentVariableDataBlock,
+and the relative path anchored to the stored working directory. Equivalent
+locations are merged only when the profile proves they are the same object: a
+share mapping (`Z:` ↔ `\\server\share`), a volume identity (label/serial), or
+a catalog object id.
+
+A candidate is `confirmed` only when the policy and catalog evidence agree on
+both the full path and its final component. Missing evidence leaves an
+explicit `branch`, and contradictory fields become entries in `conflicts` with
+a reference to every field that contributed. `strict_conflicts` additionally
+refuses to confirm any candidate touched by a conflict.
+Policy can disable sources entirely or express a tie-breaking preference; it
+cannot erase a competing candidate or a conflict. Nothing is cached across
+profiles, and each result carries a `profile_fingerprint` so a result cannot be
+mistaken for one produced under a different machine configuration.
+
+```python
+from LnkParse3.resolution import MachineProfile, resolve
+
+profile = MachineProfile.from_json_file("machine.json")
+result = resolve(lnk, profile)
+
+print(result.status)            # confirmed / ambiguous / unresolved
+print(result.selected_target)   # None unless confirmed
+for candidate in result.candidates:
+    print(candidate.candidate_id, candidate.status, candidate.path)
+    print(candidate.provenance)  # original fields that produced it
 ```
 
 # Extracted data

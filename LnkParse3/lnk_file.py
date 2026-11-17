@@ -178,6 +178,25 @@ class LnkFile:
         else:
             print(out)
 
+    def resolve_target(self, profile=None, policy=None):
+        """Resolve the target offline against a described machine profile.
+
+        No target is opened or enumerated; see
+        :mod:`LnkParse3.resolution` for the profile and policy format.
+        """
+        from LnkParse3.resolution import resolve
+
+        return resolve(self, profile=profile, policy=policy)
+
+    def print_resolution(self, profile=None, policy=None, pjson=True):
+        result = self.resolve_target(profile=profile, policy=policy)
+        if pjson:
+            print(result.to_json())
+        else:
+            print(result.status)
+            print(result.selected_target or "")
+        return result
+
     def print_json(self, print_all=False):
         res = self.get_json(print_all)
 
@@ -370,11 +389,39 @@ def main():
         action="store_true",
         help="print all extracted data (i.e. offsets and sizes)",
     )
+    arg_parser.add_argument(
+        "--machine-profile",
+        dest="machine_profile",
+        metavar="JSON",
+        help=(
+            "resolve the target offline against this machine profile "
+            "(environment, volumes, shares, catalog)"
+        ),
+    )
+    arg_parser.add_argument(
+        "--policy",
+        dest="policy",
+        metavar="JSON",
+        help="overrides the resolution policy embedded in --machine-profile",
+    )
     args = arg_parser.parse_args()
+
+    profile = None
+    if args.machine_profile:
+        from LnkParse3.resolution import MachineProfile
+
+        profile = MachineProfile.from_json_file(args.machine_profile)
+
+    policy = None
+    if args.policy:
+        with open(args.policy, encoding="utf-8") as handle:
+            policy = json.load(handle)
 
     with open(args.file, "rb") as file:
         lnk = LnkFile(fhandle=file, cp=args.cp)
-        if args.target:
+        if args.machine_profile:
+            lnk.print_resolution(profile=profile, policy=policy, pjson=True)
+        elif args.target:
             lnk.print_shortcut_target(pjson=args.json)
         elif args.json:
             lnk.print_json(args.print_all)

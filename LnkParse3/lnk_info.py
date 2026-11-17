@@ -237,9 +237,8 @@ class LnkInfo:
         if not self.common_path_suffix_offset_unicode():
             return None
 
-        start = self.common_path_suffix_offset_unicode() + 4
+        start = self.common_path_suffix_offset_unicode()
 
         binary = self._raw[start:]
-        # import pdb;pdb.set_trace()
         text = self.text_processor.read_unicode_string(binary)
         return text

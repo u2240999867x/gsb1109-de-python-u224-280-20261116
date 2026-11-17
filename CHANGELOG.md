@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html) since v1.0.0.
 
 ## [Unreleased]
+### Added
+- Offline target resolution against a machine profile: environment, volumes, share mappings and file/directory catalog, with policy, provenance and conflict reporting (`LnkParse3.resolution`, `lnkparse --machine-profile`).
+### Fixed
+- Read `CommonPathSuffixUnicode` at its stated LinkInfo offset instead of four bytes past it.
 
 ## [1.6.0] - 2026-02-27
 ### Added

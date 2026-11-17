@@ -146,6 +146,8 @@ class Network(LnkInfo):
     def device_name_unicode(self):
         if self.net_name_offset() <= 20:
             return None
+        if not self.device_name_offset_unicode():
+            return None
 
         start = self.common_network_relative_link_offset()
         start += self.device_name_offset_unicode()
@@ -167,6 +169,8 @@ class Network(LnkInfo):
 
     def device_name(self):
         if self.net_name_offset() > 20:
+            return None
+        if not self.device_name_offset():
             return None
 
         start = self.common_network_relative_link_offset()
