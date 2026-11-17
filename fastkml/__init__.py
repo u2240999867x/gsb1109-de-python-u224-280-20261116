@@ -31,6 +31,7 @@ from fastkml.atom import Contributor as AtomContributor
 from fastkml.atom import Link as AtomLink
 from fastkml.containers import Document
 from fastkml.containers import Folder
+from fastkml.coverage import ImagePosition
 from fastkml.data import Data
 from fastkml.data import ExtendedData
 from fastkml.data import Schema
@@ -114,6 +115,7 @@ __all__ = [
     "Icon",
     "IconStyle",
     "ImagePyramid",
+    "ImagePosition",
     "InnerBoundaryIs",
     "KmlDateTime",
     "LabelStyle",

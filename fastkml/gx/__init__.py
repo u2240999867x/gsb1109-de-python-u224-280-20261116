@@ -80,6 +80,7 @@ located at http://developers.google.com/kml/schema/kml22gx.xsd.
 
 from fastkml.gx.data import SimpleArrayData
 from fastkml.gx.data import SimpleArrayField
+from fastkml.gx.overlay import LatLonQuad
 from fastkml.gx.track import Angle
 from fastkml.gx.track import MultiTrack
 from fastkml.gx.track import Track
@@ -89,6 +90,7 @@ from fastkml.gx.track import tracks_to_geometry
 
 __all__ = [
     "Angle",
+    "LatLonQuad",
     "MultiTrack",
     "SimpleArrayData",
     "SimpleArrayField",

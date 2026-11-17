@@ -93,6 +93,14 @@ fastkml.containers
    :undoc-members:
    :show-inheritance:
 
+fastkml.coverage
+---------------------
+
+.. automodule:: fastkml.coverage
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 fastkml.data
 -------------------
 
@@ -137,6 +145,14 @@ fastkml.gx.data
 -----------------
 
 .. automodule:: fastkml.gx.data
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+fastkml.gx.overlay
+-------------------
+
+.. automodule:: fastkml.gx.overlay
    :members:
    :undoc-members:
    :show-inheritance:

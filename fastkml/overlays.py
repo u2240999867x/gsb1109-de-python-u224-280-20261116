@@ -17,11 +17,15 @@
 
 import logging
 from collections.abc import Iterable
+from typing import TYPE_CHECKING
 from typing import Any
 
 from fastkml import atom
 from fastkml import config
 from fastkml.base import _XMLObject
+from fastkml.coverage import ImagePosition
+from fastkml.coverage import latlon_box_corners as _latlon_box_corners
+from fastkml.coverage import latlon_box_image_position as _latlon_box_image_position
 from fastkml.data import ExtendedData
 from fastkml.enums import AltitudeMode
 from fastkml.enums import GridOrigin
@@ -58,9 +62,14 @@ from fastkml.views import Camera
 from fastkml.views import LookAt
 from fastkml.views import Region
 
+if TYPE_CHECKING:
+    from fastkml.gx.overlay import LatLonQuad
+    from pygeoif.types import LineType
+
 __all__ = [
     "GroundOverlay",
     "ImagePyramid",
+    "ImagePosition",
     "LatLonBox",
     "OverlayXY",
     "PhotoOverlay",
@@ -1018,6 +1027,49 @@ class LatLonBox(_BaseObject):
             ],
         )
 
+    @property
+    def corners(self) -> "LineType | None":
+        """
+        Return the four geographic corners of the box in image order.
+
+        The corners are ordered bottom-left, bottom-right, top-right,
+        top-left, matching the order used by ``gx:LatLonQuad`` so the same
+        point-in-coverage math applies to both declarations. Returns
+        ``None`` if any of north/south/east/west is unset.
+        """
+        if not self:
+            return None
+        return _latlon_box_corners(self)
+
+    def image_position(
+        self,
+        longitude: float,
+        latitude: float,
+    ) -> ImagePosition | None:
+        """
+        Return the image position of a coordinate inside this box.
+
+        Parameters
+        ----------
+        longitude : float
+            Longitude of the coordinate in decimal degrees.
+        latitude : float
+            Latitude of the coordinate in decimal degrees.
+
+        Returns
+        -------
+        Optional[ImagePosition]
+            The position inside the draped image, with ``x``/``y`` between
+            0 and 1 and the original :class:`LatLonBox` attached as the
+            declaration. ``None`` if the coordinate is outside the box, if
+            the box is incomplete, or if it does not have strictly positive
+            width and height.
+
+        """
+        if not self:
+            return None
+        return _latlon_box_image_position(self, longitude, latitude)
+
 
 registry.register(
     LatLonBox,
@@ -1112,6 +1164,10 @@ class GroundOverlay(_Overlay):
     # for the ground overlay are aligned. Also, optionally the rotation of the
     # overlay.
 
+    lat_lon_quad: "LatLonQuad | None"
+    # Alternative to lat_lon_box from the gx namespace: an explicit
+    # quadrilateral defined by its four corner coordinates.
+
     def __init__(
         self,
         ns: str | None = None,
@@ -1141,6 +1197,7 @@ class GroundOverlay(_Overlay):
         altitude: float | None = None,
         altitude_mode: AltitudeMode | None = None,
         lat_lon_box: LatLonBox | None = None,
+        lat_lon_quad: "LatLonQuad | None" = None,
         **kwargs: Any,
     ) -> None:
         """
@@ -1198,6 +1255,9 @@ class GroundOverlay(_Overlay):
             The altitude mode of the element.
         lat_lon_box : Optional[LatLonBox]
             The latitude-longitude box associated with the element.
+        lat_lon_quad : Optional[LatLonQuad]
+            The explicit four-corner coverage (``gx:LatLonQuad``) associated
+            with the element. Mutually exclusive with ``lat_lon_box``.
         kwargs : Any
             Additional keyword arguments.
 
@@ -1206,6 +1266,9 @@ class GroundOverlay(_Overlay):
         None
 
         """
+        if lat_lon_box is not None and lat_lon_quad is not None:
+            msg = "lat_lon_box and lat_lon_quad are mutually exclusive"
+            raise ValueError(msg)
         super().__init__(
             ns=ns,
             name_spaces=name_spaces,
@@ -1234,6 +1297,7 @@ class GroundOverlay(_Overlay):
         self.altitude = altitude
         self.altitude_mode = altitude_mode
         self.lat_lon_box = lat_lon_box
+        self.lat_lon_quad = lat_lon_quad
 
     def __repr__(self) -> str:
         """Create a string (c)representation for GroundOverlay."""
@@ -1264,9 +1328,46 @@ class GroundOverlay(_Overlay):
             f"altitude={self.altitude!r}, "
             f"altitude_mode={self.altitude_mode}, "
             f"lat_lon_box={self.lat_lon_box!r}, "
+            f"lat_lon_quad={self.lat_lon_quad!r}, "
             f"**{self._get_splat()!r},"
             ")"
         )
+
+    def image_position(
+        self,
+        longitude: float,
+        latitude: float,
+    ) -> ImagePosition | None:
+        """
+        Return the image position of a coordinate inside this overlay.
+
+        The declared coverage (a :class:`LatLonBox` or a
+        :class:`fastkml.gx.overlay.LatLonQuad`) is tested exactly; its
+        axis-aligned bounding box is never used as a substitute. The
+        returned :class:`ImagePosition` carries the original coverage
+        declaration so callers can tell which KML element produced the
+        result.
+
+        Parameters
+        ----------
+        longitude : float
+            Longitude of the coordinate in decimal degrees.
+        latitude : float
+            Latitude of the coordinate in decimal degrees.
+
+        Returns
+        -------
+        Optional[ImagePosition]
+            The position inside the draped image, or ``None`` when the
+            coordinate is outside the coverage, no coverage is declared, or
+            the coverage is degenerate or self-intersecting.
+
+        """
+        if self.lat_lon_box is not None:
+            return self.lat_lon_box.image_position(longitude, latitude)
+        if self.lat_lon_quad is not None:
+            return self.lat_lon_quad.image_position(longitude, latitude)
+        return None
 
 
 registry.register(

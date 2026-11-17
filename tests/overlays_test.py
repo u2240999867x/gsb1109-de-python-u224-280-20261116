@@ -18,6 +18,7 @@
 
 import contextlib
 
+import pytest
 from pygeoif import geometry as geo
 
 from fastkml import enums
@@ -264,6 +265,158 @@ class TestGroundOverlay(StdLibrary):
         )
 
         assert g.to_string() == expected.to_string()
+
+    def test_latlonbox_corners(self) -> None:
+        llb = overlays.LatLonBox(
+            north=10.0,
+            south=0.0,
+            east=10.0,
+            west=0.0,
+        )
+
+        assert llb.corners == (
+            (0.0, 0.0),
+            (10.0, 0.0),
+            (10.0, 10.0),
+            (0.0, 10.0),
+        )
+
+    def test_latlonbox_corners_rotated_90(self) -> None:
+        llb = overlays.LatLonBox(
+            north=10.0,
+            south=0.0,
+            east=10.0,
+            west=0.0,
+            rotation=90.0,
+        )
+
+        assert llb.corners == (
+            (10.0, 0.0),
+            (10.0, 10.0),
+            (0.0, 10.0),
+            (0.0, 0.0),
+        )
+
+    def test_latlonbox_image_position_center(self) -> None:
+        llb = overlays.LatLonBox(
+            north=10.0,
+            south=0.0,
+            east=10.0,
+            west=0.0,
+        )
+
+        position = llb.image_position(5.0, 5.0)
+
+        assert position is not None
+        assert position.x == pytest.approx(0.5)
+        assert position.y == pytest.approx(0.5)
+        assert position.declaration is llb
+
+    @pytest.mark.parametrize(
+        ("longitude", "latitude", "expected_x", "expected_y"),
+        [
+            (0.0, 0.0, 0.0, 0.0),
+            (10.0, 0.0, 1.0, 0.0),
+            (10.0, 10.0, 1.0, 1.0),
+            (0.0, 10.0, 0.0, 1.0),
+        ],
+    )
+    def test_latlonbox_image_position_corners(
+        self,
+        longitude: float,
+        latitude: float,
+        expected_x: float,
+        expected_y: float,
+    ) -> None:
+        llb = overlays.LatLonBox(
+            north=10.0,
+            south=0.0,
+            east=10.0,
+            west=0.0,
+        )
+
+        position = llb.image_position(longitude, latitude)
+
+        assert position is not None
+        assert position.x == pytest.approx(expected_x)
+        assert position.y == pytest.approx(expected_y)
+
+    @pytest.mark.parametrize(
+        ("longitude", "latitude"),
+        [(11.0, 5.0), (-1.0, 5.0), (5.0, 11.0), (5.0, -1.0)],
+    )
+    def test_latlonbox_image_position_outside(
+        self,
+        longitude: float,
+        latitude: float,
+    ) -> None:
+        llb = overlays.LatLonBox(
+            north=10.0,
+            south=0.0,
+            east=10.0,
+            west=0.0,
+        )
+
+        assert llb.image_position(longitude, latitude) is None
+
+    def test_latlonbox_image_position_rotated(self) -> None:
+        llb = overlays.LatLonBox(
+            north=10.0,
+            south=0.0,
+            east=10.0,
+            west=0.0,
+            rotation=45.0,
+        )
+
+        center = llb.image_position(5.0, 5.0)
+        assert center is not None
+        assert center.x == pytest.approx(0.5)
+        assert center.y == pytest.approx(0.5)
+        # Inside the axis-aligned bounding box but outside the rotated box.
+        assert llb.image_position(0.5, 0.5) is None
+
+    def test_latlonbox_image_position_antimeridian(self) -> None:
+        # Longitudes extend beyond +/-180 to describe a box crossing the
+        # antimeridian; the point-in-coverage math must stay continuous.
+        llb = overlays.LatLonBox(
+            north=10.0,
+            south=0.0,
+            east=190.0,
+            west=170.0,
+        )
+
+        center = llb.image_position(180.0, 5.0)
+        assert center is not None
+        assert center.x == pytest.approx(0.5)
+        assert llb.image_position(-175.0, 5.0) is not None
+        assert llb.image_position(175.0, 5.0) is not None
+        assert llb.image_position(0.0, 5.0) is None
+
+    def test_latlonbox_image_position_degenerate(self) -> None:
+        assert (
+            overlays.LatLonBox(
+                north=10.0,
+                south=10.0,
+                east=10.0,
+                west=0.0,
+            ).image_position(5.0, 10.0)
+            is None
+        )
+        assert overlays.LatLonBox().image_position(0.0, 0.0) is None
+
+    def test_ground_overlay_image_position_box(self) -> None:
+        llb = overlays.LatLonBox(
+            north=10.0,
+            south=0.0,
+            east=10.0,
+            west=0.0,
+        )
+        overlay = overlays.GroundOverlay(lat_lon_box=llb)
+
+        position = overlay.image_position(5.0, 5.0)
+
+        assert position is not None
+        assert position.declaration is llb
 
 
 class TestPhotoOverlay(StdLibrary):

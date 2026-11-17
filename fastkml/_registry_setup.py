@@ -30,6 +30,7 @@ from fastkml.geometry import LineString
 from fastkml.geometry import MultiGeometry
 from fastkml.geometry import Point
 from fastkml.geometry import Polygon
+from fastkml.gx.overlay import LatLonQuad
 from fastkml.gx.track import MultiTrack
 from fastkml.gx.track import Track
 from fastkml.helpers import xml_subelement
@@ -82,6 +83,19 @@ registry.register(
         attr_name="extended_data",
         node_name="ExtendedData",
         classes=(ExtendedData,),
+        get_kwarg=xml_subelement_kwarg,
+        set_element=xml_subelement,
+    ),
+)
+
+
+registry.register(
+    GroundOverlay,
+    RegistryItem(
+        ns_ids=("gx",),
+        attr_name="lat_lon_quad",
+        node_name="LatLonQuad",
+        classes=(LatLonQuad,),
         get_kwarg=xml_subelement_kwarg,
         set_element=xml_subelement,
     ),
@@ -179,6 +193,8 @@ _change_classes = (
     # GX Geometry
     MultiTrack,
     Track,
+    # GX overlay extension
+    LatLonQuad,
     # Model
     Alias,
     Location,

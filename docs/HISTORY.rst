@@ -7,6 +7,13 @@ Changelog
 - Drop support for Python 3.9.
 - Add ``Update``, ``Create``, ``Change``, and ``Delete`` element support to
   ``NetworkLinkControl``.
+- Add ``gx:LatLonQuad`` support to ``GroundOverlay``, including parsing and
+  serialization of the explicit four-corner coverage.
+- Add ``image_position`` to ``GroundOverlay``, ``LatLonBox`` and
+  ``gx:LatLonQuad`` to locate a coordinate inside the draped image. Rotated
+  ``LatLonBox`` coverage is inverted exactly, antimeridian-spanning coverage
+  stays continuous, and degenerate or self-intersecting quadrilaterals return
+  ``None`` instead of falling back to a bounding-box approximation.
 - Constructor keyword arguments beyond ``ns``/``name_spaces`` (e.g. ``id``, ``target_id``)
   are now keyword-only across the base and mixin classes; update any
   ``super().__init__()`` calls that passed them positionally.
