@@ -1,0 +1,24 @@
+{
+  "budget_bytes": 100,
+  "packages": [
+    {
+      "name": "gamma",
+      "registry": [
+        {"path": "data/a.bin", "hash": "sha256:1111", "size": [400, 500]},
+        {"path": "data/b.bin", "hash": "sha256:2222", "size": [300, 400]},
+        {"path": "data/c.bin", "hash": "sha256:3333", "size": 50}
+      ]
+    },
+    {
+      "name": "delta",
+      "registry": [
+        {"path": "data/c.bin", "hash": "sha256:3333", "size": 60}
+      ]
+    }
+  ],
+  "archives": [
+    {"name": "pack-x.zip",
+     "members": ["data/a.bin", "data/b.bin"],
+     "total_size": 600}
+  ]
+}

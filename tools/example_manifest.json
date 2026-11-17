@@ -1,0 +1,49 @@
+{
+  "budget_bytes": 800,
+  "packages": [
+    {
+      "name": "alpha",
+      "registry": [
+        {"path": "data/tiny-data.txt", "hash": "sha256:AAAA", "size": 100},
+        {"path": "data/geom.bin", "hash": "sha256:BBBB", "size": [400, 600],
+         "retain": false,
+         "products": [{"processor": "unzip", "version": "1"}]}
+      ]
+    },
+    {
+      "name": "beta",
+      "registry": [
+        {"path": "data/tiny-data.txt", "hash": "sha256:AAAA", "size": 100},
+        {"path": "data/geom.bin", "hash": "sha256:BBBB", "size": [400, 600],
+         "retain": false,
+         "products": [{"processor": "unzip", "version": "2"}]},
+        {"path": "data/map.tif", "hash": "sha256:EEEE", "size": 150,
+         "retain": false,
+         "products": [{"processor": "grid", "version": "2"}]},
+        {"path": "data/extra.bin", "hash": "sha256:FFFF", "size": [100, 300]}
+      ]
+    }
+  ],
+  "processors": [
+    {"name": "unzip", "version": "1", "depends_on": []},
+    {"name": "unzip", "version": "2", "depends_on": []},
+    {"name": "reproject", "version": "3", "depends_on": []},
+    {"name": "grid", "version": "2",
+     "depends_on": [{"name": "reproject", "version": "3"}]}
+  ],
+  "archives": [
+    {"name": "bundle-1.zip",
+     "members": ["data/geom.bin", "data/raw.dat"],
+     "total_size": 1000}
+  ],
+  "cache": {
+    "originals": [
+      {"path": "data/tiny-data.txt", "hash": "sha256:AAAA", "verified": true},
+      {"path": "data/geom.bin", "hash": null, "verified": false}
+    ],
+    "products": [
+      {"original_hash": "sha256:EEEE", "processor": "reproject",
+       "version": "3", "usable": true}
+    ]
+  }
+}
