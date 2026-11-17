@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html) since v1.0.0.
 
 ## [Unreleased]
+### Added
+- Add `resolve_target_version` and `lnkparse --resolve-version` to identify the
+  catalog version a shortcut points at, using volume/object identifiers, saved
+  size and time at provable precision, with explicit adopt/exclude evidence.
 
 ## [1.6.0] - 2026-02-27
 ### Added

@@ -52,7 +52,34 @@ optional arguments:
   -j, --json            print output in JSON
   -c CP, --codepage CP  set codepage of ASCII strings
   -a, --all             print all extracted data (i.e. offsets and sizes)
+  --resolve-version CATALOG
+                        resolve the target against a volume-history catalog
+  --identity-rules RULES
+                        explicit LNK-to-catalog identity rules (JSON)
+  --collected-at TIME   catalog collection timestamp
 ```
+
+## Target-version resolution
+
+When a shortcut must be tied to a specific version in a volume history, use
+`resolve_target_version` (or `lnkparse --resolve-version`). It combines volume
+and object identifiers, the saved size, and saved times at their provable
+precision, and returns one of `unique`, `multiple`, `contradiction` or
+`unresolved` together with every adopted and excluded raw field.
+
+```python
+>>> import LnkParse3
+>>> with open("shortcut.lnk", "rb") as handle:
+...     resolution = LnkParse3.resolve_target_version(handle, "catalog.json")
+>>> resolution.status
+'unique'
+```
+
+Path is corroboration only: a newer file later placed at the same path does not
+inherit the old relation, and a shortcut timestamp does not prove that a
+version survived until collection. See
+[`doc/version-resolution.md`](doc/version-resolution.md) for the catalog shape,
+identity-rule schema, precision rules and contradiction kinds.
 
 ## CLI tool
 

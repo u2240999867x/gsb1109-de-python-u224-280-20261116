@@ -370,11 +370,43 @@ def main():
         action="store_true",
         help="print all extracted data (i.e. offsets and sizes)",
     )
+    arg_parser.add_argument(
+        "--resolve-version",
+        metavar="CATALOG",
+        help="resolve the target version against a volume-history catalog (JSON)",
+    )
+    arg_parser.add_argument(
+        "--identity-rules",
+        metavar="RULES",
+        help="explicit LNK-to-catalog identity rules used by --resolve-version (JSON)",
+    )
+    arg_parser.add_argument(
+        "--collected-at",
+        metavar="TIME",
+        help="catalog collection timestamp; never inferred from the shortcut",
+    )
     args = arg_parser.parse_args()
 
     with open(args.file, "rb") as file:
         lnk = LnkFile(fhandle=file, cp=args.cp)
-        if args.target:
+        if args.resolve_version:
+            from LnkParse3.version_resolution import resolve_target_version
+
+            resolution = resolve_target_version(
+                lnk,
+                args.resolve_version,
+                rules=args.identity_rules,
+                collected_at=args.collected_at,
+            )
+            print(
+                json.dumps(
+                    resolution.as_dict(),
+                    indent=4,
+                    sort_keys=True,
+                    default=str,
+                )
+            )
+        elif args.target:
             lnk.print_shortcut_target(pjson=args.json)
         elif args.json:
             lnk.print_json(args.print_all)
