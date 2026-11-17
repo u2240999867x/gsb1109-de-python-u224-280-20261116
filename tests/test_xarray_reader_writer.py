@@ -555,6 +555,164 @@ def test_smoke(cdf_path, tmp_path):
     xarray_to_cdf(a, tmp_path / cdf_path.name)
 
 
+def _write_depend_test_cdf(file_path):
+    # Builds a CDF with a time-varying (2-D) DEPEND_1 coordinate, plus variables
+    # with missing, circular, and contradictory dependencies
+    from cdflib.cdfwrite import CDF as CDFWriter
+
+    with CDFWriter(file_path, cdf_spec={"Majority": "row_major", "Encoding": 6, "Checksum": False}) as cdf:
+        cdf.write_var(
+            {"Variable": "Epoch", "Data_Type": 33, "Num_Elements": 1, "Rec_Vary": True, "Dim_Sizes": []},
+            var_attrs={"VAR_TYPE": "support_data"},
+            var_data=np.array([1.0, 2.0, 3.0, 4.0]),
+        )
+        cdf.write_var(
+            {"Variable": "energy_bin", "Data_Type": 45, "Num_Elements": 1, "Rec_Vary": False, "Dim_Sizes": [3]},
+            var_attrs={"VAR_TYPE": "support_data"},
+            var_data=np.array([0, 1, 2], dtype=np.int16),
+        )
+        # An energy axis that changes from record to record
+        cdf.write_var(
+            {"Variable": "energy", "Data_Type": 45, "Num_Elements": 1, "Rec_Vary": True, "Dim_Sizes": [3]},
+            var_attrs={"VAR_TYPE": "support_data", "DEPEND_0": "Epoch", "DEPEND_1": "energy_bin"},
+            var_data=np.array([[10.0, 20.0, 30.0], [11.0, 21.0, 31.0], [12.0, 22.0, 32.0], [13.0, 23.0, 33.0]]),
+        )
+        cdf.write_var(
+            {"Variable": "flux", "Data_Type": 45, "Num_Elements": 1, "Rec_Vary": True, "Dim_Sizes": [3]},
+            var_attrs={"VAR_TYPE": "data", "DEPEND_0": "Epoch", "DEPEND_1": "energy"},
+            var_data=np.array([[100.0, 200.0, 300.0], [101.0, 201.0, 301.0], [102.0, 202.0, 302.0], [103.0, 203.0, 303.0]]),
+        )
+        # Same lengths as flux, but no DEPEND relationship with anything
+        cdf.write_var(
+            {"Variable": "lonely", "Data_Type": 45, "Num_Elements": 1, "Rec_Vary": True, "Dim_Sizes": [3]},
+            var_attrs={"VAR_TYPE": "data"},
+            var_data=np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0], [10.0, 11.0, 12.0]]),
+        )
+        cdf.write_var(
+            {"Variable": "missing_dep", "Data_Type": 45, "Num_Elements": 1, "Rec_Vary": True, "Dim_Sizes": []},
+            var_attrs={"VAR_TYPE": "data", "DEPEND_0": "no_such_var"},
+            var_data=np.array([5.0, 6.0, 7.0, 8.0]),
+        )
+        # Declares DEPEND_0=Epoch but has a different number of records
+        cdf.write_var(
+            {"Variable": "bad_epoch", "Data_Type": 45, "Num_Elements": 1, "Rec_Vary": True, "Dim_Sizes": []},
+            var_attrs={"VAR_TYPE": "data", "DEPEND_0": "Epoch"},
+            var_data=np.array([9.0, 10.0]),
+        )
+        # Circular dependency
+        cdf.write_var(
+            {"Variable": "cyc_a", "Data_Type": 45, "Num_Elements": 1, "Rec_Vary": False, "Dim_Sizes": [2]},
+            var_attrs={"VAR_TYPE": "support_data", "DEPEND_1": "cyc_b"},
+            var_data=np.array([1.0, 2.0]),
+        )
+        cdf.write_var(
+            {"Variable": "cyc_b", "Data_Type": 45, "Num_Elements": 1, "Rec_Vary": False, "Dim_Sizes": [2]},
+            var_attrs={"VAR_TYPE": "support_data", "DEPEND_1": "cyc_a"},
+            var_data=np.array([3.0, 4.0]),
+        )
+        # DEPEND_1 whose size contradicts the variable's own dimension
+        cdf.write_var(
+            {"Variable": "bad_depend1", "Data_Type": 45, "Num_Elements": 1, "Rec_Vary": True, "Dim_Sizes": [5]},
+            var_attrs={"VAR_TYPE": "data", "DEPEND_0": "Epoch", "DEPEND_1": "energy_bin"},
+            var_data=np.zeros((4, 5)),
+        )
+
+
+def test_cdf_to_xarray_time_varying_depend_coordinate(tmp_path):
+    # A 2-D DEPEND_1 (an energy axis that varies in time) must be kept as a 2-D
+    # coordinate spanning its own record dimension and its declared non-record dimension
+    pytest.importorskip("xarray")
+    file_path = tmp_path / "depend_coords.cdf"
+    _write_depend_test_cdf(file_path)
+
+    ds = cdf_to_xarray(file_path, to_datetime=False)
+
+    assert ds["energy"].dims == ("Epoch", "energy_bin")
+    assert ds["flux"].dims == ("Epoch", "energy_bin")
+    assert "energy" in ds.coords
+    assert "energy_bin" in ds.coords
+
+    # Every record stays at its original position
+    with CDF(file_path) as cdf:
+        assert np.array_equal(ds["flux"].values, cdf.varget("flux"))
+        assert np.array_equal(ds["energy"].values, cdf.varget("energy"))
+
+
+def test_cdf_to_xarray_no_length_based_dimension_sharing(tmp_path):
+    # Variables with matching lengths but no DEPEND relationship must not share dimensions
+    pytest.importorskip("xarray")
+    file_path = tmp_path / "no_length_guessing.cdf"
+    _write_depend_test_cdf(file_path)
+
+    ds = cdf_to_xarray(file_path, to_datetime=False)
+
+    assert set(ds["lonely"].dims).isdisjoint({"Epoch", "energy_bin"})
+    with CDF(file_path) as cdf:
+        assert np.array_equal(ds["lonely"].values, cdf.varget("lonely"))
+
+
+def test_cdf_to_xarray_bad_dependencies_still_import(tmp_path):
+    # Missing, circular, and contradictory dependencies are reported per variable
+    # and must not prevent the other variables from importing
+    pytest.importorskip("xarray")
+    file_path = tmp_path / "bad_depends.cdf"
+    _write_depend_test_cdf(file_path)
+
+    ds = cdf_to_xarray(file_path, to_datetime=False)
+
+    for var in ("Epoch", "energy", "energy_bin", "flux", "lonely", "missing_dep", "bad_epoch", "cyc_a", "cyc_b", "bad_depend1"):
+        assert var in ds.variables
+
+    # The conflicting DEPEND_0 is not honored, and the data is not reindexed to fit
+    assert ds["bad_epoch"].dims != ("Epoch",)
+    assert ds["bad_epoch"].shape == (2,)
+    # The contradictory DEPEND_1 is replaced with a private dimension
+    assert "energy_bin" not in ds["bad_depend1"].dims
+    assert ds["bad_depend1"].shape == (4, 5)
+
+    with CDF(file_path) as cdf:
+        for var in ("missing_dep", "bad_epoch", "cyc_a", "cyc_b", "bad_depend1"):
+            assert np.array_equal(ds[var].values, cdf.varget(var))
+
+
+def test_cdf_to_xarray_same_length_coordinates_with_conflicting_values(tmp_path):
+    # Two same-length record coordinates with different values stay separate;
+    # their values are never unioned or reindexed
+    pytest.importorskip("xarray")
+    from cdflib.cdfwrite import CDF as CDFWriter
+
+    file_path = tmp_path / "two_epochs.cdf"
+    with CDFWriter(file_path, cdf_spec={"Majority": "row_major", "Encoding": 6, "Checksum": False}) as cdf:
+        cdf.write_var(
+            {"Variable": "e1", "Data_Type": 33, "Num_Elements": 1, "Rec_Vary": True, "Dim_Sizes": []},
+            var_attrs={"VAR_TYPE": "support_data"},
+            var_data=np.array([1.0, 2.0, 3.0, 4.0]),
+        )
+        cdf.write_var(
+            {"Variable": "e2", "Data_Type": 33, "Num_Elements": 1, "Rec_Vary": True, "Dim_Sizes": []},
+            var_attrs={"VAR_TYPE": "support_data"},
+            var_data=np.array([2.0, 2.0, 9.0, 9.0]),
+        )
+        cdf.write_var(
+            {"Variable": "v1", "Data_Type": 45, "Num_Elements": 1, "Rec_Vary": True, "Dim_Sizes": []},
+            var_attrs={"VAR_TYPE": "data", "DEPEND_0": "e1"},
+            var_data=np.array([10.0, 11.0, 12.0, 13.0]),
+        )
+        cdf.write_var(
+            {"Variable": "v2", "Data_Type": 45, "Num_Elements": 1, "Rec_Vary": True, "Dim_Sizes": []},
+            var_attrs={"VAR_TYPE": "data", "DEPEND_0": "e2"},
+            var_data=np.array([20.0, 21.0, 22.0, 23.0]),
+        )
+
+    ds = cdf_to_xarray(file_path, to_datetime=False)
+
+    assert ds["v1"].dims == ("e1",)
+    assert ds["v2"].dims == ("e2",)
+    assert np.array_equal(ds["e2"].values, [2.0, 2.0, 9.0, 9.0])
+    assert np.array_equal(ds["v1"].values, [10.0, 11.0, 12.0, 13.0])
+    assert np.array_equal(ds["v2"].values, [20.0, 21.0, 22.0, 23.0])
+
+
 def test_datetime64_conversion():
     # verifying that everything writes correctly
     pytest.importorskip("xarray")
