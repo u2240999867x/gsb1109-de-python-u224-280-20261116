@@ -3,6 +3,7 @@
 
 from __future__ import print_function, unicode_literals
 
+import stat
 import sys
 import typing
 
@@ -15,6 +16,7 @@ from ._url_tools import url_quote
 from .base import FS
 from .compress import write_zip
 from .enums import ResourceType, Seek
+from .errors import IllegalBackReference
 from .info import Info
 from .iotools import RawWrapper
 from .memoryfs import MemoryFS
@@ -352,6 +354,7 @@ class ReadZipFS(FS):
         self.encoding = encoding
         self._zip = zipfile.ZipFile(file, "r")
         self._directory_fs = None  # type: Optional[MemoryFS]
+        self._zip_names = {}  # type: Dict[Text, str]
 
     def __repr__(self):
         # type: () -> Text
@@ -365,11 +368,18 @@ class ReadZipFS(FS):
         # type: (Text) -> str
         """Convert a path to a zip file name."""
         path = relpath(normpath(path))
-        if self._directory.isdir(path):
-            path = forcedir(path)
-        if six.PY2:
-            return path.encode(self.encoding)
-        return path
+        directory = self._directory
+        try:
+            zip_name = self._zip_names[path]
+        except KeyError:
+            # No matching member in the zip; this may be an implied
+            # directory, so re-create the name it would have.
+            if directory.isdir(path):
+                path = forcedir(path)
+            zip_name = path
+        if six.PY2 and isinstance(zip_name, six.text_type):
+            return zip_name.encode(self.encoding)
+        return zip_name
 
     @property
     def _directory(self):
@@ -379,15 +389,40 @@ class ReadZipFS(FS):
         with self._lock:
             if self._directory_fs is None:
                 self._directory_fs = _fs = MemoryFS()
-                for zip_name in self._zip.namelist():
-                    resource_name = zip_name
+                self._zip_names = _zip_names = {}
+                for raw_name in self._zip.namelist():
+                    resource_name = raw_name
                     if six.PY2:
                         resource_name = resource_name.decode(self.encoding, "replace")
-                    if resource_name.endswith("/"):
-                        _fs.makedirs(resource_name, recreate=True)
-                    else:
-                        _fs.makedirs(dirname(resource_name), recreate=True)
-                        _fs.create(resource_name)
+                    is_dir = resource_name.endswith("/")
+                    try:
+                        resource_name = relpath(normpath(resource_name))
+                    except IllegalBackReference:
+                        # Back references outside of the root, must be
+                        # up to no good.
+                        continue
+                    if not resource_name:
+                        continue
+                    # Later members take precedence over earlier members
+                    # with the same (normalized) name.
+                    try:
+                        if is_dir:
+                            if _fs.isfile(resource_name):
+                                _fs.remove(resource_name)
+                            _fs.makedirs(resource_name, recreate=True)
+                        else:
+                            if _fs.isdir(resource_name):
+                                if not _fs.isempty(resource_name):
+                                    continue
+                                _fs.removedir(resource_name)
+                            _fs.makedirs(dirname(resource_name), recreate=True)
+                            _fs.create(resource_name)
+                    except errors.ResourceInvalid:
+                        # The member collides with an existing resource
+                        # of a different type, and can't be represented
+                        # in the directory hierarchy.
+                        continue
+                    _zip_names[resource_name] = raw_name
             return self._directory_fs
 
     def getinfo(self, path, namespaces=None):
@@ -414,13 +449,22 @@ class ReadZipFS(FS):
                     pass
                 else:
                     if "details" in namespaces:
+                        resource_type = (
+                            ResourceType.directory
+                            if basic_info.is_dir
+                            else ResourceType.file
+                        )
+                        if (
+                            resource_type is ResourceType.file
+                            and zip_info.create_system == 3
+                            and stat.S_ISLNK(zip_info.external_attr >> 16)
+                        ):
+                            # Zip files created on UNIX may store
+                            # symlinks; report them as such.
+                            resource_type = ResourceType.symlink
                         raw_info["details"] = {
                             "size": zip_info.file_size,
-                            "type": int(
-                                ResourceType.directory
-                                if basic_info.is_dir
-                                else ResourceType.file
-                            ),
+                            "type": int(resource_type),
                             "modified": datetime_to_epoch(
                                 datetime(*zip_info.date_time)
                             ),

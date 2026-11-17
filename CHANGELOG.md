@@ -13,6 +13,13 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 
 - Added `filter_glob` and `exclude_glob` parameters to `fs.walk.Walker`.
   Closes [#459](https://github.com/PyFilesystem/pyfilesystem2/issues/459).
+- Added `fs.extract.extract_fs`, which safely exports the members of an
+  archive filesystem (such as `~fs.zipfs.ReadZipFS` or `~fs.tarfs.ReadTarFS`)
+  to a target root. Only authorized members are exported, member paths are
+  normalized and preserved relative to the target root, and duplicate names
+  and links are handled according to explicit policies.
+- `fs.zipfs.ReadZipFS` now reports UNIX symlinks stored in a zip file as
+  `~fs.enums.ResourceType.symlink`.
 
 ### Fixed
 - Elaborated documentation of `filter_dirs` and `exclude_dirs` in `fs.walk.Walker`.
@@ -21,6 +28,11 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
   ([#535](https://github.com/PyFilesystem/pyfilesystem2/issues/535)).
 - Fixed a bug where files could be truncated or deleted when moved / copied onto itself.
   Closes [#546](https://github.com/PyFilesystem/pyfilesystem2/issues/546)
+- Fixed `fs.zipfs.ReadZipFS` raising `IllegalBackReference` when opening a zip
+  file containing members with back references outside of the root. Such
+  members are now skipped, member names are normalized, and duplicates are
+  resolved in favor of the last member, matching the policy of
+  `fs.tarfs.ReadTarFS`.
 
 ## [2.4.16] - 2022-05-02
 

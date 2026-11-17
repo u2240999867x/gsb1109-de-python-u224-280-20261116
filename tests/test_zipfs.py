@@ -11,7 +11,7 @@ import zipfile
 
 from fs import zipfs
 from fs.compress import write_zip
-from fs.enums import Seek
+from fs.enums import ResourceType, Seek
 from fs.errors import NoURL
 from fs.opener import open_fs
 from fs.opener.errors import NotWriteable
@@ -218,6 +218,63 @@ class TestDirsZipFS(unittest.TestCase):
                 self.assertTrue(zip_fs.isfile("foo/bar/baz/egg"))
         finally:
             os.remove(path)
+
+
+class TestReadZipFSMembers(unittest.TestCase):
+    """Test how ReadZipFS handles unusual member names."""
+
+    def make_zip(self, members):
+        fileobj = six.BytesIO()
+        with zipfile.ZipFile(fileobj, "w") as z:
+            for name, data in members:
+                z.writestr(name, data)
+        fileobj.seek(0)
+        return zipfs.ReadZipFS(fileobj)
+
+    def test_back_references_skipped(self):
+        """Members with back references outside the root are skipped."""
+        with self.make_zip(
+            [("ok.txt", b"ok"), ("../evil.txt", b"evil"), ("foo/../../up.txt", b"up")]
+        ) as zip_fs:
+            self.assertEqual(zip_fs.listdir("/"), ["ok.txt"])
+            self.assertEqual(zip_fs.readbytes("ok.txt"), b"ok")
+
+    def test_absolute_paths_clamped(self):
+        """Absolute member names are made relative to the root."""
+        with self.make_zip([("/abs.txt", b"abs")]) as zip_fs:
+            self.assertEqual(zip_fs.listdir("/"), ["abs.txt"])
+            self.assertEqual(zip_fs.readbytes("abs.txt"), b"abs")
+
+    def test_names_normalized(self):
+        """Member names are normalized, and remain readable."""
+        with self.make_zip([("a//b.txt", b"b"), ("./c.txt", b"c")]) as zip_fs:
+            self.assertEqual(sorted(zip_fs.walk.files()), ["/a/b.txt", "/c.txt"])
+            self.assertEqual(zip_fs.readbytes("a/b.txt"), b"b")
+            self.assertEqual(zip_fs.readbytes("c.txt"), b"c")
+            self.assertEqual(zip_fs.getinfo("a/b.txt", ["details"]).size, 1)
+
+    def test_duplicate_names(self):
+        """With duplicate member names, the last member wins."""
+        with self.make_zip([("dup.txt", b"first"), ("dup.txt", b"second")]) as zip_fs:
+            self.assertEqual(zip_fs.listdir("/"), ["dup.txt"])
+            self.assertEqual(zip_fs.readbytes("dup.txt"), b"second")
+
+    def test_symlink_type(self):
+        """UNIX symlinks stored in the zip are reported as symlinks."""
+        fileobj = six.BytesIO()
+        with zipfile.ZipFile(fileobj, "w") as z:
+            zip_info = zipfile.ZipInfo("link.txt")
+            zip_info.create_system = 3
+            zip_info.external_attr = 0o120777 << 16
+            z.writestr(zip_info, b"target.txt")
+            z.writestr("target.txt", b"content")
+        fileobj.seek(0)
+        with zipfs.ReadZipFS(fileobj) as zip_fs:
+            info = zip_fs.getinfo("link.txt", ["details"])
+            self.assertEqual(info.type, ResourceType.symlink)
+            self.assertEqual(
+                zip_fs.getinfo("target.txt", ["details"]).type, ResourceType.file
+            )
 
 
 class TestOpener(unittest.TestCase):

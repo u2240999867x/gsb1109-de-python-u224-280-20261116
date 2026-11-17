@@ -9,6 +9,7 @@ Reference
    reference/copy.rst
    reference/enums.rst
    reference/errors.rst
+   reference/extract.rst
    reference/glob.rst
    reference/info_objects.rst
    reference/filesize.rst
