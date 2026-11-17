@@ -68,6 +68,73 @@ Timezone Related Configurations
     >>> parse('January 12, 2012 10:00 PM', settings=settings)
     datetime.datetime(2012, 1, 12, 17, 0)
 
+``SOURCE_TIMEZONE``: defaults to ``False``. It declares the timezone in which
+the source wrote dates that carry none of their own, separately from
+``TIMEZONE``, which says how results are displayed. Before it existed, a
+``TIMEZONE`` that was not ``"local"`` also meant that the input was in that
+zone; that remains its meaning when ``SOURCE_TIMEZONE`` is not set.
+
+    >>> parse('12 Feb 2015 10:00 PM', settings={'SOURCE_TIMEZONE': 'America/New_York', 'TIMEZONE': 'UTC', 'RETURN_AS_TIMEZONE_AWARE': True})
+    datetime.datetime(2015, 2, 13, 3, 0, tzinfo=<DstTzInfo 'UTC' UTC+0:00:00 STD>)
+
+Time zones with daylight saving time need a rule for their source zone, since
+an abbreviation such as ``EST`` stands for a fixed offset while a tz database
+name such as ``America/New_York`` follows the date's DST rules.
+
+``TIMEZONE_CONFLICT``: defaults to ``'date'``. A date string and
+``SOURCE_TIMEZONE`` (or a fixed ``TIMEZONE``) can disagree about the offset.
+The setting decides which declaration fixes the instant:
+
+``'date'``
+    use the timezone written in the date string, and show the result in
+    ``TIMEZONE`` as before;
+``'settings'``
+    use the source setting, ignoring the timezone written in the date string;
+``'error'``
+    raise :class:`~dateparser.timezone_resolution.TimezoneConflictError`.
+
+Whatever the policy, the disagreement is reported in ``DateData.timezone``:
+
+    >>> data = DateDataParser(settings={'TIMEZONE': 'Europe/London'}).get_date_data('12 Feb 2015 10:00 PM EST')
+    >>> data.timezone.conflict
+    "the date string declares 'EST' (UTC-05:00), but TIMEZONE gives 'Europe/London' (UTC+00:00)"
+    >>> data.timezone.declared
+    'EST'
+
+.. versionadded:: unreleased
+
+``AMBIGUOUS_TIME``: defaults to ``'error'``. When the clock goes back, a local
+time occurs twice; when it goes forward, some local times do not occur at all.
+Neither has a single correct reading, so dateparser refuses to choose one by
+default and raises :class:`~dateparser.timezone_resolution.AmbiguousTimeError`.
+Set it to ``'earlier'`` or ``'later'`` to choose the earlier or later reading
+of an ambiguous time, or the offset in effect before or after the change for a
+nonexistent one:
+
+    >>> parse('3 Nov 2024 1:30 AM', settings={'TIMEZONE': 'America/New_York', 'AMBIGUOUS_TIME': 'later', 'RETURN_AS_TIMEZONE_AWARE': True})
+    datetime.datetime(2024, 11, 3, 1, 30, tzinfo=<DstTzInfo 'America/New_York' EST-1 day, 19:00:00 STD>)
+
+The two readings are also available on ``DateData.timezone.candidates``, and
+``DateData.timezone.dst_status`` is ``"ambiguous"`` or ``"nonexistent"``.
+
+.. versionadded:: unreleased
+
+The timezone of a result is described by ``DateData.timezone``, a
+:class:`~dateparser.timezone_resolution.TimezoneResolution`. Its ``declared``
+keeps the declaration as written, ``conflict`` records a disagreement,
+``candidates`` holds both readings when there were two, and ``local`` (also
+available as ``original_local_datetime`` and ``original_local_date``) keeps the
+wall time as written. The last one survives a ``TO_TIMEZONE`` conversion, so
+the source's own local date can always be traced:
+
+    >>> data = DateDataParser(settings={'TO_TIMEZONE': 'Asia/Tokyo', 'RETURN_AS_TIMEZONE_AWARE': True}).get_date_data('31 Dec 2014 11:30 PM EST')
+    >>> data.date_obj
+    datetime.datetime(2015, 1, 1, 13, 30, tzinfo=<DstTzInfo 'Asia/Tokyo' JST+9:00:00 STD>)
+    >>> data.timezone.original_local_date
+    datetime.date(2014, 12, 31)
+
+.. versionadded:: unreleased
+
 ``TIMEZONE_ABBREVIATIONS``: maps timezone abbreviations found in date strings
 to the UTC offset to use for them, as a :class:`~datetime.timedelta`. Use it
 for abbreviations with several meanings, e.g. ``IST`` means Israel Standard

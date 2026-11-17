@@ -21,6 +21,14 @@ from dateparser.languages.loader import LocaleDataLoader
 from dateparser.languages.locale import _MAX_TRANSLATIONS, _VARIANT_LETTERS
 from dateparser.parser import _parse_absolute, _parse_nospaces, _StrictDateOrderError
 from dateparser.timezone_parser import pop_tz_offset_from_string
+from dateparser.timezone_resolution import (
+    AmbiguousTimeError,
+    TimezoneConflictError,
+    TimezoneResolution,
+    declaration_from_offset,
+    resolve_aware,
+    resolve_wall_time,
+)
 from dateparser.utils import (
     _get_localzone,
     _get_missing_parts,
@@ -371,6 +379,27 @@ def _apply_century_preference(
         return date_obj.replace(year=target_year)
 
 
+def _timestamp_timezone_resolution(
+    date_obj: datetime, settings: Settings
+) -> TimezoneResolution | None:
+    """Describe the timezone of a parsed Unix timestamp.
+
+    A timestamp names an instant by itself, so it has no declaration of its
+    own. What matters for tracing is the zone its wall time was expressed in,
+    which is the source setting, and the zone it is returned in.
+    """
+    from dateparser.timezone_resolution import build_resolution  # noqa: PLC0415
+
+    if "local" in settings.TIMEZONE.lower() and not getattr(
+        settings, "SOURCE_TIMEZONE", False
+    ):
+        return None
+    local = date_obj.replace(tzinfo=None)
+    return build_resolution(
+        date=date_obj, local=local, declaration=None, settings=settings
+    )
+
+
 def parse_with_formats(
     date_string: str, date_formats: Iterable[str], settings: Settings
 ) -> "DateData":
@@ -410,10 +439,28 @@ def parse_with_formats(
                     date_obj, now, settings.PREFER_DATES_FROM
                 )
 
-            date_obj = apply_timezone_from_settings(date_obj, settings)
+            if date_obj.tzinfo is not None:
+                # A %z group fixes the instant. Keep its declaration before
+                # applying the settings, so the original offset is traceable.
+                offset = date_obj.utcoffset()
+                declaration = (
+                    declaration_from_offset(offset) if offset is not None else None
+                )
+                date_obj, timezone = resolve_aware(date_obj, settings, declaration)
+            else:
+                declaration = None
+                date_obj, timezone = resolve_wall_time(date_obj, settings)
+
+            if not settings.RETURN_AS_TIMEZONE_AWARE or (
+                settings.RETURN_AS_TIMEZONE_AWARE == "default" and not declaration
+            ):
+                date_obj = date_obj.replace(tzinfo=None)
 
             return DateData(
-                date_obj=date_obj, period=period, parts=_get_parts(date_format)
+                date_obj=date_obj,
+                period=period,
+                parts=_get_parts(date_format),
+                timezone=timezone,
             )
     return DateData(date_obj=None, period=period)
 
@@ -606,12 +653,17 @@ class _DateLocaleParser:
         return None
 
     def _try_timestamp_parser(self, negative: bool = False) -> "DateData":
+        date_obj = get_date_from_timestamp(
+            self.date_string, self._settings, negative=negative
+        )
+        timezone = None
+        if date_obj is not None:
+            timezone = _timestamp_timezone_resolution(date_obj, self._settings)
         return DateData(
-            date_obj=get_date_from_timestamp(
-                self.date_string, self._settings, negative=negative
-            ),
+            date_obj=date_obj,
             period="time" if self._settings.RETURN_TIME_AS_PERIOD else "day",
             parts=("year", "month", "day", "time"),
+            timezone=timezone,
         )
 
     def _try_timestamp(self) -> "DateData":
@@ -676,13 +728,21 @@ class _DateLocaleParser:
 
         for order in candidates:
             try:
-                date_obj, period, parts = date_parser._parse_with_parts(
+                date_obj, period, parts, timezone = date_parser._parse_with_parts(
                     translated,
                     parse_method=parse_method,
                     settings=self._settings,
                     date_order=order,
+                    return_timezone=True,
                 )
-                return DateData(date_obj=date_obj, period=period, parts=parts)
+                return DateData(
+                    date_obj=date_obj, period=period, parts=parts, timezone=timezone
+                )
+            except (AmbiguousTimeError, TimezoneConflictError):
+                # These report a policy decision about the input itself, not a
+                # reading that another date order could fix, so they must reach
+                # the caller instead of being treated as a failed parse.
+                raise
             except _StrictDateOrderError:
                 # Only raised with an explicit DATE_ORDER, which leaves a single
                 # candidate order.
@@ -774,6 +834,17 @@ class DateData:
     ``"part_of_day"``.
     """
 
+    timezone: TimezoneResolution | None = None
+    """How the timezone of :attr:`date_obj` was decided, or ``None``.
+
+    It keeps the declaration as written, the zone that was actually used, any
+    conflict between the date string and the source settings, the readings of
+    an ambiguous or nonexistent wall time, and the original local time before
+    ``TO_TIMEZONE`` moved the result to another zone.
+
+    .. versionadded:: unreleased
+    """
+
     def __init__(
         self,
         *,
@@ -781,6 +852,7 @@ class DateData:
         period: str | None = None,
         locale: str | None = None,
         parts: tuple[str, ...] = (),
+        timezone: TimezoneResolution | None = None,
     ) -> None:
         self.date_obj = date_obj
         self.period = period
@@ -790,6 +862,7 @@ class DateData:
         tuple with some or all of ``"year"``, ``"month"``, ``"day"`` and
         ``"time"``, in that order. The remaining parts come from
         :ref:`settings`, e.g. ``RELATIVE_BASE`` or ``PREFER_DAY_OF_MONTH``."""
+        self.timezone = timezone
 
     def __getitem__(self, k: str) -> Any:
         if not hasattr(self, k):
@@ -803,7 +876,9 @@ class DateData:
 
     def __repr__(self) -> str:
         properties_text = ", ".join(
-            f"{prop}={val!r}" for prop, val in self.__dict__.items()
+            f"{prop}={val!r}"
+            for prop, val in self.__dict__.items()
+            if prop != "timezone"
         )
 
         return f"{self.__class__.__name__}({properties_text})"
@@ -1144,7 +1219,11 @@ class DateDataParser:
 
     def get_date_tuple(self, *args: Any, **kwargs: Any) -> tuple[Any, ...]:
         date_data = self.get_date_data(*args, **kwargs)
-        fields = {k: v for k, v in date_data.__dict__.items() if k != "parts"}
+        fields = {
+            k: v
+            for k, v in date_data.__dict__.items()
+            if k not in ("parts", "timezone")
+        }
         date_tuple = collections.namedtuple("DateData", fields)  # type: ignore[misc]  # noqa: PYI024
         result: tuple[Any, ...] = date_tuple(**fields)
         return result

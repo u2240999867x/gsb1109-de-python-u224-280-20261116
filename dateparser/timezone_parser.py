@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
 
     from .conf import Settings
+    from .timezone_resolution import TimezoneDeclaration
 
 _MAX_EXTRA_TZ = 2
 """Timezone tokens equivalent to the first one, e.g. "CDT" and "(CDT)" after
@@ -110,6 +111,35 @@ def pop_tz_offset_from_string(
         date_string = extra[0]
 
     return date_string, result
+
+
+def pop_tz_declaration(
+    date_string: str, settings: "Settings | None" = None
+) -> tuple[str, "TimezoneDeclaration | None"]:
+    """Remove the timezone token from *date_string* and describe it.
+
+    Like :func:`pop_tz_offset_from_string`, but keeps the token's original text
+    and whether it is an offset or an abbreviation, so the declaration can be
+    reported next to the timezone that was actually applied.
+    """
+    from .timezone_resolution import declaration_from_token  # noqa: PLC0415
+
+    overrides = settings.TIMEZONE_ABBREVIATIONS if settings else {}
+    match = _search_and_pop_tz(date_string)
+    if match is None:
+        return date_string, None
+
+    date_string, name, offset = match
+    offset = overrides.get(name, offset)
+    declaration = declaration_from_token(name, offset)
+
+    for _ in range(_MAX_EXTRA_TZ):
+        extra = _search_and_pop_tz(date_string.rstrip())
+        if extra is None or overrides.get(extra[1], extra[2]) != offset:
+            break
+        date_string = extra[0]
+
+    return date_string, declaration
 
 
 def word_is_tz(word: str) -> bool:

@@ -1,10 +1,14 @@
 from collections.abc import Callable
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any, Literal, overload
 
 from .conf import Settings, apply_settings
-from .timezone_parser import pop_tz_offset_from_string
-from .utils import _get_localzone, apply_timezone, localize_timezone, strip_braces
+from .timezone_parser import pop_tz_declaration
+from .timezone_resolution import resolve_wall_time, timezone_for_declaration
+from .utils import strip_braces
+
+if TYPE_CHECKING:
+    from .timezone_resolution import TimezoneResolution
 
 
 class DateParser:
@@ -23,6 +27,33 @@ class DateParser:
         )
         return date_obj, period
 
+    @overload
+    def _parse_with_parts(
+        self,
+        date_string: str,
+        parse_method: Callable[
+            ...,
+            tuple[datetime, str | None] | tuple[datetime, str | None, tuple[str, ...]],
+        ],
+        settings: Settings | dict[str, Any] | None = None,
+        date_order: str | None = None,
+        return_timezone: Literal[False] = False,
+    ) -> tuple[datetime, str | None, tuple[str, ...]]: ...
+
+    @overload
+    def _parse_with_parts(
+        self,
+        date_string: str,
+        parse_method: Callable[
+            ...,
+            tuple[datetime, str | None] | tuple[datetime, str | None, tuple[str, ...]],
+        ],
+        settings: Settings | dict[str, Any] | None = None,
+        date_order: str | None = None,
+        *,
+        return_timezone: Literal[True],
+    ) -> tuple[datetime, str | None, tuple[str, ...], "TimezoneResolution | None"]: ...
+
     @apply_settings
     def _parse_with_parts(
         self,
@@ -33,7 +64,8 @@ class DateParser:
         ],
         settings: Settings | dict[str, Any] | None = None,
         date_order: str | None = None,
-    ) -> tuple[datetime, str | None, tuple[str, ...]]:
+        return_timezone: bool = False,
+    ) -> tuple[Any, ...]:
         assert isinstance(settings, Settings)
         date_string = str(date_string)
 
@@ -41,38 +73,28 @@ class DateParser:
             raise ValueError("Empty string")
 
         date_string = strip_braces(date_string)
-        date_string, ptz = pop_tz_offset_from_string(date_string, settings=settings)
+        date_string, declaration = pop_tz_declaration(date_string, settings=settings)
 
         result = parse_method(
-            date_string, settings=settings, tz=ptz, date_order=date_order
+            date_string,
+            settings=settings,
+            tz=timezone_for_declaration(declaration),
+            date_order=date_order,
         )
         date_obj, period = result[:2]
         parts = result[2] if len(result) == 3 else ()
 
-        _settings_tz = settings.TIMEZONE.lower()
-
-        if ptz:
-            if hasattr(ptz, "localize"):
-                date_obj = ptz.localize(date_obj)
-            else:
-                date_obj = date_obj.replace(tzinfo=ptz)
-            if "local" not in _settings_tz:
-                date_obj = apply_timezone(date_obj, settings.TIMEZONE)
-        elif "local" in _settings_tz:
-            date_obj = date_obj.replace(tzinfo=_get_localzone())
-        else:
-            date_obj = localize_timezone(date_obj, settings.TIMEZONE)
-
-        if settings.TO_TIMEZONE:
-            date_obj = apply_timezone(date_obj, settings.TO_TIMEZONE)
+        date_obj, timezone = resolve_wall_time(date_obj, settings, declaration)
 
         if not settings.RETURN_AS_TIMEZONE_AWARE or (
             settings.RETURN_AS_TIMEZONE_AWARE
             and "default" == settings.RETURN_AS_TIMEZONE_AWARE
-            and not ptz
+            and not declaration
         ):
             date_obj = date_obj.replace(tzinfo=None)
 
+        if return_timezone:
+            return date_obj, period, parts, timezone
         return date_obj, period, parts
 
 

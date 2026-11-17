@@ -15,11 +15,20 @@ from dateparser.utils import (
 )
 
 from .parser import time_parser
-from .timezone_parser import pop_tz_offset_from_string
+from .timezone_parser import pop_tz_declaration
+from .timezone_resolution import (
+    TimezoneConflictError,
+    build_resolution,
+    conflict_between,
+    declaration_from_setting,
+    normalize_conflict_policy,
+    timezone_for_declaration,
+)
 
 if TYPE_CHECKING:
     from .conf import Settings
     from .date import DateData
+    from .timezone_resolution import TimezoneDeclaration
 
 _UNITS = r"century|decade|fortnight|year|month|week|day|hour|minute|second"
 # A number that continues a date or a time, e.g. the year in "03/06/2020 year",
@@ -58,6 +67,33 @@ class FreshnessDateDataParser:
     def get_local_tz(self) -> tzinfo:
         return _get_localzone()
 
+    def _resolve_conflict(
+        self, declaration: "TimezoneDeclaration | None", settings: "Settings"
+    ) -> str | None:
+        """Check the date's declaration against the source setting.
+
+        Returns the conflict description, if there is one, and raises when the
+        policy is ``"error"``. A relative date has no wall time to compare, so
+        the offset comparison is made on the current time in each zone.
+        """
+        if declaration is None:
+            return None
+        source = declaration_from_setting(settings)
+        if source is None:
+            return None
+
+        conflict = conflict_between(
+            declaration, source, datetime.now(tz=timezone.utc).replace(tzinfo=None)
+        )
+        if conflict is None:
+            return None
+        if (
+            normalize_conflict_policy(getattr(settings, "TIMEZONE_CONFLICT", "date"))
+            == "error"
+        ):
+            raise TimezoneConflictError(conflict)
+        return conflict
+
     def parse(
         self, date_string: str, settings: "Settings"
     ) -> tuple[datetime | None, str | None]:
@@ -67,8 +103,11 @@ class FreshnessDateDataParser:
     def _parse_with_parts(  # noqa: PLR0912, PLR0915
         self, date_string: str, settings: "Settings"
     ) -> tuple[datetime | None, str | None, tuple[str, ...]]:
+        self._last_timezone = None
         date_string = strip_braces(date_string)
-        date_string, ptz = pop_tz_offset_from_string(date_string, settings=settings)
+        date_string, declaration = pop_tz_declaration(date_string, settings=settings)
+        conflict = self._resolve_conflict(declaration, settings)
+        ptz = timezone_for_declaration(declaration)
         day = None
         if match := _DAY_OF_MONTH.match(date_string):
             day = int(match[1])
@@ -143,13 +182,28 @@ class FreshnessDateDataParser:
             if isinstance(_time, time) and "time" not in parts:
                 parts += ("time",)
 
+            source_date = date
+            local_date = date.replace(tzinfo=None)
+            declared = declaration
+            if declared is None:
+                declared = declaration_from_setting(settings)
+            source_zone = source_date.tzinfo
+            if declaration is not None:
+                source_zone = timezone_for_declaration(declaration)
             if settings.TO_TIMEZONE:
                 date = apply_timezone(date, settings.TO_TIMEZONE)
-
+            self._last_timezone = build_resolution(
+                date=date,
+                local=local_date,
+                declaration=declared,
+                settings=settings,
+                source_zone=source_zone,
+                conflict=conflict,
+            )
             if not settings.RETURN_AS_TIMEZONE_AWARE or (
                 settings.RETURN_AS_TIMEZONE_AWARE
                 and "default" == settings.RETURN_AS_TIMEZONE_AWARE
-                and not ptz
+                and not declaration
             ):
                 date = date.replace(tzinfo=None)
 
@@ -255,7 +309,12 @@ class FreshnessDateDataParser:
         from dateparser.date import DateData  # noqa: PLC0415
 
         date, period, parts = self._parse_with_parts(date_string, settings)
-        return DateData(date_obj=date, period=period, parts=parts)
+        return DateData(
+            date_obj=date,
+            period=period,
+            parts=parts,
+            timezone=getattr(self, "_last_timezone", None),
+        )
 
 
 freshness_date_parser = FreshnessDateDataParser()

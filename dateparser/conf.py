@@ -11,6 +11,7 @@ from dateparser.data.languages_info import language_order
 
 from .parser import date_order_chart
 from .timezone_parser import _tz_regexes
+from .timezone_resolution import AMBIGUOUS_TIME_POLICIES, TIMEZONE_CONFLICT_POLICIES
 
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
@@ -24,9 +25,12 @@ class Settings:
     * `PREFER_LOCALE_DATE_ORDER`
     * `STRICT_DATE_ORDER`
     * `TIMEZONE`
+    * `SOURCE_TIMEZONE`
     * `TO_TIMEZONE`
     * `RETURN_AS_TIMEZONE_AWARE`
     * `TIMEZONE_ABBREVIATIONS`
+    * `TIMEZONE_CONFLICT`
+    * `AMBIGUOUS_TIME`
     * `PREFER_MONTH_OF_YEAR`
     * `PREFER_DAY_OF_MONTH`
     * `PREFER_DATES_FROM`
@@ -56,9 +60,12 @@ class Settings:
     PREFER_LOCALE_DATE_ORDER: bool
     STRICT_DATE_ORDER: str
     TIMEZONE: str
+    SOURCE_TIMEZONE: str | Literal[False]
     TO_TIMEZONE: str | Literal[False]
     RETURN_AS_TIMEZONE_AWARE: bool | Literal["default"]
     TIMEZONE_ABBREVIATIONS: Mapping[str, timedelta]
+    TIMEZONE_CONFLICT: str
+    AMBIGUOUS_TIME: str
     PREFER_MONTH_OF_YEAR: str
     PREFER_DAY_OF_MONTH: str
     PREFER_DATES_FROM: str
@@ -254,6 +261,10 @@ def check_settings(settings: Settings) -> None:
             # we don't check invalid Timezones as they raise an error
             "type": str,
         },
+        "SOURCE_TIMEZONE": {
+            # It defaults to False, but an explicit value must be a string.
+            "type": str,
+        },
         "TO_TIMEZONE": {
             # It defaults to None, but it's not allowed to use it directly
             # "values" can take unlimited options
@@ -266,6 +277,14 @@ def check_settings(settings: Settings) -> None:
         "TIMEZONE_ABBREVIATIONS": {
             "type": Mapping,
             "extra_check": _check_timezone_abbreviations,
+        },
+        "TIMEZONE_CONFLICT": {
+            "values": TIMEZONE_CONFLICT_POLICIES,
+            "type": str,
+        },
+        "AMBIGUOUS_TIME": {
+            "values": AMBIGUOUS_TIME_POLICIES,
+            "type": str,
         },
         "PREFER_MONTH_OF_YEAR": {"values": ("current", "first", "last"), "type": str},
         "PREFER_DAY_OF_MONTH": {"values": ("current", "first", "last"), "type": str},

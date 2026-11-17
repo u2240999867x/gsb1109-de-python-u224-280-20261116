@@ -61,6 +61,14 @@ dateparser.timezone_parser module
    :show-inheritance:
    :exclude-members: build_tz_offsets
 
+dateparser.timezone_resolution module
+-------------------------------------
+
+.. automodule:: dateparser.timezone_resolution
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 dateparser.timezones module
 ---------------------------
 

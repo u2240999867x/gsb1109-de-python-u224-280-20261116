@@ -12,9 +12,12 @@ settings = {
     "STRICT_DATE_ORDER": "none",
     # Timezone related
     "TIMEZONE": "local",
+    "SOURCE_TIMEZONE": False,
     "TO_TIMEZONE": False,
     "RETURN_AS_TIMEZONE_AWARE": "default",
     "TIMEZONE_ABBREVIATIONS": {},
+    "TIMEZONE_CONFLICT": "date",
+    "AMBIGUOUS_TIME": "error",
     # Incomplete dates
     "PREFER_DAY_OF_MONTH": "current",
     "PREFER_MONTH_OF_YEAR": "current",

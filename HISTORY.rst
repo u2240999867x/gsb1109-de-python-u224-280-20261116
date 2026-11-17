@@ -3,6 +3,26 @@
 History
 =======
 
+(unreleased)
+------------
+
+New features:
+
+- Keep the timezone a date string declares and the timezone that was actually
+  applied side by side in ``DateData.timezone``, together with any conflict
+  between the date string and the source settings, and the original local time
+  before ``TO_TIMEZONE`` conversion
+- Add a ``SOURCE_TIMEZONE`` setting that declares the zone of the source's
+  local times separately from ``TIMEZONE``, which keeps deciding how results
+  are displayed
+- Add a ``TIMEZONE_CONFLICT`` setting that chooses which declaration wins when
+  the date string and the source settings disagree, or raises instead; the
+  conflict is reported whatever the choice
+- Add an ``AMBIGUOUS_TIME`` setting; wall times that occur twice when the
+  clock goes back, or not at all when it goes forward, are now refused by
+  default instead of silently taking one reading, and can be resolved
+  explicitly with ``"earlier"`` or ``"later"``
+
 1.5.0 (2026-11-04)
 ------------------
 
