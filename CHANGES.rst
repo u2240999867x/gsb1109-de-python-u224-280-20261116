@@ -1,3 +1,17 @@
+Unreleased
+----------
+
+-   Added ``dendropy.TreeCharacterMatrixAssociation`` for explicitly associating
+    tree leaves with character matrix rows by |Taxon| identity. It preserves the
+    original matrix rows and per-column states, distinguishes missing-data, gap,
+    ambiguous, and polymorphic states, and separately reports tree leaves without
+    matrix rows versus matrix rows without tree leaves. Leaf reordering does not
+    change associations, and duplicate-label taxa are never arbitrarily matched
+    to a row.
+-   ``parsimony_score`` now raises a descriptive
+    ``CharacterMatrixTreeAssociationError`` (instead of an opaque ``KeyError``)
+    when a tree references a leaf taxon for which the character matrix has no row.
+
 Release 4.5.2
 -------------
 

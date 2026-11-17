@@ -23,7 +23,9 @@ Models, modeling and model-fitting of parsimony.
 """
 
 from dendropy.utility.error import TaxonNamespaceIdentityError
+from dendropy.utility.error import CharacterMatrixTreeAssociationError
 from dendropy.utility import deprecate
+from dendropy.datamodel.treecharassociation import TreeCharacterMatrixAssociation
 
 class _NodeStateSetMap(dict):
     def __init__(self, taxon_state_sets_map=None):
@@ -419,6 +421,17 @@ def parsimony_score(
     """
     if tree.taxon_namespace is not chars.taxon_namespace:
         raise TaxonNamespaceIdentityError(tree, chars)
+    # Association is by explicit Taxon identity. A tree leaf referencing a
+    # taxon for which the matrix has no row cannot be scored; surface this as
+    # a descriptive association error instead of an opaque KeyError, listing
+    # the missing matrix rows separately from any extra matrix rows.
+    association = TreeCharacterMatrixAssociation(tree=tree, char_matrix=chars)
+    if association.tree_leaves_without_matrix_rows:
+        raise CharacterMatrixTreeAssociationError(
+                tree=tree,
+                char_matrix=chars,
+                tree_leaves_without_matrix_rows=association.tree_leaves_without_matrix_rows,
+                matrix_rows_without_tree_leaves=association.matrix_rows_without_tree_leaves)
     taxon_state_sets_map = chars.taxon_state_sets_map(gaps_as_missing=gaps_as_missing)
     nodes = tree.postorder_node_iter()
     pscore = fitch_down_pass(nodes,

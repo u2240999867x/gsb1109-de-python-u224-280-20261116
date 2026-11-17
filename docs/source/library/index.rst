@@ -19,6 +19,7 @@ Data Model
     treecollectionmodel.rst
     charstatemodel.rst
     charmatrixmodel.rst
+    treecharassociation.rst
     datasetmodel.rst
     phylogeneticdistance.rst
 

@@ -126,6 +126,41 @@ class TaxonNamespaceReconstructionError(ValueError):
     def __init__(self, message=None):
         ValueError.__init__(self, message)
 
+class CharacterMatrixTreeAssociationError(ValueError):
+    """
+    Raised when a tree and a character matrix cannot be associated by their
+    explicit |Taxon| identifiers: the tree references leaf taxa for which the
+    matrix has no row, or the two objects do not share the same
+    |TaxonNamespace|.
+    """
+    def __init__(self, message=None, tree=None, char_matrix=None,
+            tree_leaves_without_matrix_rows=None,
+            matrix_rows_without_tree_leaves=None):
+        if message is None:
+            parts = []
+            if tree is not None and char_matrix is not None:
+                parts.append(
+                        "Tree {!r} and character matrix {!r} are not fully associated".format(
+                            tree, char_matrix))
+            if tree_leaves_without_matrix_rows:
+                labels = ", ".join(
+                        "'{}'".format(t.label) for t in tree_leaves_without_matrix_rows)
+                parts.append(
+                        "tree leaf taxa without a character matrix row (missing matrix rows): {}".format(
+                            labels))
+            if matrix_rows_without_tree_leaves:
+                labels = ", ".join(
+                        "'{}'".format(t.label) for t in matrix_rows_without_tree_leaves)
+                parts.append(
+                        "character matrix rows without a tree leaf (extra/unmatched matrix rows): {}".format(
+                            labels))
+            message = "; ".join(parts) if parts else "Tree/character matrix association error"
+        ValueError.__init__(self, message)
+        self.tree = tree
+        self.char_matrix = char_matrix
+        self.tree_leaves_without_matrix_rows = list(tree_leaves_without_matrix_rows or [])
+        self.matrix_rows_without_tree_leaves = list(matrix_rows_without_tree_leaves or [])
+
 class UltrametricityError(ValueError):
     def __init__(self, message=None):
         ValueError.__init__(self, message)

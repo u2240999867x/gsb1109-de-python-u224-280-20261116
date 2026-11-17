@@ -66,6 +66,7 @@ from dendropy.datamodel.charmatrixmodel import StandardCharacterDataSequence
 from dendropy.datamodel.charmatrixmodel import StandardCharacterMatrix
 from dendropy.datamodel.charmatrixmodel import ContinuousCharacterDataSequence
 from dendropy.datamodel.charmatrixmodel import ContinuousCharacterMatrix
+from dendropy.datamodel.treecharassociation import TreeCharacterMatrixAssociation
 from dendropy.datamodel.datasetmodel import DataSet
 from dendropy.calculate.phylogeneticdistance import PhylogeneticDistanceMatrix
 from dendropy.plot import AsciiTreePlot
@@ -80,6 +81,7 @@ from dendropy.utility.error import InvalidArgumentValueError
 from dendropy.utility.error import MultipleInitializationSourceError
 from dendropy.utility.error import TaxonNamespaceIdentityError
 from dendropy.utility.error import TaxonNamespaceReconstructionError
+from dendropy.utility.error import CharacterMatrixTreeAssociationError
 from dendropy.utility.error import UltrametricityError
 from dendropy.utility.error import TreeSimTotalExtinctionException
 from dendropy.utility.error import SeedNodeDeletionException
