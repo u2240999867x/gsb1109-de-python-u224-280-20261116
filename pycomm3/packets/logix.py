@@ -25,7 +25,7 @@
 import logging
 from itertools import tee, zip_longest
 from reprlib import repr as _r
-from typing import Dict, Any, Sequence, Union
+from typing import Dict, Any, List, Optional, Sequence, Union
 
 from ..util import cycle
 from .ethernetip import SendUnitDataRequestPacket, SendUnitDataResponsePacket
@@ -112,17 +112,37 @@ class ReadTagRequestPacket(TagServiceRequestPacket):
 
 
 class ReadTagFragmentedResponsePacket(ReadTagResponsePacket):
+    """
+    Response to a single fragment of a Read Tag Fragmented request.  Each fragment
+    preserves its own service status, protocol byte offset, and the actual data type
+    declaration returned in its reply.  When the driver reassembles a complete value,
+    the final response's ``responses`` attribute references every fragment response in
+    the order received, keeping any failed segment (gap) at its original position.
+    """
+
     __log = logging.getLogger(f"{__module__}.{__qualname__}")
 
     def __init__(self, request: "ReadTagFragmentedRequestPacket", raw_data: bytes = None):
         self.value = None
         self._data_type = None
         self.value_bytes = None
+        self.offset = request.offset
+        self.responses: List["ReadTagFragmentedResponsePacket"] = []
 
         super().__init__(request, raw_data)
 
+    @property
+    def data_type_bytes(self) -> Optional[bytes]:
+        """
+        The actual data type declaration returned in this fragment's reply
+        (2 bytes for atomic types, 4 bytes including the structure handle for structs).
+        """
+        return self._data_type
+
     def _parse_reply(self):
         super()._parse_reply(dont_parse=True)
+        if self.data is None:
+            return
         if self.data[:2] == STRUCTURE_READ_REPLY:
             self.value_bytes = self.data[4:]
             self._data_type = self.data[:4]

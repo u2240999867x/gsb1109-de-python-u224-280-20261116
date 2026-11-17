@@ -1395,35 +1395,96 @@ class LogixDriver(CIPDriver):
     def _send_read_fragmented(
         self, request: ReadTagFragmentedRequestPacket
     ) -> ReadTagFragmentedResponsePacket:
-        if not request.error:
+        """
+        Sends Read Tag Fragmented requests until the complete tag value has been collected.
+
+        Fragments are reassembled by their protocol byte offset (not by element counts).
+        Only a complete and compatible set of fragments is merged into a value: every
+        fragment must declare the same data type as the first one (a structure template
+        or instance identity changing mid-read makes the fragments incompatible, so they
+        are kept as separate incomplete observations and never merged), and any
+        overlapping bytes from re-requested fragments must match the data already
+        collected.  A partial reply (``INSUFFICIENT_PACKETS``) is a valid fragment, not
+        a failure of the whole read.  The reassembled (or failed) response references
+        every fragment response in the order received, keeping any gap at its original
+        position.
+        """
+        error = request.error
+        responses = []
+        value_bytes = bytearray()
+
+        if not error:
             offset = 0
-            responses = []
+            data_type = None
             while offset is not None:
                 response: ReadTagFragmentedResponsePacket = super().send(request)
                 responses.append(response)
-                if response.service_status == INSUFFICIENT_PACKETS:
-                    offset += len(response.value_bytes)
-                    request = ReadTagFragmentedRequestPacket.from_request(
-                        self._sequence, request, offset
-                    )
+
+                if response:
+                    if data_type is None:
+                        data_type = response.data_type_bytes
+
+                    if response.data_type_bytes != data_type:
+                        error = "Fragment data type does not match previous fragments"
+                    else:
+                        error = self._merge_fragment(value_bytes, response)
+
+                    if error is None and response.service_status == INSUFFICIENT_PACKETS:
+                        next_offset = len(value_bytes)
+                        if next_offset == response.offset:
+                            error = "Fragment returned no new data"
+                        else:
+                            offset = next_offset
+                            request = ReadTagFragmentedRequestPacket.from_request(
+                                self._sequence, request, offset
+                            )
+                            continue
                 else:
-                    if response.error:
-                        self.__log.error(f"Fragment failed with error: {response.error}")
+                    error = response.error or "One or more fragment responses failed"
 
-                    offset = None
+                if error:
+                    self.__log.error(f"Fragment failed with error: {error}")
 
-            if all(responses):
-                final_response = responses[-1]
-                final_response.value_bytes = b"".join(resp.value_bytes for resp in responses)
-                final_response.parse_value()
+                offset = None
 
-                self.__log.debug(f"Reassembled Response: {final_response!r}")
-                return final_response
+        if error is None:
+            final_response = responses[-1]
+            final_response.value_bytes = bytes(value_bytes)
+            final_response.responses = responses
+            final_response.parse_value()
+
+            self.__log.debug(f"Reassembled Response: {final_response!r}")
+            return final_response
 
         failed_response = ReadTagFragmentedResponsePacket(request, None)
-        failed_response._error = request.error or "One or more fragment responses failed"
+        failed_response._error = error or "One or more fragment responses failed"
+        failed_response.responses = responses
         self.__log.debug(f"Reassembled Response: {failed_response!r}")
         return failed_response
+
+    @staticmethod
+    def _merge_fragment(
+        value_bytes: bytearray, response: ReadTagFragmentedResponsePacket
+    ) -> Optional[str]:
+        """
+        Merges a fragment's value bytes into the reassembled buffer at the fragment's
+        protocol byte offset.  Overlapping bytes from re-requested fragments must match
+        the data already collected, and a fragment beginning past the end of the
+        collected data leaves a gap that cannot be reassembled.  Returns an error
+        message if the fragment cannot be merged, otherwise ``None``.
+        """
+        overlap = len(value_bytes) - response.offset
+        if overlap < 0:
+            return f"Fragment begins past the end of the collected data (offset {response.offset})"
+
+        segment = response.value_bytes
+        if overlap:
+            if value_bytes[response.offset :] != segment[:overlap]:
+                return "Overlapping fragment data does not match previously collected data"
+            segment = segment[overlap:]
+
+        value_bytes += segment
+        return None
 
     def _send_write_fragmented(
         self, request: WriteTagFragmentedRequestPacket
