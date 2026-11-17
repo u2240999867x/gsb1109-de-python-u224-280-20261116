@@ -3074,6 +3074,189 @@ class Tree(
             suppress_unifurcations=suppress_unifurcations,
         )
 
+    def prune_to_leaf_set(
+        self,
+        leaves,
+        provenance_attr_name="source_edges",
+        tree_factory=None,
+        node_factory=None,
+    ):
+        """
+        Returns a new tree that includes only the specified leaves, with all
+        nodes of outdegree 1 ("unifurcations" or single-child chains)
+        compressed, such that the patristic distances between every pair of
+        retained leaves (and between each retained leaf and the root) are
+        exactly as in this tree.
+
+        Edge lengths are additive along a path, so the length of each edge in
+        the new tree is the sum of the lengths of the original edges that were
+        merged to form it. Support values, edge labels, comments, and
+        annotations, on the other hand, are *not* additive and are therefore
+        never summed, concatenated, or otherwise combined: an edge resulting
+        from the merging of multiple original edges carries no label,
+        comments, or annotations of its own. Instead, every edge in the new
+        tree records the original edges that were merged into it, so the full
+        original path (including any support values or annotations on the
+        original edges) can be recovered.
+
+        Parameters
+        ----------
+        leaves : iterable of |Taxon|, |Node|, or str instances
+            The leaves to retain. Each element may be a |Taxon| object, a
+            taxon label (string), or a leaf |Node| of this tree. Every
+            element must correspond to a leaf of this tree; a |ValueError|
+            is raised otherwise.
+        provenance_attr_name : str or None
+            Name of the attribute to set on each edge of the new tree that
+            references the original edges merged to form it. The value is a
+            tuple of |Edge| objects from this tree, ordered from the
+            (retained) descendant end of the path upward toward the root.
+            Edges that were not compressed map to a single-element tuple.
+            If ``None``, provenance information is not recorded.
+        tree_factory : function
+            If not ``None``, must be a function that optionally takes a
+            |TaxonNamespace| as an argument and returns a new |Tree| (or
+            equivalent) instance.
+        node_factory : function
+            If not ``None``, must be a function that takes no arguments and
+            returns a new |Node| (or equivalent) instance.
+
+        Returns
+        -------
+        t : |Tree|
+            A new tree, sharing the taxon namespace of this one, containing
+            only the specified leaves. The result is represented explicitly
+            in the degenerate cases:
+
+            - If ``leaves`` is empty, the returned tree has its
+              ``seed_node`` set to |None| (an explicitly empty tree).
+            - If ``leaves`` contains exactly one leaf, the returned tree
+              consists of a single node (the ``seed_node`` is the retained
+              leaf); its edge records the original path from that leaf up
+              to the root of this tree.
+
+        Examples
+        --------
+        ::
+
+            tree0 = dendropy.Tree.get(
+                        path="mammals.tre",
+                        schema="newick")
+            tree1 = tree0.prune_to_leaf_set(leaves=["Homo", "Pan"])
+            for edge in tree1.postorder_edge_iter():
+                original_edges = edge.source_edges
+                original_supports = [e.label for e in original_edges]
+
+        """
+        # Normalize the leaf specification to a set of leaf nodes.
+        leaf_nodes = list(self.leaf_node_iter())
+        nodes_by_taxon_label = {}
+        nodes_by_taxon = {}
+        nodes_by_id = {}
+        for nd in leaf_nodes:
+            nodes_by_id[id(nd)] = nd
+            if nd.taxon is not None:
+                nodes_by_taxon[id(nd.taxon)] = nd
+                nodes_by_taxon_label.setdefault(nd.taxon.label, nd)
+        retain_nodes = set()
+        unmatched = []
+        for item in leaves:
+            nd = None
+            if isinstance(item, _node.Node):
+                nd = nodes_by_id.get(id(item))
+            elif isinstance(item, taxonmodel.Taxon):
+                nd = nodes_by_taxon.get(id(item))
+            elif isinstance(item, str):
+                nd = nodes_by_taxon_label.get(item)
+            else:
+                raise TypeError(
+                    "Cannot specify a leaf with object of type '{}':"
+                    " expecting a Taxon, Node, or string".format(
+                        type(item).__name__
+                    )
+                )
+            if nd is None:
+                unmatched.append(item)
+            else:
+                retain_nodes.add(nd)
+        if unmatched:
+            raise ValueError(
+                "Leaves not found in tree: {}".format(
+                    ", ".join(repr(item) for item in unmatched)
+                )
+            )
+        if tree_factory is None:
+            other = self.__class__(taxon_namespace=self.taxon_namespace)
+        else:
+            other = tree_factory(taxon_namespace=self.taxon_namespace)
+        if node_factory is None:
+            try:
+                node_factory = other.node_factory
+            except AttributeError:
+                node_factory = _node.Node
+        other._is_rooted = self._is_rooted
+        other.weight = self.weight
+        other.length_type = self.length_type
+        other.label = self.label
+        if not retain_nodes:
+            # Explicit representation of an empty result: a tree with no
+            # seed node.
+            other.seed_node = None
+            return other
+
+        def finalize_edge(edge1, source_edges):
+            lengths = [e.length for e in source_edges if e.length is not None]
+            if lengths:
+                edge1.length = sum(lengths)
+            else:
+                edge1.length = None
+            if len(source_edges) == 1:
+                edge1.label = source_edges[0].label
+            else:
+                # Support values etc. are not additive: a merged edge does
+                # not inherit (a combination of) the labels of its sources.
+                edge1.label = None
+            if provenance_attr_name is not None:
+                setattr(edge1, provenance_attr_name, source_edges)
+
+        memo = {}
+        new_seed = None
+        seed_source_edges = None
+        for nd0 in self.postorder_node_iter():
+            kept_children = []
+            for ch_nd0 in nd0.child_node_iter():
+                child_result = memo[ch_nd0]
+                if child_result is not None:
+                    kept_children.append(child_result)
+            if not kept_children:
+                if not nd0._child_nodes and nd0 in retain_nodes:
+                    nd1 = node_factory()
+                    nd1.label = nd0.label
+                    nd1.taxon = nd0.taxon
+                    result = (nd1, (nd0.edge,))
+                else:
+                    result = None
+            elif len(kept_children) == 1:
+                # Single-child chain link: absorb this node, extending the
+                # source path of the edge below.
+                nd1, source_edges = kept_children[0]
+                result = (nd1, source_edges + (nd0.edge,))
+            else:
+                nd1 = node_factory()
+                nd1.label = nd0.label
+                nd1.taxon = nd0.taxon
+                for child_nd1, child_source_edges in kept_children:
+                    finalize_edge(child_nd1.edge, child_source_edges)
+                    nd1.add_child(child_nd1)
+                result = (nd1, (nd0.edge,))
+            memo[nd0] = result
+            if nd0._parent_node is None:
+                if result is not None:
+                    new_seed, seed_source_edges = result
+        finalize_edge(new_seed.edge, seed_source_edges)
+        other.seed_node = new_seed
+        return other
+
     def randomly_reorient(self, rng=None, update_bipartitions=False):
         """
         Randomly picks a new rooting position and rotates the branches around all
