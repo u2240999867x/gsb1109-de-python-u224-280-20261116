@@ -38,6 +38,28 @@ class RootFolder(LnkTargetBase):
         0x80: "My Games",
     }
 
+    # GUIDs that are commonly used as root folder identifiers. The GUID is
+    # more reliable than the legacy SortIndex value, which is sometimes not
+    # understood (for example SortIndex 0x5B in the unknown_target sample).
+    KNOWN_GUIDS = {
+        "20D04FE0-3AEA-1069-A2D8-08002B30309D": "My Computer",
+        "59031A47-3F72-44A7-89C5-5595FE6B30EE": "Users",
+        "450D8FBA-AD25-11D0-98A8-0800361B1103": "My Documents",
+        "645FF040-5081-101B-9F08-00AA002F954E": "Recycle Bin",
+        "208D2C60-3AEA-1069-A2D7-08002B30309D": "My Network Places",
+        "031E4825-7B94-4DC3-B131-E946B44C8DD5": "Libraries",
+        "4336A54D-038B-4685-AB02-99BB52D3FB8B": "Public Folder",
+        "871C5380-42A0-1069-A2EA-08002B30309D": "Internet Explorer",
+        "21EC2020-3AEA-1069-A2DD-08002B30309D": "Control Panel",
+        "1D2680C9-0E2A-469D-B787-065558BC7D43": "Favorites",
+    }
+
+    FILESYSTEM_CONTAINER_GUIDS = {
+        "20D04FE0-3AEA-1069-A2D8-08002B30309D",  # My Computer
+        "59031A47-3F72-44A7-89C5-5595FE6B30EE",  # Users
+        "450D8FBA-AD25-11D0-98A8-0800361B1103",  # My Documents
+    }
+
     @classmethod
     def get_sort_index(cls, sort_index_value):
         if sort_index_value not in cls.SORT_INDEX:
@@ -62,20 +84,53 @@ class RootFolder(LnkTargetBase):
         return item
 
     def sort_index_value(self):
+        if len(self._raw_target) < 2:
+            return None
         start, end = 1, 2
         return unpack("<B", self._raw_target[start:end])[0]
 
     def sort_index(self):
-        return self.get_sort_index(self.sort_index_value())
+        value = self.sort_index_value()
+        if value is None:
+            return "Unknown"
+        return self.get_sort_index(value)
 
     @uuid
     def guid(self):
         start, end = 2, 18
+        if len(self._raw_target) < end:
+            return b"\x00" * 16
         guid = self._raw_target[start:end]
         return guid
 
+    def known_guid_name(self):
+        try:
+            return self.KNOWN_GUIDS.get(self.guid())
+        except Exception:
+            return None
+
+    def display_name(self):
+        return self.known_guid_name() or self.sort_index()
+
+    def namespace_kind(self):
+        try:
+            guid = self.guid()
+        except Exception:
+            return "unknown"
+        if guid in self.FILESYSTEM_CONTAINER_GUIDS:
+            return "filesystem"
+        if guid in self.KNOWN_GUIDS:
+            return "virtual"
+        return "unknown"
+
+    def extension_start(self):
+        # RootFolder: ClassTypeIndicator (1) + SortIndex (1) + GUID (16).
+        if len(self._raw_target) <= 18:
+            return None
+        return 18
+
+    def extension_search_start(self):
+        return 18
+
     def extension_block(self):
-        if self.item_id_size() > 20:
-            # TODO: Extension block
-            return
-        return
+        return self.extensions()

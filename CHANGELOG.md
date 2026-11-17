@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html) since v1.0.0.
 
 ## [Unreleased]
+### Added
+- `LnkFile.target_location()` resolves display name and file system path
+  separately from the `LinkTargetIDList` namespace chain.
+- `LnkFile.target_details()` returns each item with type, original range,
+  extension blocks and an integrity summary.
+- `-l/--location` and `--target-details` CLI views.
+
+### Fixed
+- Item and extension lengths are bounded by the item payload and the IDList;
+  an unparseable extension no longer consumes the next item.
+- A missing or invalid TerminalID, a truncated item and trailing IDList bytes
+  are reported instead of being silently dropped.
+- File entry extension chains are located from the null terminated name (or a
+  verified chain ending at the item boundary) rather than the first `0xBEEF`
+  byte sequence.
 
 ## [1.6.0] - 2026-02-27
 ### Added

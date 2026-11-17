@@ -49,7 +49,7 @@ class TargetFactory:
 
     def __init__(self, indata):
         self._target = {}
-        self._raw = indata
+        self._raw = indata or b""
 
     def item_size(self):
         """ItemIDSize (2 bytes):
@@ -57,8 +57,9 @@ class TargetFactory:
         ItemID structure, including the ItemIDSize field.
         """
         start, end = 0, 2
-        size = unpack("<H", self._raw[start:end])[0]
-        return size
+        if len(self._raw) < end:
+            return 0
+        return unpack("<H", self._raw[start:end])[0]
 
     # dup: ./targets/shell_fs_folder.py flags()
     # dup: ./targets/my_computer.py flags()
@@ -67,17 +68,22 @@ class TargetFactory:
         Peek item type before creating objects
         """
         start, end = 2, 3
-        item_type = unpack("<B", self._raw[start:end])[0]
-        return item_type
+        if len(self._raw) < end:
+            return None
+        return unpack("<B", self._raw[start:end])[0]
 
     def target_class(self):
-        if self.item_size() == 0:
+        size = self.item_size()
+        if size == 0:
             # TerminalID
             return None
 
         item_type = self.item_type()
+        if item_type is None:
+            # A declared size without a ClassTypeIndicator byte is not a
+            # usable item; let the caller report the boundary problem.
+            return None
 
-        # XXX: Move to table
         # 0x20, 0x30, and 0x40 should have an 0x70 bitmask applied per
         # https://github.com/libyal/libfwsi/blob/main/documentation/Windows%20Shell%20Item%20format.asciidoc
         masked_item_type = item_type & 0x70

@@ -73,7 +73,7 @@ class LnkFile:
         # Parse ID List
         self.targets = None
         if self.has_target_id_list():
-            self.targets = LnkTargets(indata=self.indata[index:], cp=self.cp)
+            self.targets = LnkTargets(indata=self.indata[index:], cp=self.cp, offset=index)
             index += self.targets.size()
 
         # Parse Link Info
@@ -169,6 +169,124 @@ class LnkFile:
             out.append(self.string_data.command_line_arguments())
 
         return " ".join(out)
+
+    # -- Target location / audit views -------------------------------------
+
+    def link_info_path(self):
+        """Best-effort full path from the LinkInfo structure."""
+        if not self.info:
+            return None
+        try:
+            if type(self.info).__name__ == "Local":
+                base = self.info.local_base_path_unicode() or self.info.local_base_path()
+                suffix = self.info.common_path_suffix_unicode() or self.info.common_path_suffix()
+            else:
+                base = self.info.net_name_unicode() or self.info.net_name()
+                suffix = self.info.common_path_suffix_unicode() or self.info.common_path_suffix()
+        except Exception:
+            return None
+        if not base:
+            return None
+        if not suffix:
+            return base
+        # LinkInfo strings are joined as stored: a base already ending with a
+        # separator is not given another one, and a suffix that starts with a
+        # separator is not duplicated.
+        separator = "" if base.endswith("\\") or suffix.startswith("\\") else "\\"
+        return base + separator + suffix
+
+    def target_location(self):
+        """Return the display name and a separately usable file path.
+
+        The PIDL is the primary source. Display names for every item are
+        reported even when the namespace chain is incomplete; a file path is
+        only returned when each parent/child relationship is supported by the
+        item types themselves.
+        """
+        if not self.targets:
+            path = self.link_info_path()
+            return {
+                "status": "resolved" if path else "unknown",
+                "display_name": None,
+                "path": path,
+                "path_source": "link_info" if path else None,
+                "partial_path": None,
+                "hierarchy": [],
+                "pidl_path": None,
+                "link_info_path": path,
+                "link_info_check": {
+                    "provided": bool(path),
+                    "corroborates": bool(path),
+                    "ordered_match": bool(path),
+                    "suffix_match": bool(path),
+                    "matched_components": 0,
+                },
+                "namespace": None,
+                "drive": None,
+                "segments": [],
+                "confirmed_components": [],
+                "component_trace": [],
+                "uncertain_connections": [],
+                "item_trace": [],
+            }
+        location = self.targets.location(link_info=self.link_info_path())
+        location["pidl_path"] = (
+            location.get("path") if location.get("path_source") == "pidl" else None
+        )
+        return location
+
+    get_target_location = target_location
+
+    @property
+    def target_path(self):
+        """Usable file system path, or ``None`` when the PIDL is incomplete."""
+        return self.target_location().get("path")
+
+    @property
+    def target_display_name(self):
+        """Item names in chain order; not a file system path."""
+        return self.target_location().get("display_name")
+
+    def target_details(self):
+        """Return parsed items with type, original range and extensions."""
+        if not self.targets:
+            return {"items": [], "integrity": None, "location": self.target_location()}
+        return {
+            "id_list_size": self.targets.id_list_size(),
+            "integrity": self.targets.integrity(),
+            "terminal": self.targets.terminal(),
+            "items": self.targets.details(),
+            "location": self.target_location(),
+        }
+
+    get_target_details = target_details
+
+    def _json_default(self, obj):
+        if isinstance(obj, datetime.datetime):
+            return obj.replace(microsecond=0).isoformat()
+        raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+    def print_target_location(self):
+        print(
+            json.dumps(
+                self.target_location(),
+                indent=4,
+                separators=(",", ": "),
+                sort_keys=True,
+                default=self._json_default,
+            )
+        )
+
+    def print_target_details(self):
+        print(
+            json.dumps(
+                self.target_details(),
+                indent=4,
+                separators=(",", ": "),
+                sort_keys=True,
+                default=self._json_default,
+            )
+        )
 
     def print_shortcut_target(self, pjson=False):
         out = self.lnk_command
@@ -370,12 +488,27 @@ def main():
         action="store_true",
         help="print all extracted data (i.e. offsets and sizes)",
     )
+    arg_parser.add_argument(
+        "-l",
+        "--location",
+        action="store_true",
+        help="print resolved target location and item trace as JSON",
+    )
+    arg_parser.add_argument(
+        "--target-details",
+        action="store_true",
+        help="print target items with types, ranges and extension blocks as JSON",
+    )
     args = arg_parser.parse_args()
 
     with open(args.file, "rb") as file:
         lnk = LnkFile(fhandle=file, cp=args.cp)
         if args.target:
             lnk.print_shortcut_target(pjson=args.json)
+        elif args.location:
+            lnk.print_target_location()
+        elif args.target_details:
+            lnk.print_target_details()
         elif args.json:
             lnk.print_json(args.print_all)
         else:

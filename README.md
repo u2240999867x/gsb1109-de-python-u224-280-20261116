@@ -84,6 +84,47 @@ Windows Shortcut Information:
          Birth droid file identifier: 7BCD46EC-7F22-11DD-9499-00137216874A
 ```
 
+## Target location (PIDL)
+
+A `LinkTargetIDList` is a namespace chain. `LnkFile.target_location()` returns
+two separate things:
+
+- `display_name`: item names joined in chain order, including virtual or
+  unknown items. It is not a file path.
+- `path`: a file system path built only while the parent/child relationship is
+  supported by the item types (for example a drive volume followed by file
+  entries). It is `None` when the chain is incomplete.
+
+Every item keeps its type, original byte range (`offset`, `size`, `raw`) and
+extension blocks. Missing links are reported in `uncertain_connections` and in
+`hierarchy` as `<missing:...>` placeholders; a later display name is never used
+to fill an unknown parent.
+
+```python
+>>> import LnkParse3
+>>> with open('tests/samples/sample', 'rb') as indata:
+...     lnk = LnkParse3.lnk_file(indata)
+>>> location = lnk.target_location()
+>>> location['display_name']
+'Users\\AppData\\Roaming\\.minecraft'
+>>> location['path'] is None
+True
+>>> location['partial_path']
+'<missing:drive letter>:\\Users\\<missing:user profile directory name>\\AppData\\Roaming\\.minecraft'
+```
+
+Convenience properties `target_display_name` and `target_path` expose the
+same two values directly.
+
+`LnkFile.target_details()` returns the full item sequence with `item_type`,
+`offset`, `size`, `raw`, `extensions`, `unparsed_tail` and an `integrity`
+summary. The CLI exposes both views:
+
+```console
+$ lnkparse -l FILE
+$ lnkparse --target-details FILE
+```
+
 ## Python package
 
 ```python

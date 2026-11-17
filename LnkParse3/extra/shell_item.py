@@ -1,7 +1,7 @@
 import warnings
 
 from LnkParse3.extra.lnk_extra_base import LnkExtraBase
-from LnkParse3.lnk_targets import TargetFactory
+from LnkParse3.pidl import parse_id_list
 
 
 """
@@ -39,20 +39,12 @@ class ShellItem(LnkExtraBase):
         |         TerminalID           |
         --------------------------------
         """
-        rest = self._raw[8 : self.size()]
-        while rest:
-            factory = TargetFactory(indata=rest)
-            target_class = factory.target_class()
-
-            if not target_class:
-                # Empty or unknown target object.
-                break
-
-            target = target_class(indata=rest, cp=self.cp)
-
-            size = factory.item_size()
-            rest = rest[size:]
-            yield target
+        data = self._raw[8 : self.size()] if self.size() >= 8 else b""
+        parsed = parse_id_list(data, cp=self.cp)
+        for record in parsed["records"]:
+            target = record["target"]
+            if target is not None:
+                yield target
 
     def id_list(self):
         res = []

@@ -39,12 +39,16 @@ class UsersFilesFolder(LnkTargetBase):
         super().__init__(*args, **kwargs)
 
     def inner_data_size(self):
+        if len(self._raw_target) < 4:
+            return 0
         return unpack("<H", self._raw_target[2:4])[0]
 
     def signature(self):
         return self._raw_target[4:8]
 
     def file_entry_size(self):
+        if len(self._raw_target) < 10:
+            return 0
         return unpack("<H", self._raw_target[8:10])[0]
 
     def file_entry(self):
@@ -62,6 +66,20 @@ class UsersFilesFolder(LnkTargetBase):
     def delegate_folder_id(self):
         offset = self._delegate_offset() + 16
         return self._raw_target[offset : offset + 16]
+
+    def display_name(self):
+        # UsersFilesFolder is a virtual delegate folder, not a file path
+        # component. The embedded file entry describes the delegate target.
+        return None
+
+    def extension_start(self):
+        offset = self._delegate_offset() + 32
+        if offset + 8 > len(self._raw_target):
+            return None
+        return offset
+
+    def extension_search_start(self):
+        return 8
 
     def as_item(self):
         item = super().as_item()
