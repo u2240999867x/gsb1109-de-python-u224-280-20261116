@@ -11,6 +11,7 @@ from . import errors
 from .base import FS
 from .memoryfs import MemoryFS
 from .mode import validate_open_mode, validate_openbin_mode
+from .mountview import MountViewManager
 from .path import abspath, forcedir, normpath
 
 if typing.TYPE_CHECKING:
@@ -19,6 +20,7 @@ if typing.TYPE_CHECKING:
         Any,
         BinaryIO,
         Collection,
+        Iterable,
         Iterator,
         List,
         MutableSequence,
@@ -30,6 +32,7 @@ if typing.TYPE_CHECKING:
 
     from .enums import ResourceType
     from .info import Info, RawInfo
+    from .mountview import MountView, ScanSession
     from .permissions import Permissions
     from .subfs import SubFS
 
@@ -64,6 +67,11 @@ class MountFS(FS):
         self.auto_close = auto_close
         self.default_fs = MemoryFS()  # type: FS
         self.mounts = []  # type: MutableSequence[Tuple[Text, FS]]
+        # Tracks mount generations so that each scan can freeze a fixed
+        # view of the topology and reject results from an outdated one.
+        self._view_manager = MountViewManager(
+            root="/", default_fs=self.default_fs
+        )
 
     def __repr__(self):
         # type: () -> str
@@ -87,11 +95,18 @@ class MountFS(FS):
 
         """
         _path = forcedir(abspath(normpath(path)))
-        is_mounted = _path.startswith
 
+        # Longest valid mount prefix wins, so a nested mount is used
+        # instead of any parent mount that also matches.
+        best_match = None  # type: Optional[Tuple[Text, FS]]
         for mount_path, fs in self.mounts:
-            if is_mounted(mount_path):
-                return fs, _path[len(mount_path) :].rstrip("/")
+            if _path.startswith(mount_path):
+                if best_match is None or len(mount_path) > len(best_match[0]):
+                    best_match = (mount_path, fs)
+
+        if best_match is not None:
+            mount_path, fs = best_match
+            return fs, _path[len(mount_path) :].rstrip("/")
 
         return self.default_fs, path
 
@@ -122,6 +137,91 @@ class MountFS(FS):
 
         self.mounts.append((_path, fs))
         self.default_fs.makedirs(_path, recreate=True)
+        # Publish a new generation; existing views keep their snapshot.
+        self._view_manager.mount(_path, fs)
+
+    def replace_mount(self, path, fs):
+        # type: (Text, Union[FS, Text]) -> int
+        """Replace the filesystem mounted at ``path``.
+
+        The replacement is atomic with respect to mount views: scans
+        that hold an earlier view continue to see the old filesystem,
+        while new scans see ``fs``. The old filesystem is not closed,
+        because in-flight scans may still be reading from it.
+
+        Arguments:
+            path (str): An existing mount point within the MountFS.
+            fs (FS or str): The replacement filesystem.
+
+        Returns:
+            int: The new mount generation id.
+
+        """
+        if isinstance(fs, text_type):
+            from .opener import open_fs
+
+            fs = open_fs(fs)
+        if not isinstance(fs, FS):
+            raise TypeError("fs argument must be an FS object or a FS URL")
+        if fs is self:
+            raise ValueError("Unable to mount self")
+
+        _path = forcedir(abspath(normpath(path)))
+        for index, (mount_path, _fs) in enumerate(self.mounts):
+            if mount_path == _path:
+                self.mounts[index] = (_path, fs)
+                return self._view_manager.replace(_path, fs)
+        raise errors.ResourceNotFound(path)
+
+    def unmount(self, path):
+        # type: (Text) -> FS
+        """Detach the filesystem mounted at ``path``.
+
+        Returns the detached filesystem without closing it, so scans
+        still holding an old view can finish safely.
+
+        """
+        _path = forcedir(abspath(normpath(path)))
+        for index, (mount_path, fs) in enumerate(self.mounts):
+            if mount_path == _path:
+                del self.mounts[index]
+                self._view_manager.unmount(_path)
+                return fs
+        raise errors.ResourceNotFound(path)
+
+    def mount_view(self):
+        # type: () -> MountView
+        """Freeze the current mount topology into a fixed view.
+
+        All paths resolved through the returned view see the same set of
+        mounts for the lifetime of that view, regardless of later
+        replacements, and each resolution records the virtual and real
+        path of the resource.
+
+        """
+        return self._view_manager.snapshot()
+
+    def begin_scan(self, path="/"):
+        # type: (Text) -> "ScanSession"
+        """Start a scan bound to a fixed mount view.
+
+        Results produced by the returned session carry the view's
+        generation id; committing them after a mount replacement raises
+        `~fs.mountview.StaleMountView`, so old-view results can never be
+        merged into a new view.
+
+        """
+        return self._view_manager.begin_scan(path)
+
+    def commit_scan(self, results):
+        # type: (Iterable) -> List
+        """Validate in-flight scan results against the live generation.
+
+        Raises `~fs.mountview.StaleMountView` if any result was produced
+        by a view that has since been superseded.
+
+        """
+        return self._view_manager.commit(results)
 
     def close(self):
         # type: () -> None
