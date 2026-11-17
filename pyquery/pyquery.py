@@ -15,6 +15,7 @@ from lxml import etree
 
 from .cssselectpatch import JQueryTranslator
 from .openers import url_opener
+from .table import parse_table, parse_tables
 from .text import extract_text
 
 if sys.version_info >= (3, 12, 0):
@@ -1174,6 +1175,46 @@ class PyQuery(list):
             e0 = deepcopy(e0)
             e0.tail = ''
         return etree.tostring(e0, encoding=str, method=method)
+
+    @with_camel_case_alias
+    def table_spec(self, infer=False):
+        """Return the specification of the first selected table.
+
+            >>> d = PyQuery('<table><tr><th>Price</th></tr>'
+            ...             '<tr><td>10</td></tr></table>')
+            >>> d('table').table_spec(infer='column').cells[0].header_path
+            ['Price']
+
+        The result is a :class:`pyquery.table.TableSpec`.  ``infer``
+        controls caller-allowed inference for relationships that markup
+        does not declare; inferred entries are marked as such.
+
+            >>> spec = d('table').table_spec(infer=False)
+            >>> spec.cells[0].header_path
+            []
+
+        """
+        if not self:
+            return None
+        return parse_table(self[0], infer=infer)
+
+    @with_camel_case_alias
+    def table_specs(self, infer=False):
+        """Return a table specification for every selected table.
+
+            >>> d = PyQuery('<table><tr><th>A</th></tr>'
+            ...             '<tr><td>1</td></tr></table>')
+            >>> len(d('table').table_specs())
+            1
+
+        """
+        result = []
+        for element in self:
+            if element.tag == 'table':
+                result.append(parse_table(element, infer=infer))
+            else:
+                result.extend(parse_tables(element, infer=infer))
+        return result
 
     def text(self, value=no_default, **kwargs):
         """Get or set the text representation of sub nodes.

@@ -12,6 +12,7 @@ Full documentation
    manipulating
    traversing
    api
+   table_specs
    scrap
    tips
    testing

@@ -953,6 +953,305 @@ class TestXMLNamespace(TestCase):
         self.assertEqual(repr(val), repr('b'))
 
 
+class TestTableSpec(TestCase):
+
+    price_table = '''
+        <table id="prices">
+          <thead>
+            <tr>
+              <th rowspan="3" scope="col" data-field-role="plan">Plan</th>
+              <th colspan="4" scope="colgroup"
+                  data-field-role="price">Price</th>
+            </tr>
+            <tr>
+              <th colspan="2" scope="colgroup" data-currency="USD">USD</th>
+              <th colspan="2" scope="colgroup" data-currency="EUR">EUR</th>
+            </tr>
+            <tr>
+              <th scope="col">Monthly</th>
+              <th scope="col">Annual</th>
+              <th scope="col">Monthly</th>
+              <th scope="col">Annual</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <th scope="row">Basic</th>
+              <td>10</td><td>100</td><td>9</td><td>90</td>
+            </tr>
+          </tbody>
+        </table>
+    '''
+
+    def test_multilevel_header_paths(self):
+        spec = pq(self.price_table)('table').table_spec()
+        self.assertEqual(spec.table.get('id'), 'prices')
+        paths = [cell.header_path for cell in spec.cells]
+        self.assertEqual(paths, [
+            ['Price', 'USD', 'Monthly', 'Basic'],
+            ['Price', 'USD', 'Annual', 'Basic'],
+            ['Price', 'EUR', 'Monthly', 'Basic'],
+            ['Price', 'EUR', 'Annual', 'Basic'],
+        ])
+        self.assertEqual(spec.conflicts, [])
+
+    def test_header_relationships_are_declared(self):
+        spec = pq(self.price_table)('table').table_spec()
+        cell = spec.cells[0]
+        self.assertEqual(cell.column_path, ['Price', 'USD', 'Monthly'])
+        self.assertEqual(cell.row_path, ['Basic'])
+        self.assertTrue(all(
+            item.basis == 'declared' for item in cell.headers))
+        self.assertEqual(cell.units, ['usd'])
+        self.assertEqual(cell.units_basis, 'declared')
+        price = cell.headers[0]
+        self.assertEqual(price.responsibility, 'price')
+        self.assertEqual(price.responsibility_basis, 'declared')
+
+    def test_records_trace_back_to_original_cells(self):
+        d = pq(self.price_table)
+        spec = d('table').table_spec()
+        cell = spec.cells[0]
+        self.assertIs(cell.node, d('td')[0])
+        self.assertIsNotNone(cell.xpath)
+        self.assertEqual(cell.xpath, '/table/tbody/tr/td[1]')
+        for header in cell.headers:
+            self.assertIsInstance(header.node, etree._Element)
+            self.assertIsNotNone(header.xpath)
+            self.assertEqual(
+                header.xpath,
+                header.node.getroottree().getpath(header.node))
+        record = cell.record
+        self.assertEqual(record['value'], '10')
+        self.assertEqual(record['header_path'], cell.header_path)
+        self.assertEqual(record['source']['xpath'], cell.xpath)
+        self.assertEqual(
+            [item['xpath'] for item in record['headers']],
+            [item.xpath for item in cell.headers])
+
+    def test_crossing_cells_use_real_coverage(self):
+        html = '''
+            <table>
+              <tr><th colspan="2">Price</th></tr>
+              <tr><th>USD</th><th>EUR</th></tr>
+              <tr><td colspan="2">both</td></tr>
+            </table>
+        '''
+        spec = pq(html)('table').table_spec(infer='column')
+        cell = spec.cells[0]
+        self.assertEqual((cell.row, cell.column, cell.colspan), (2, 0, 2))
+        self.assertEqual(cell.header_path, ['Price', 'USD', 'EUR'])
+
+    def test_nested_table_id_does_not_supply_outer_reference(self):
+        html = '''
+            <table>
+              <tr>
+                <th id="shared">Outer</th>
+                <td><table><tr><th id="shared">Inner</th></tr></table></td>
+              </tr>
+              <tr><td headers="shared">x</td></tr>
+            </table>
+        '''
+        spec = pq(html)('table').table_spec()
+        cell = [item for item in spec.cells if item.value == 'x'][0]
+        self.assertEqual(cell.header_path, ['Outer'])
+        self.assertEqual(spec.conflicts, [])
+        specs = pq(html)('table').table_specs()
+        self.assertEqual(len(specs), 2)
+        self.assertEqual(specs[1].cells, [])
+        self.assertEqual(specs[1].header_cells[0].value, 'Inner')
+
+    def test_missing_reference_is_preserved(self):
+        html = '''
+            <table>
+              <tr><th>Price</th></tr>
+              <tr><td headers="absent">x</td></tr>
+            </table>
+        '''
+        declared = pq(html)('table').table_spec()
+        self.assertEqual(declared.cells[0].header_path, [])
+
+        inferred = pq(html)('table').table_spec(infer=True)
+        self.assertEqual(inferred.cells[0].header_path, ['Price'])
+        self.assertEqual(
+            [item.basis for item in inferred.cells[0].headers],
+            ['inferred'])
+        self.assertEqual(len(inferred.conflicts), 1)
+        self.assertEqual(inferred.conflicts[0].kind, 'missing-header')
+        self.assertEqual(inferred.conflicts[0].headers, ['absent'])
+        self.assertEqual(
+            inferred.cells[0].conflicts[0]['kind'], 'missing-header')
+
+    def test_cycle_is_preserved(self):
+        html = '''
+            <table>
+              <tr>
+                <th id="a" headers="b">A</th>
+                <th id="b" headers="a">B</th>
+              </tr>
+              <tr><td headers="a">x</td></tr>
+            </table>
+        '''
+        spec = pq(html)('table').table_spec()
+        kinds = [item.kind for item in spec.conflicts]
+        self.assertIn('header-cycle', kinds)
+
+    def test_duplicate_id_is_preserved(self):
+        html = '''
+            <table>
+              <tr><th id="a">A1</th><th id="a">A2</th></tr>
+              <tr><td headers="a">x</td></tr>
+            </table>
+        '''
+        spec = pq(html)('table').table_spec()
+        kinds = [item.kind for item in spec.conflicts]
+        self.assertIn('duplicate-header-id', kinds)
+        self.assertEqual(spec.cells[0].header_path, ['A1', 'A2'])
+
+    def test_conflicting_units_are_preserved(self):
+        html = '''
+            <table>
+              <tr><th id="p" colspan="2">Price</th></tr>
+              <tr>
+                <th id="usd" data-currency="USD">USD</th>
+                <th id="eur" data-currency="EUR">EUR</th>
+              </tr>
+              <tr><td headers="usd eur">x</td></tr>
+            </table>
+        '''
+        spec = pq(html)('table').table_spec()
+        kinds = [item.kind for item in spec.conflicts]
+        self.assertIn('unit-conflict', kinds)
+        self.assertEqual(spec.cells[0].header_path, ['USD', 'EUR'])
+
+    def test_inference_is_opt_in_and_marked(self):
+        html = '''
+            <table>
+              <tr><th colspan="2">Price</th></tr>
+              <tr><th>USD</th><th>EUR</th></tr>
+              <tr><td>10</td><td>20</td></tr>
+            </table>
+        '''
+        declared = pq(html)('table').table_spec()
+        self.assertEqual(declared.cells[0].header_path, [])
+
+        inferred = pq(html)('table').table_spec(infer=True)
+        self.assertEqual(inferred.cells[0].header_path, ['Price', 'USD'])
+        self.assertTrue(inferred.cells[0].inferred_headers)
+        self.assertFalse(inferred.cells[0].declared_headers)
+        self.assertEqual(
+            [item.basis for item in inferred.cells[0].headers],
+            ['inferred', 'inferred'])
+
+    def test_header_reference_does_not_break_axis(self):
+        html = '''
+            <table>
+              <tr><th id="plan">Plan</th><th id="price">Price</th></tr>
+              <tr><td headers="plan">Basic</td><td headers="price">10</td>
+              </tr>
+            </table>
+        '''
+        spec = pq(html)('table').table_spec()
+        self.assertEqual(
+            [cell.header_path for cell in spec.cells],
+            [['Plan'], ['Price']])
+        self.assertEqual(
+            [cell.column_path for cell in spec.cells],
+            [['Plan'], ['Price']])
+
+    def test_rowgroup_scope_covers_section(self):
+        html = '''
+            <table>
+              <tbody>
+                <tr><th rowspan="2" scope="rowgroup">North</th>
+                    <th scope="col">Q1</th></tr>
+                <tr><td>1</td></tr>
+                <tr><td headers="">2</td></tr>
+              </tbody>
+            </table>
+        '''
+        spec = pq(html)('table').table_spec()
+        self.assertEqual(spec.cells[0].header_path, ['Q1', 'North'])
+        self.assertEqual(spec.cells[1].header_path, ['North'])
+
+    def test_rowgroup_does_not_cross_sections(self):
+        html = '''
+            <table>
+              <tbody>
+                <tr><th rowspan="1" scope="rowgroup">North</th>
+                    <th scope="col">Q1</th></tr>
+                <tr><td>region</td><td>1</td></tr>
+              </tbody>
+              <tfoot><tr><td>total</td></tr></tfoot>
+            </table>
+        '''
+        spec = pq(html)('table').table_spec()
+        by_value = {cell.value: cell for cell in spec.cells}
+        self.assertEqual(by_value['1'].header_path, ['Q1', 'North'])
+        total = [cell for cell in spec.cells if cell.value == 'total'][0]
+        self.assertEqual(total.header_path, [])
+
+    def test_colgroup_scope_uses_declared_span(self):
+        html = '''
+            <table>
+              <colgroup><col><col span="2"></colgroup>
+              <thead>
+                <tr><th colspan="3" scope="colgroup">First</th></tr>
+                <tr><th scope="col">USD</th><th scope="col">EUR</th>
+                    <th scope="col">GBP</th></tr>
+              </thead>
+              <tbody><tr><td>10</td><td>1</td><td>2</td></tr></tbody>
+            </table>
+        '''
+        spec = pq(html)('table').table_spec()
+        self.assertEqual(
+            [cell.header_path for cell in spec.cells],
+            [['First', 'USD'], ['First', 'EUR'], ['First', 'GBP']])
+
+    def test_header_rowspan_covers_data_rows(self):
+        html = '''
+            <table>
+              <tr><th rowspan="2" scope="col">Plan</th>
+                  <th colspan="2" scope="colgroup">Price</th></tr>
+              <tr><th scope="col">USD</th><th scope="col">EUR</th></tr>
+              <tr><th scope="row">Basic</th><td>1</td><td>2</td></tr>
+            </table>
+        '''
+        spec = pq(html)('table').table_spec()
+        self.assertEqual(
+            spec.cells[0].header_path, ['Price', 'USD', 'Basic'])
+        self.assertEqual(
+            spec.cells[1].header_path, ['Price', 'EUR', 'Basic'])
+        plan = [item for item in spec.header_cells if item.value == 'Plan']
+        self.assertEqual(len(plan), 1)
+        self.assertEqual(plan[0].rowspan, 2)
+
+    def test_crossing_headers_use_real_grid(self):
+        html = '''
+            <table>
+              <tr><th rowspan="2">A</th><th colspan="2">B</th></tr>
+              <tr><th>C</th><th>D</th></tr>
+              <tr><td rowspan="2">x</td><td>1</td><td>2</td></tr>
+              <tr><td>3</td><td>4</td></tr>
+            </table>
+        '''
+        spec = pq(html)('table').table_spec(infer=True)
+        by_value = {cell.value: cell for cell in spec.cells}
+        self.assertEqual(by_value['x'].rowspan, 2)
+        self.assertEqual(by_value['x'].header_path, ['A'])
+        self.assertEqual(by_value['1'].header_path, ['B', 'C'])
+        self.assertEqual(by_value['3'].header_path, ['B', 'C'])
+        self.assertEqual(by_value['4'].header_path, ['B', 'D'])
+
+    def test_specs_from_multiple_tables(self):
+        html = '<div><table id="a"></table><table id="b"></table></div>'
+        specs = pq(html)('table').table_specs()
+        self.assertEqual([spec.id for spec in specs], ['a', 'b'])
+        self.assertEqual(
+            [spec.id for spec in pq(html)('div').table_specs()],
+            ['a', 'b'])
+
+
 class TestWebScrapping(TestCase):
 
     def setUp(self):
