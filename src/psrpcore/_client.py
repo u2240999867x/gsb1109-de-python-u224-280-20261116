@@ -37,7 +37,7 @@ from psrpcore._exceptions import (
     InvalidProtocolVersion,
     InvalidRunspacePoolState,
 )
-from psrpcore._payload import ProtocolVersion, StreamType
+from psrpcore._payload import ProtocolVersion, PSRPMessage, StreamType
 from psrpcore._pipeline import GetMetadata, PowerShell
 from psrpcore.types import (
     ApartmentState,
@@ -468,29 +468,35 @@ class _ClientPipeline(Pipeline["ClientRunspacePool"]):
     def send(
         self,
         data: typing.Any,
-    ) -> None:
+    ) -> PSRPMessage:
         """Send data to the pipeline.
 
         Sends input data to a running pipeline.
 
         Args:
             data: The data to send to the pipeline.
+
+        Returns:
+            PSRPMessage: The message that was queued in the send buffer.
         """
         if self.state != PSInvocationState.Running:
             raise InvalidPipelineState("send pipeline input", self.state, [PSInvocationState.Running])
 
-        self.prepare_message(data, message_type=PSRPMessageType.PipelineInput)
+        return self.prepare_message(data, message_type=PSRPMessageType.PipelineInput)
 
-    def send_eof(self) -> None:
+    def send_eof(self) -> PSRPMessage:
         """Send EOF to the input pipe.
 
         Sends the end of input marker to the pipeline to state no more input is
         expected for the pipeline.
+
+        Returns:
+            PSRPMessage: The message that was queued in the send buffer.
         """
         if self.state != PSInvocationState.Running:
             raise InvalidPipelineState("send pipeline input EOF", self.state, [PSInvocationState.Running])
 
-        self.prepare_message(EndOfPipelineInput())
+        return self.prepare_message(EndOfPipelineInput())
 
     def host_response(
         self,

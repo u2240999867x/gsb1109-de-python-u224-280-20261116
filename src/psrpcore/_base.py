@@ -137,6 +137,9 @@ class RunspacePool(typing.Generic[T1]):
         self._min_runspaces = 0
         self._max_runspaces = 0
         self._send_buffer: typing.List[PSRPMessage] = []
+        self._send_listeners: typing.Dict[
+            typing.Optional[uuid.UUID], typing.List[typing.Callable[[PSRPMessage], None]]
+        ] = {}
 
         # Raw bytes received but not yet processed.
         self._receive_buffer = bytearray()
@@ -224,6 +227,49 @@ class RunspacePool(typing.Generic[T1]):
 
         self._change_state(RunspacePoolState.Opened)
 
+    def add_send_listener(
+        self,
+        listener: typing.Callable[[PSRPMessage], None],
+        pipeline_id: typing.Optional[uuid.UUID] = None,
+    ) -> None:
+        """Registers a listener for messages handed to the transport.
+
+        The listener is called by :meth:`data_to_send` with each
+        :class:`PSRPMessage` for ``pipeline_id`` that has been fully packed
+        into the returned payload. This only reports that the message was
+        handed to the local transport, it does not imply the peer has
+        received or processed it.
+
+        Args:
+            listener: The callable to invoke with the sent message.
+            pipeline_id: Only report messages for this pipeline, ``None``
+                reports messages targeted at the Runspace Pool itself.
+        """
+        self._send_listeners.setdefault(pipeline_id, []).append(listener)
+
+    def remove_send_listener(
+        self,
+        listener: typing.Callable[[PSRPMessage], None],
+        pipeline_id: typing.Optional[uuid.UUID] = None,
+    ) -> None:
+        """Removes a listener registered with :meth:`add_send_listener`.
+
+        Args:
+            listener: The callable to remove.
+            pipeline_id: The pipeline the listener was registered for.
+        """
+        listeners = self._send_listeners.get(pipeline_id)
+        if not listeners:
+            return
+
+        try:
+            listeners.remove(listener)
+        except ValueError:
+            return
+
+        if not listeners:
+            del self._send_listeners[pipeline_id]
+
     def data_to_send(
         self,
         amount: typing.Optional[int] = None,
@@ -284,6 +330,8 @@ class RunspacePool(typing.Generic[T1]):
 
             if len(message) == 0:
                 self._send_buffer.remove(message)
+                for listener in list(self._send_listeners.get(message.pipeline_id, [])):
+                    listener(message)
 
         return PSRPPayload(bytes(current_buffer), stream_type, pipeline_id) if current_buffer else None
 
@@ -360,7 +408,7 @@ class RunspacePool(typing.Generic[T1]):
         message_type: typing.Optional[PSRPMessageType] = None,
         pipeline_id: typing.Optional[uuid.UUID] = None,
         stream_type: StreamType = StreamType.default,
-    ) -> None:
+    ) -> PSRPMessage:
         """Adds a PSRP message to send buffer.
 
         Adds the given PSRP message to the send buffer to be sent when the
@@ -373,6 +421,9 @@ class RunspacePool(typing.Generic[T1]):
             pipeline_id: The pipeline id the message is for or `None` if it
                 targets the runspace pool.
             stream_type: The stream type the message is for.
+
+        Returns:
+            PSRPMessage: The message that was queued in the send buffer.
         """
         if message is None:
             b_data = b""
@@ -415,6 +466,7 @@ class RunspacePool(typing.Generic[T1]):
             b_data.decode(),
         )
         self._send_buffer.append(psrp_message)
+        return psrp_message
 
     def _change_state(
         self,
@@ -558,7 +610,7 @@ class Pipeline(typing.Generic[T2]):
         message: typing.Optional[PSObject],
         message_type: typing.Optional[PSRPMessageType] = None,
         stream_type: StreamType = StreamType.default,
-    ) -> None:
+    ) -> PSRPMessage:
         """Adds a PSRP message to send buffer.
 
         Adds the given PSRP message to the send buffer to be sent when the
@@ -570,8 +622,11 @@ class Pipeline(typing.Generic[T2]):
             message_type: Override the message type of the PSRP messae in case
                 message is not an actual PSRP Message object.
             stream_type: The stream type the message is for.
+
+        Returns:
+            PSRPMessage: The message that was queued in the send buffer.
         """
-        self.runspace_pool.prepare_message(message, message_type, self.pipeline_id, stream_type)
+        return self.runspace_pool.prepare_message(message, message_type, self.pipeline_id, stream_type)
 
     def _change_state(
         self,

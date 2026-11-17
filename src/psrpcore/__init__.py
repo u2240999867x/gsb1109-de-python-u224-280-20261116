@@ -60,6 +60,7 @@ from psrpcore._exceptions import (
     PSRPCoreError,
 )
 from psrpcore._host import ClientHostResponder, ServerHostRequestor
+from psrpcore._input_pump import InputPumpState, PipelineInputPump
 from psrpcore._payload import PSRPPayload, StreamType
 from psrpcore._pipeline import GetMetadata, PowerShell
 from psrpcore._server import ServerPipeline, ServerRunspacePool
@@ -85,6 +86,7 @@ __all__ = [
     "GetRunspaceAvailabilityEvent",
     "InformationRecordEvent",
     "InitRunspacePoolEvent",
+    "InputPumpState",
     "InvalidPipelineState",
     "InvalidProtocolVersion",
     "InvalidRunspacePoolState",
@@ -95,6 +97,7 @@ __all__ = [
     "PipelineHostCallEvent",
     "PipelineHostResponseEvent",
     "PipelineInputEvent",
+    "PipelineInputPump",
     "PipelineOutputEvent",
     "PipelineStateEvent",
     "PowerShell",
