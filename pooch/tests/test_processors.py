@@ -9,12 +9,14 @@ Test the processor hooks
 """
 
 import re
+import shutil
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import pytest
 
 from .. import Pooch
+from .. import processors
 from ..processors import Decompress, Untar, Unzip
 from .utils import capture_log, check_tiny_data, pooch_test_registry, pooch_test_url
 
@@ -285,3 +287,225 @@ def test_unpacking_wrong_members_then_no_members(processor_class, extension):
         processor2 = processor_class()
         filenames2 = pup.fetch("store" + extension, processor=processor2)
         assert len(filenames2) > 0
+
+
+def _copy_archive(tmp_path, name):
+    """
+    Copy one of the test archives into a temporary folder.
+    """
+    archive = tmp_path / name
+    shutil.copy(Path(__file__).parent / "data" / name, archive)
+    return str(archive)
+
+
+def _tree(root):
+    """
+    List every file below root as a path relative to it.
+    """
+    root = Path(root)
+    return sorted(
+        str(path.relative_to(root)) for path in root.rglob("*") if path.is_file()
+    )
+
+
+@pytest.mark.parametrize(
+    ("processor_class", "extension"),
+    [(Unzip, ".zip"), (Untar, ".tar.gz")],
+    ids=["Unzip", "Untar"],
+)
+def test_unpacking_failure_removes_own_products(tmp_path, processor_class, extension):
+    """
+    A failed extraction must not leave a partial tree or unrelated files behind.
+    """
+    archive = _copy_archive(tmp_path, "store" + extension)
+    extract_dir = Path(archive + processor_class().suffix)
+    extract_dir.mkdir()
+    external = extract_dir / "keep.txt"
+    external.write_text("keep me", encoding="utf-8")
+    processor = processor_class()
+
+    def fail_after_writing(fname, destination):
+        (Path(destination) / "partial.txt").write_text("partial", encoding="utf-8")
+        raise RuntimeError("extraction failed")
+
+    processor._extract_file = fail_after_writing
+    with pytest.raises(RuntimeError, match="extraction failed"):
+        processor(archive, "download", None)
+
+    assert _tree(extract_dir) == ["keep.txt"]
+    assert external.read_text(encoding="utf-8") == "keep me"
+    # No journals or staging folders are left behind next to the cache.
+    assert sorted(path.name for path in tmp_path.iterdir()) == [
+        "store" + extension,
+        "store" + extension + processor.suffix,
+    ]
+
+
+@pytest.mark.parametrize(
+    ("processor_class", "extension"),
+    [(Unzip, ".zip"), (Untar, ".tar.gz")],
+    ids=["Unzip", "Untar"],
+)
+def test_unpacking_failure_restores_overwritten_files(
+    tmp_path, processor_class, extension
+):
+    """
+    A failed update must restore files it overwrote with new content.
+    """
+    archive = _copy_archive(tmp_path, "store" + extension)
+    extract_dir = Path(archive + processor_class().suffix)
+    existing = extract_dir / "store" / "tiny-data.txt"
+    existing.parent.mkdir(parents=True)
+    existing.write_text("old content", encoding="utf-8")
+    processor = processor_class()
+
+    original_publish = processors._ExtractionTransaction.publish
+
+    def publish_then_fail(transaction):
+        original_publish(transaction)
+        raise RuntimeError("publication failed")
+
+    processors._ExtractionTransaction.publish = publish_then_fail
+    try:
+        with pytest.raises(RuntimeError, match="publication failed"):
+            processor(archive, "update", None)
+    finally:
+        processors._ExtractionTransaction.publish = original_publish
+
+    assert existing.read_text(encoding="utf-8") == "old content"
+    assert _tree(extract_dir) == ["store/tiny-data.txt"]
+
+
+@pytest.mark.parametrize(
+    ("processor_class", "extension"),
+    [(Unzip, ".zip"), (Untar, ".tar.gz")],
+    ids=["Unzip", "Untar"],
+)
+def test_unpacking_preexisting_file_not_claimed(tmp_path, processor_class, extension):
+    """
+    A same-named file that was there before the call is not one of its products.
+    """
+    archive = _copy_archive(tmp_path, "store" + extension)
+    extract_dir = Path(archive + processor_class().suffix)
+    existing = extract_dir / "store" / "tiny-data.txt"
+    existing.parent.mkdir(parents=True)
+    existing.write_text("someone else's data", encoding="utf-8")
+
+    processor = processor_class(members=["store/tiny-data.txt"])
+
+    def fail_before_publishing(fname, destination):
+        raise RuntimeError("extraction failed")
+
+    processor._extract_file = fail_before_publishing
+    with pytest.raises(RuntimeError, match="extraction failed"):
+        processor(archive, "download", None)
+
+    # This call never published anything, so the pre-existing file must remain.
+    content = existing.read_text(encoding="utf-8")
+    assert content == "someone else's data"
+    assert _tree(extract_dir) == ["store/tiny-data.txt"]
+
+
+@pytest.mark.parametrize(
+    ("processor_class", "extension"),
+    [(Unzip, ".zip"), (Untar, ".tar.gz")],
+    ids=["Unzip", "Untar"],
+)
+def test_unpacking_replays_interrupted_call(tmp_path, processor_class, extension):
+    """
+    An interrupted extraction is rolled back before a later call proceeds.
+    """
+    archive = _copy_archive(tmp_path, "store" + extension)
+    extract_dir = archive + processor_class().suffix
+    processor = processor_class()
+
+    transaction = processors._ExtractionTransaction(archive, extract_dir, "download")
+    transaction.prepare()
+    processor._extract_file(archive, transaction.data_dir)
+    transaction.add_staged_files()
+    transaction.publish()
+    # Simulate a crash: the call stops before committing its transaction.
+    transaction._forget()
+
+    filenames = processor(archive, "fetch", None)
+    assert len(filenames) == 2
+    for fname in filenames:
+        check_tiny_data(fname)
+    assert _tree(extract_dir) == [
+        "store/subdir/tiny-data.txt",
+        "store/tiny-data.txt",
+    ]
+
+
+def test_unpacking_replay_keeps_data_published_by_another_call(tmp_path):
+    """
+    A replayed rollback must not delete a file another call has published.
+
+    This simulates a rollback that failed part-way: the crashed call recorded
+    an artifact, another call replaced it with new content, and only then is
+    the crashed call's rollback retried. The newer file must survive.
+    """
+    archive = _copy_archive(tmp_path, "store.zip")
+    extract_dir = archive + ".unzip"
+    processor = Unzip()
+
+    # An abandoned transaction that published one of its files, then crashed.
+    abandoned = processors._ExtractionTransaction(archive, extract_dir, "download")
+    abandoned.prepare()
+    processor._extract_file(archive, abandoned.data_dir)
+    abandoned.add_staged_files()
+    abandoned.publish()
+    journal_dir = Path(abandoned.journal_dir)
+    plan_path = abandoned.plan_path
+    plan = abandoned._plan()
+    abandoned._forget()
+
+    # Another call publishes valid data at the same paths.
+    processor(archive, "fetch", None)
+    published = {
+        fname: Path(fname).read_bytes()
+        for fname in Path(extract_dir).rglob("*.txt")
+    }
+    assert published
+
+    # Retrying the old transaction's rollback leaves the new data untouched.
+    processors._rollback_transaction(plan_path, plan)
+    for fname, content in published.items():
+        assert fname.read_bytes() == content
+    assert not journal_dir.exists()
+
+
+@pytest.mark.parametrize(
+    ("processor_class", "extension"),
+    [(Unzip, ".zip"), (Untar, ".tar.gz")],
+    ids=["Unzip", "Untar"],
+)
+def test_unpacking_committed_cleanup_failure_keeps_data(
+    tmp_path, processor_class, extension
+):
+    """
+    Failing to delete the records of a committed call must not undo its data.
+    """
+    archive = _copy_archive(tmp_path, "store" + extension)
+    extract_dir = archive + processor_class().suffix
+    processor = processor_class()
+
+    original_cleanup = processors._cleanup_committed_transaction
+
+    def fail_cleanup(plan_path, plan):
+        raise OSError("cannot clean up")
+
+    processors._cleanup_committed_transaction = fail_cleanup
+    try:
+        filenames = processor(archive, "download", None)
+    finally:
+        processors._cleanup_committed_transaction = original_cleanup
+
+    assert len(filenames) == 2
+    for fname in filenames:
+        check_tiny_data(fname)
+
+    # The next call notices the committed record and only removes leftovers.
+    assert len(processor(archive, "fetch", None)) == 2
+    for fname in filenames:
+        check_tiny_data(fname)

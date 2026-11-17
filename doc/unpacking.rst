@@ -54,7 +54,9 @@ the files:
         unpack_to_custom_dir = Untar(members=["actual-data-file.txt"],
                                      extract_dir="custom_folder")
         # Pass in the processor to untar the data file
-        fnames = GOODBOY.fetch("tarred-data-file.tar.gz", processor=unpack)
+        fnames = GOODBOY.fetch(
+            "tarred-data-file.tar.gz", processor=unpack_to_custom_dir
+        )
         # Returns the paths of all extract members (in our case, only one)
         fname = fnames[0]
         return fname
@@ -74,3 +76,18 @@ To extract all files into a folder and return the path to each file, omit the
 
 Use :class:`pooch.Untar` to do the exact same for tar archives (with optional
 compression).
+
+Failed or interrupted unpacks
+-----------------------------
+
+Unpacking is done in a private staging folder first and only then published
+into the extraction folder. If unpacking fails, Pooch removes only the files
+that this call created and restores any file it had overwritten. Files that
+already existed in the extraction folder (including ones written by another
+process) are never claimed or removed.
+
+A small transaction record is kept next to the extraction folder while the
+call runs. If the call is interrupted, the next call using the same extraction
+folder replays the cleanup before unpacking again. Since only artifacts whose
+on-disk identity still matches this call's record are removed, data published
+in the meantime by another call survives the replay.
