@@ -128,6 +128,7 @@ Are you a **scientist** or researcher? Pooch can help you too!
     multiple-urls.rst
     protocols.rst
     logging.rst
+    cache-eviction.rst
     downloaders.rst
     processors.rst
     authentication.rst

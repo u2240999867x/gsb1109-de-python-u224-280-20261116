@@ -16,6 +16,15 @@ from .downloaders import (
     HTTPDownloader,
     SFTPDownloader,
 )
+from .eviction import (
+    CacheMaterial,
+    EvictionError,
+    EvictionPlan,
+    EvictionResult,
+    execute_eviction,
+    plan_eviction,
+    revalidate_eviction,
+)
 from .hashes import file_hash, make_registry
 from .processors import Decompress, Untar, Unzip
 from .utils import check_version, get_logger, os_cache

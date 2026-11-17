@@ -36,6 +36,20 @@ Utilities
     pooch.check_version
     pooch.get_logger
 
+Cache eviction
+--------------
+
+.. autosummary::
+    :toctree: generated/
+
+    pooch.CacheMaterial
+    pooch.EvictionPlan
+    pooch.EvictionResult
+    pooch.EvictionError
+    pooch.plan_eviction
+    pooch.revalidate_eviction
+    pooch.execute_eviction
+
 Downloaders
 -----------
 
