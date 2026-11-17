@@ -1,0 +1,15 @@
+{
+  "target_leaves": ["a", "b", "c", "d", "e"],
+  "tree1": {
+    "newick": "((a,b),(c,d));",
+    "allowed_attachments": [["c", "d"], "ROOT"]
+  },
+  "tree2": {
+    "newick": "(a,(b,c,d));",
+    "allowed_attachments": [["b", "c", "d"]]
+  },
+  "budget": {
+    "max_completions_per_tree": 100000,
+    "max_pair_evaluations": 2000000
+  }
+}
