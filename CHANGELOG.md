@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+* Added `psrpcore.types.snapshot_object` and the `PSObjectSnapshot`/`PropertySnapshot` types as a read only
+  structural warehousing entrypoint
+  * Captures adapted and extended property declarations separately, including same-name properties in both groups
+  * Copies the full type name chain and resolves each property's effective value under a `PropertyQueryPolicy`
+  * Retains property declarations whose getters raise as a `PropertyReadFailure` instead of treating them as missing
+  * Keeps object values and the source object as references and never mutates the source
+  * `PSObjectSnapshot.to_projection()` re-exports the two groups in their original `<Props>`/`<MS>` roles
+* The serializer now keeps a property whose getter raised in its original group and emits `Nil` instead of failing
+  the whole object serialization
+
 ## 0.3.1 - 2024-11-11
 
 * Fixed CLIXML string pattern matching to only match valid hex sequences and not just any alphanumeric character

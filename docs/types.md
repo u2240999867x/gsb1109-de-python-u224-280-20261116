@@ -491,6 +491,42 @@ The only differences between a rehydrated and plain `PSObject` object are:
 + A non-rehydrated object will prefix all of its type names under `obj.PSTypeNames` with `Deserialized.`.
 
 
+## Structural Snapshots
+
+A remote object carries two independent kinds of property declarations:
+
++ Adapted properties (`<Props>`) are the native members of the underlying .NET type
++ Extended properties (`<MS>`) are the members added by the PowerShell Extended Type System
+
+An adapted and an extended property may share a name without being the same thing, and reading a property can fail at runtime.
+A failed read is not the same as the property being absent.
+
+Use [snapshot_object](psrpcore.types.snapshot_object) as a read only warehousing entrypoint that captures both declarations, the full type name chain and the effective value of every property under a [PropertyQueryPolicy](psrpcore.types.PropertyQueryPolicy):
+
+```python
+import psrpcore.types
+
+snap = psrpcore.types.snapshot_object(obj)
+
+snap.type_names                       # A copy of the full PSTypeNames chain
+snap.adapted_properties               # List of PropertySnapshot for the adapted group
+snap.extended_properties              # List of PropertySnapshot for the extended group
+snap.source                           # The original object, kept as a reference
+```
+
+Each [PropertySnapshot](psrpcore.types.PropertySnapshot) keeps the original property declaration as a reference, reports whether an effective value is available (`has_value`) and stores the value without copying any object it references.
+A property whose getter raises is retained with a [PropertyReadFailure](psrpcore.types.PropertyReadFailure) rather than being treated as missing.
+
+The query policy controls how values are read while the declarations are always captured:
+
++ `read_adapted` / `read_extended` disable reading a whole group while keeping its declarations
++ `on_read_error` selects `ON_READ_ERROR_NIL` (default, value becomes `None`), `ON_READ_ERROR_OMIT` (declaration kept, no value) or `ON_READ_ERROR_RAISE`
+
+A snapshot never mutates the source object.
+Calling `to_projection()` builds a fresh `PSObject` that re-exports the two groups in their original roles (`<Props>` and `<MS>`) while preserving shared object references and leaving the original object untouched.
+When the normal serializer encounters a property getter that raises it now keeps that property in its original group and emits a `Nil` value instead of failing the whole object.
+
+
 ## Add-Member and Update-TypeData
 
 In PowerShell you can add extra properties to an existing object using the [Add-Member](https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.utility/add-member?view=powershell-7) cmdlet.

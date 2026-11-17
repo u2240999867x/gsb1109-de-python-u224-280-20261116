@@ -886,7 +886,18 @@ class _Serializer:
             no_props = False
             prop_elements = ElementTree.SubElement(element, xml_name)
             for prop in properties:
-                prop_value = prop.get_value(value)
+                # A failed property read does not mean the property is absent. Keep the declaration in its original
+                # group and represent the unreadable value as Nil rather than failing the whole object serialization.
+                try:
+                    prop_value = prop.get_value(value)
+                except Exception:
+                    log.warning(
+                        "Failed to read %s property '%s', serializing it as Nil",
+                        prop_type,
+                        prop.name,
+                        exc_info=True,
+                    )
+                    prop_value = None
 
                 prop_element = self.serialize(prop_value)
                 prop_element.attrib["N"] = _serialize_string(prop.name)

@@ -151,6 +151,16 @@ from psrpcore.types._serializer import (
     serialize,
     serialize_clixml,
 )
+from psrpcore.types._snapshot import (
+    ON_READ_ERROR_NIL,
+    ON_READ_ERROR_OMIT,
+    ON_READ_ERROR_RAISE,
+    PropertyQueryPolicy,
+    PropertyReadFailure,
+    PropertySnapshot,
+    PSObjectSnapshot,
+    snapshot_object,
+)
 
 logging.getLogger(__name__).addHandler(logging.NullHandler())
 
@@ -191,6 +201,9 @@ __all__ = [
     "InvocationInfo",
     "KeyInfo",
     "NETException",
+    "ON_READ_ERROR_NIL",
+    "ON_READ_ERROR_OMIT",
+    "ON_READ_ERROR_RAISE",
     "PSAliasProperty",
     "PSBool",
     "PSByte",
@@ -250,6 +263,10 @@ __all__ = [
     "ProgressRecord",
     "ProgressRecordMsg",
     "ProgressRecordType",
+    "PropertyQueryPolicy",
+    "PropertyReadFailure",
+    "PropertySnapshot",
+    "PSObjectSnapshot",
     "PublicKey",
     "PublicKeyRequest",
     "ReadKeyOptions",
@@ -283,4 +300,5 @@ __all__ = [
     "ps_isinstance",
     "serialize",
     "serialize_clixml",
+    "snapshot_object",
 ]
