@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+* Added `psrpcore.RawUIReplay`, `psrpcore.ReplayCell`, and `psrpcore.RawUIGap`
+  * Replays RawUI host buffer calls (`SetBufferContents1/2`, `ScrollBufferContents`) in memory into a queryable screen buffer
+  * Tracks the buffer separately from the visible window and handles buffer/window size changes without filling unobserved cells with blanks
+  * Keeps each cell traceable to the call that wrote it and applies overlapping scrolls independently of cell traversal order
+  * Records host calls that cannot be replayed as explicit gaps rather than guessing their effect
+
 ## 0.3.1 - 2024-11-11
 
 * Fixed CLIXML string pattern matching to only match valid hex sequences and not just any alphanumeric character

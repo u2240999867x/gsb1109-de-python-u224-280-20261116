@@ -15,6 +15,7 @@ brief and will be expanded upon in the future.
 
    protocol
    minishell
+   rawui
    scenarios
    transport
    types

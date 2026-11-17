@@ -62,6 +62,7 @@ from psrpcore._exceptions import (
 from psrpcore._host import ClientHostResponder, ServerHostRequestor
 from psrpcore._payload import PSRPPayload, StreamType
 from psrpcore._pipeline import GetMetadata, PowerShell
+from psrpcore._rawui import RawUIGap, RawUIReplay, ReplayCell
 from psrpcore._server import ServerPipeline, ServerRunspacePool
 
 __all__ = [
@@ -102,6 +103,9 @@ __all__ = [
     "PublicKeyEvent",
     "PublicKeyRequestEvent",
     "PSRemotingCrypto",
+    "RawUIGap",
+    "RawUIReplay",
+    "ReplayCell",
     "ResetRunspaceStateEvent",
     "RunspacePoolHostCallEvent",
     "RunspacePoolHostResponseEvent",
