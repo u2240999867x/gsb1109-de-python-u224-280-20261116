@@ -280,6 +280,75 @@ class PyQuery(list):
         result = self._copy(*args, parent=self, **kwargs)
         return result
 
+    #####################
+    # Slot projection   #
+    #####################
+    def project(self, components=None, assignments=None, attach=False,
+                **kwargs):
+        """Compose the display tree from component roots and slot assignments.
+
+        The original tree is left untouched.  The returned
+        :class:`~pyquery.projection.Projection` exposes ``original`` and
+        ``projected`` query views, node correspondence, and the
+        conflicts/issues found while composing::
+
+            >>> d = PyQuery('<div id="app"><span slot="title">Hi</span></div>')
+            >>> p = d.project(
+            ...     components={'app': '<section><slot name="title">'
+            ...                            'default</slot></section>'},
+            ...     assignments={'app': {'title': ['#app span']}})
+            >>> p.complete
+            True
+            >>> p.projected('span').text()
+            'Hi'
+
+        ``components`` may also be passed as ``component_roots`` and
+        ``assignments`` as ``slot_assignments``.  With ``attach=True`` the
+        projection is remembered on this object so :meth:`projected` and
+        :meth:`original` can query either view directly.
+        """
+        from .projection import build_projection
+
+        elements = [element for element in self
+                    if isinstance(element, etree._Element)]
+        projection = build_projection(
+            elements,
+            components=components,
+            assignments=assignments,
+            **kwargs)
+        if attach:
+            self._projection = projection
+        return projection
+
+    def projected(self, selector=None):
+        """Return the display projection, optionally filtered.
+
+        A projection is attached when :meth:`project` is called with
+        ``attach=True``; otherwise an empty selection is returned.
+        """
+        projection = getattr(self, '_projection', None)
+        if projection is None:
+            return self._copy([])
+        return projection.projected(selector)
+
+    def original(self, selector=None):
+        """Query the original tree (attached projection) or ``self``."""
+        projection = getattr(self, '_projection', None)
+        if projection is None:
+            return self if selector is None else self(selector)
+        return projection.original(selector)
+
+    def query_original(self, selector=None):
+        return self.original(selector)
+
+    def query_projected(self, selector=None):
+        return self.projected(selector)
+
+    def attach_projection(self, projection):
+        """Remember ``projection`` so :meth:`projected` can query it."""
+        self._projection = projection
+        return self
+
     # keep original list api prefixed with _
     _append = list.append
     _extend = list.extend

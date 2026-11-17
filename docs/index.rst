@@ -11,6 +11,7 @@ Full documentation
    pseudo_classes
    manipulating
    traversing
+   projection
    api
    scrap
    tips

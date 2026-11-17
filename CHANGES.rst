@@ -3,6 +3,12 @@
 
 - Return an empty selection for empty files with the default and HTML parsers.
 
+- Add static slot projection: ``PyQuery.project()`` composes component roots
+  and slot assignments into a display tree alongside the untouched original
+  DOM, maps nodes between the two positions, and reports missing references,
+  duplicate assignments, cycles and unreadable component roots instead of
+  treating partial input as a complete page.
+
 
 2.1.0 (2026-07-27)
 ------------------

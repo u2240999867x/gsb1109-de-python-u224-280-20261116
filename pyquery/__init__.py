@@ -3,3 +3,5 @@
 # Distributed under the BSD license, see LICENSE.txt
 
 from .pyquery import PyQuery  # NOQA
+
+from .projection import Projection  # NOQA
