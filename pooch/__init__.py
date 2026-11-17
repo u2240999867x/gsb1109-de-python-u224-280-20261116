@@ -18,6 +18,14 @@ from .downloaders import (
 )
 from .hashes import file_hash, make_registry
 from .processors import Decompress, Untar, Unzip
+from .registry import (
+    FileNotInRegistryError,
+    ProvenanceRecord,
+    RegistryError,
+    RegistrySnapshot,
+    RetractedFileError,
+    registry_digest,
+)
 from .utils import check_version, get_logger, os_cache
 
 # Add a "v" to the version number

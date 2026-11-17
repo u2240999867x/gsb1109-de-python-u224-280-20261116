@@ -9,15 +9,28 @@ The main Pooch class and a factory function for it.
 """
 
 import contextlib
+import json
 import os
-import shlex
 import shutil
+import tempfile
+import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Optional, Union
 
 from .downloaders import DOIDownloader, choose_downloader, doi_to_repository
-from .hashes import file_hash, hash_matches
+from .hashes import file_hash, hash_algorithm, hash_matches
+from .registry import (
+    FileNotInRegistryError,
+    ProvenanceRecord,
+    RegistrySnapshot,
+    RetractedFileError,
+    apply_directives,
+    parse_registry,
+    registry_digest,
+)
 from .typing import Action, Downloader, PathInputType, PathType, Processor
 from .utils import (
     cache_location,
@@ -265,6 +278,7 @@ def create(
     urls: Optional[dict] = None,
     retry_if_failed: int = 0,
     allow_updates: Union[bool, str] = True,
+    registry_version: Optional[str] = None,
 ):
     """
     Create a :class:`~pooch.Pooch` with sensible defaults to fetch data files.
@@ -336,6 +350,11 @@ def create(
         will be checked for the true/false value. If ``False``, any mismatch
         with hashes in the registry will result in an error. Defaults to
         ``True``.
+    registry_version : str or None
+        A label for the initial registry, used in logs and error messages. If
+        None, the content digest of the registry is used. Fetches always use
+        one complete registry snapshot, so a later registry refresh cannot
+        change a fetch that is already running.
 
     Returns
     -------
@@ -434,6 +453,7 @@ def create(
         urls=urls,
         retry_if_failed=retry_if_failed,
         allow_updates=allow_updates,
+        registry_version=registry_version,
     )
     return pup
 
@@ -476,6 +496,11 @@ class Pooch:
         the registry are allowed to update from the remote URL. If ``False``,
         any mismatch with hashes in the registry will result in an error.
         Defaults to ``True``.
+    registry_version : str or None
+        A label for the initial registry. If None, the content digest of the
+        registry is used as its version. Each fetch resolves its file against
+        one complete registry snapshot, so changing the registry never changes
+        the meaning of a fetch that is already running.
 
     """
 
@@ -487,17 +512,86 @@ class Pooch:
         urls: Optional[dict[str, str]] = None,
         retry_if_failed: int = 0,
         allow_updates: bool = True,
+        registry_version: Optional[str] = None,
     ) -> None:
         self.path = path
         self.base_url = base_url
         if registry is None:
             registry = {}
-        self.registry = registry
+        self._registry = dict(registry)
         if urls is None:
             urls = {}
-        self.urls = dict(urls)
+        self._urls = dict(urls)
+        self._retracted: dict[str, str] = {}
+        self._retraction_reasons: dict[str, str] = {}
+        self._snapshots: list[RegistrySnapshot] = []
+        self._provenance: list[ProvenanceRecord] = []
+        self._lock = threading.RLock()
         self.retry_if_failed = retry_if_failed
         self.allow_updates = allow_updates
+        self._commit_registry(self._registry, self._urls, registry_version)
+        self._load_provenance_index()
+
+    def __repr__(self) -> str:
+        return (
+            f"Pooch(path={self.path!r}, base_url={self.base_url!r}, "
+            f"registry_version={self.registry_version!r}, "
+            f"files={len(self._registry)})"
+        )
+
+    @property
+    def registry(self) -> dict[str, str]:
+        """
+        The files declared by the current registry.
+
+        This mapping remains mutable for backwards compatibility. A fetch
+        always takes a complete snapshot before it starts, so later mutations
+        cannot affect a fetch that is already running. Mutating the returned
+        mapping publishes a new snapshot the next time one is requested.
+        """
+        return self._registry
+
+    @registry.setter
+    def registry(self, value: dict[str, str]) -> None:
+        current_urls = dict(self._urls)
+        self._commit_registry(dict(value), current_urls, None)
+
+    @property
+    def urls(self) -> dict[str, str]:
+        "Custom download URLs for the current registry."
+        return self._urls
+
+    @urls.setter
+    def urls(self, value: dict[str, str]) -> None:
+        with self._lock:
+            self._urls = dict(value)
+
+    @property
+    def registry_snapshot(self) -> RegistrySnapshot:
+        "The complete registry snapshot currently in use."
+        return self._snapshot_for_current_state()
+
+    @property
+    def registry_version(self) -> str:
+        "Version of the registry currently in use."
+        return self.registry_snapshot.version
+
+    @property
+    def registry_digest(self) -> str:
+        "Content digest of the registry currently in use."
+        return self.registry_snapshot.digest
+
+    @property
+    def registry_history(self) -> tuple[RegistrySnapshot, ...]:
+        "All registry snapshots that have been published, oldest first."
+        with self._lock:
+            return tuple(self._snapshots)
+
+    @property
+    def provenance(self) -> tuple[ProvenanceRecord, ...]:
+        "Content that was preserved when it was superseded by a newer registry."
+        with self._lock:
+            return tuple(self._provenance)
 
     @property
     def abspath(self) -> Path:
@@ -515,6 +609,7 @@ class Pooch:
         processor: Optional[Processor] = None,
         downloader: Optional[Downloader] = None,
         progressbar: bool = False,
+        registry_version: Optional[str] = None,
     ) -> str:
         """
         Get the absolute path to a file in the local storage.
@@ -525,6 +620,10 @@ class Pooch:
         file was updated in the remote storage. If the hash of the downloaded
         file still doesn't match the one in the registry, will raise an
         exception to warn of possible file corruption.
+
+        A fetch always takes one complete, immutable registry snapshot before
+        it does anything else. If the registry is refreshed while the fetch is
+        running, the fetch continues against the version it started with.
 
         Post-processing actions sometimes need to be taken on downloaded files
         (unzipping, conversion to a more efficient format, etc). If these
@@ -558,6 +657,10 @@ class Pooch:
             error (stderr). Requires `tqdm <https://github.com/tqdm/tqdm>`__ to
             be installed. Alternatively, an arbitrary progress bar object can
             be passed. See :ref:`custom-progressbar` for details.
+        registry_version : str or None
+            Pin the fetch to a specific registry version instead of the
+            current one. This is equivalent to using
+            :meth:`fetch_version`.
 
         Returns
         -------
@@ -566,11 +669,58 @@ class Pooch:
             local storage.
 
         """
-        self._assert_file_in_registry(fname)
+        if registry_version is not None:
+            return self.fetch_version(
+                fname,
+                version=registry_version,
+                processor=processor,
+                downloader=downloader,
+                progressbar=progressbar,
+            )
+        return self._fetch_snapshot(
+            self.registry_snapshot,
+            fname,
+            processor=processor,
+            downloader=downloader,
+            progressbar=progressbar,
+        )
 
-        url = self.get_url(fname)
-        full_path = self.abspath / fname
-        known_hash = self.registry[fname]
+    def _fetch_snapshot(
+        self,
+        snapshot: RegistrySnapshot,
+        fname: str,
+        processor: Optional[Processor] = None,
+        downloader: Optional[Downloader] = None,
+        progressbar: bool = False,
+        version_cache: bool = False,
+    ) -> str:
+        """
+        Fetch a file against one complete, immutable registry snapshot.
+
+        When *version_cache* is True, the file is resolved in a folder named
+        after the snapshot digest unless preserved content with the right hash
+        is already available. This prevents a pinned old version from reading
+        or overwriting content that belongs to a newer version.
+        """
+        if snapshot.is_retracted(fname):
+            raise RetractedFileError(self._retraction_message(snapshot, fname))
+        if fname not in snapshot.registry:
+            msg = (
+                f"File '{fname}' is not in the registry (version '{snapshot.version}')."
+            )
+            raise FileNotInRegistryError(msg)
+
+        url = snapshot.get_url(fname)
+        known_hash = snapshot.registry[fname]
+        if version_cache and snapshot.digest != self.registry_digest:
+            preserved = self._preserved_path(fname, known_hash)
+            if preserved is not None:
+                if processor is not None:
+                    return processor(str(preserved), "fetch", self)
+                return str(preserved)
+            full_path = self._version_cache_root(snapshot) / fname
+        else:
+            full_path = self.abspath / fname
         action, verb = download_action(full_path, known_hash)
 
         if action == "update" and not self.allow_updates:
@@ -580,7 +730,7 @@ class Pooch:
         if action in ("download", "update"):
             # We need to write data, so create the local data directory if it
             # doesn't already exist.
-            make_local_storage(str(self.abspath))
+            make_local_storage(str(full_path.parent))
 
             get_logger().info(
                 "%s file '%s' from '%s' to '%s'.",
@@ -588,6 +738,12 @@ class Pooch:
                 fname,
                 url,
                 str(self.abspath),
+            )
+            get_logger().debug(
+                "Fetching '%s' from registry version '%s' (%s).",
+                fname,
+                snapshot.version,
+                snapshot.digest,
             )
 
             if downloader is None:
@@ -609,14 +765,35 @@ class Pooch:
 
     def _assert_file_in_registry(self, fname: str) -> None:
         """
-        Check if a file is in the registry and raise :class:`ValueError` if
-        it's not.
-        """
-        if fname not in self.registry:
-            msg = f"File '{fname}' is not in the registry."
-            raise ValueError(msg)
+        Check if a file is declared in the current registry.
 
-    def get_url(self, fname: str) -> str:
+        Raises :class:`ValueError` if the file is absent and
+        :class:`~pooch.registry.RetractedFileError` if it was explicitly
+        retracted. These are kept separate on purpose: an absent file is
+        simply not declared by the registry, while a retracted file is
+        declared as unusable.
+        """
+        snapshot = self.registry_snapshot
+        if snapshot.is_retracted(fname):
+            raise RetractedFileError(self._retraction_message(snapshot, fname))
+        if fname not in snapshot.registry:
+            msg = (
+                f"File '{fname}' is not in the registry (version '{snapshot.version}')."
+            )
+            raise FileNotInRegistryError(msg)
+
+    @staticmethod
+    def _retraction_message(snapshot: RegistrySnapshot, fname: str) -> str:
+        reason = snapshot.reason(fname)
+        message = (
+            f"File '{fname}' was explicitly retracted from registry "
+            f"version '{snapshot.version}'."
+        )
+        if reason:
+            message += f" Reason: {reason}"
+        return message
+
+    def get_url(self, fname: str, registry_version: Optional[str] = None) -> str:
         """
         Get the full URL to download a file in the registry.
 
@@ -625,14 +802,113 @@ class Pooch:
         fname : str
             The file name (relative to the *base_url* of the remote data
             storage) to fetch from the local storage.
+        registry_version : str or None
+            Version of the registry to resolve the URL against. If None, use
+            the current registry. A retracted file raises
+            :class:`~pooch.registry.RetractedFileError` instead of a plain
+            ``ValueError``.
 
         """
-        self._assert_file_in_registry(fname)
-        return self.urls.get(fname, "".join([self.base_url, fname]))
+        return self.registry_at(registry_version).get_url(fname)
 
-    def load_registry(self, fname: PathType) -> None:
+    def registry_at(self, version: Optional[str] = None) -> RegistrySnapshot:
         """
-        Load entries from a file and add them to the registry.
+        Return a previously published registry snapshot by version.
+
+        Parameters
+        ----------
+        version : str or None
+            Version label or content digest of the snapshot. If None, return
+            the current snapshot.
+
+        Returns
+        -------
+        snapshot : RegistrySnapshot
+            The immutable snapshot. It is safe to fetch files with it while
+            the current registry continues to evolve.
+        """
+        if version is None:
+            return self.registry_snapshot
+        with self._lock:
+            for snapshot in reversed(self._snapshots):
+                if version in (snapshot.version, snapshot.digest):
+                    return snapshot
+        msg = f"Unknown registry version '{version}'."
+        raise KeyError(msg)
+
+    def fetch_version(
+        self,
+        fname: str,
+        version: str,
+        processor: Optional[Processor] = None,
+        downloader: Optional[Downloader] = None,
+        progressbar: bool = False,
+    ) -> str:
+        """
+        Fetch a file using a pinned registry version.
+
+        This resolves both the checksum and the URL against the given
+        snapshot, even if the current registry has since changed or retracted
+        the file. If content matching that snapshot has been preserved, its
+        path is returned. Otherwise the file is downloaded into a folder named
+        after the snapshot digest, never into the current version's folder.
+
+        Parameters
+        ----------
+        fname : str
+            The file name to fetch.
+        version : str
+            Version label or content digest of the registry to use.
+        processor, downloader, progressbar
+            Same as in :meth:`fetch`.
+
+        Returns
+        -------
+        full_path : str
+            The absolute path to the file in the local storage.
+        """
+        return self._fetch_snapshot(
+            self.registry_at(version),
+            fname,
+            processor=processor,
+            downloader=downloader,
+            progressbar=progressbar,
+            version_cache=True,
+        )
+
+    def _version_cache_root(self, snapshot: RegistrySnapshot) -> Path:
+        """
+        Cache folder used for content pinned to a non-current registry version.
+        """
+        folder = snapshot.digest.replace(":", "-")
+        return self.abspath / ".pooch-versions" / folder
+
+    def _preserved_path(self, fname: str, known_hash: str) -> Optional[Path]:
+        """
+        Return preserved content matching a filename and checksum, if any.
+        """
+        algorithm = hash_algorithm(known_hash)
+        digest = known_hash.rsplit(":", 1)[-1].lower()
+        with self._lock:
+            records = tuple(self._provenance)
+        for record in reversed(records):
+            if (
+                record.fname == fname
+                and record.algorithm == algorithm
+                and record.digest == digest
+                and record.path.exists()
+            ):
+                return record.path
+        return None
+
+    def load_registry(
+        self,
+        fname: PathType,
+        version: Optional[str] = None,
+        replace: bool = True,
+    ) -> RegistrySnapshot:
+        """
+        Load a complete registry file as a new registry version.
 
         Use this if you are managing many files.
 
@@ -643,44 +919,430 @@ class Pooch:
         files can be specified as a third element on the line. Line comments
         can be added and must be prepended with ``#``.
 
+        The whole file is parsed and validated before the current registry is
+        changed. If any line is invalid, the registry is left exactly as it
+        was; a failed refresh never publishes a partial registry.
+
+        A file that is simply missing from the new file is **not** considered
+        retracted. Retractions must be written explicitly, for example::
+
+            adios.csv retracted replaced by c137-v2.csv
+            !cronen.csv withdrawn after calibration error
+
+        A later entry for a retracted file revives it.
+
         Parameters
         ----------
         fname : str | fileobj
             Path (or open file object) to the registry file.
+        version : str or None
+            Optional label for the resulting snapshot. If None, the content
+            digest is used, which keeps every distinct registry traceable
+            without claiming a release label it does not have.
+        replace : bool
+            If True (default), the file becomes the complete new registry and
+            files that are not mentioned in it are removed. If False, entries
+            are merged into the current registry (the historical behaviour).
+            In neither case does an omitted file become a retraction; only
+            explicit retraction lines do.
+
+        Returns
+        -------
+        snapshot : RegistrySnapshot
+            The immutable snapshot that was published.
 
         """
         with contextlib.ExitStack() as stack:
             if hasattr(fname, "read"):
                 # It's a file object
+                source = getattr(fname, "name", "<registry file object>")
                 fin: Any = fname
             else:
                 # It's a file path
+                source = str(fname)
                 fin = stack.enter_context(open(fname, encoding="utf-8"))
 
-            for linenum, line in enumerate(fin):
-                if isinstance(line, bytes):
-                    line = line.decode("utf-8")  # noqa: PLW2901
+            directives = parse_registry(fin, source=source)
 
-                line = line.strip()  # noqa: PLW2901
-                # skip line comments
-                if line.startswith("#"):
-                    continue
+        with self._lock:
+            registry, urls, retracted, reasons = apply_directives(
+                self._registry,
+                self._urls,
+                self._retracted,
+                self._retraction_reasons,
+                directives,
+                replace=replace,
+            )
+            self._preserve_superseded_entries(registry, retracted)
+            return self._commit_registry(
+                registry,
+                urls,
+                version,
+                retracted=retracted,
+                retraction_reasons=reasons,
+                source=source,
+            )
 
-                elements = shlex.split(line)
-                if len(elements) not in [0, 2, 3]:
-                    msg = (
-                        f"Invalid entry in Pooch registry file '{fname}': "
-                        f"expected 2 or 3 elements in line {linenum + 1} but got "
-                        f"{len(elements)}. Offending entry: '{line}'"
-                    )
-                    raise OSError(msg)
-                if elements:
-                    file_name = elements[0]
-                    file_checksum = elements[1]
-                    if len(elements) == 3:
-                        file_url = elements[2]
-                        self.urls[file_name] = file_url
-                    self.registry[file_name] = file_checksum.lower()
+    def refresh_registry(
+        self,
+        source: Any,
+        version: Optional[str] = None,
+        replace: bool = True,
+    ) -> RegistrySnapshot:
+        """
+        Fetch a registry file, validate it, and publish it atomically.
+
+        *source* can be a path, a file object, or any callable that accepts a
+        file-like object (for example, a downloader or a function that writes a
+        registry to a temporary file). The current registry stays intact if
+        loading the new one raises an exception. A successful refresh publishes
+        a complete new snapshot; fetches already in progress keep using the old
+        one.
+
+        Parameters
+        ----------
+        source : path, file object, or callable
+            Where to read the new registry from. A callable is given a binary
+            file-like object and must write the complete registry into it.
+        version : str or None
+            Optional label for the new snapshot.
+        replace : bool
+            Whether the new file is the complete registry (default) or is
+            merged into the current one.
+
+        Returns
+        -------
+        snapshot : RegistrySnapshot
+            The immutable snapshot that was published.
+        """
+        if hasattr(source, "read") or isinstance(source, (str, os.PathLike)):
+            return self.load_registry(source, version=version, replace=replace)
+        if not callable(source):
+            msg = (
+                "refresh_registry requires a path, a file object, or a callable "
+                "that writes the registry."
+            )
+            raise TypeError(msg)
+        with tempfile.NamedTemporaryFile("w+b") as tmp:
+            source(tmp)
+            tmp.flush()
+            tmp.seek(0)
+            return self.load_registry(tmp, version=version, replace=replace)
+
+    def _commit_registry(
+        self,
+        registry: dict[str, str],
+        urls: dict[str, str],
+        version: Optional[str],
+        retracted: Optional[dict[str, str]] = None,
+        retraction_reasons: Optional[dict[str, str]] = None,
+        source: Optional[str] = None,
+    ) -> RegistrySnapshot:
+        """
+        Publish a complete registry state as one immutable snapshot.
+
+        The state is built completely before it replaces the visible one, so
+        an exception while constructing the snapshot leaves the old state
+        untouched.
+        """
+        if retracted is None:
+            retracted = self._retracted
+        if retraction_reasons is None:
+            retraction_reasons = self._retraction_reasons
+        snapshot = RegistrySnapshot.from_state(
+            registry=registry,
+            urls=urls,
+            retracted=retracted,
+            retraction_reasons=retraction_reasons,
+            base_url=self.base_url,
+            version=version,
+            source=source,
+        )
+        with self._lock:
+            self._registry = dict(snapshot.registry)
+            self._urls = dict(snapshot.urls)
+            self._retracted = dict(retracted)
+            self._retraction_reasons = dict(retraction_reasons)
+            self._snapshots.append(snapshot)
+        return snapshot
+
+    def _snapshot_for_current_state(self) -> RegistrySnapshot:
+        """
+        Return a snapshot reflecting the current public registry state.
+
+        Direct mutations of ``registry`` or ``urls`` are supported for
+        backwards compatibility. Recompute the snapshot when that happens. If
+        the mutation only reverts to an earlier digest, return that earlier
+        snapshot rather than publishing a duplicate version.
+        """
+        with self._lock:
+            digest = registry_digest(
+                self._registry,
+                self._urls,
+                self._retracted,
+                self._retraction_reasons,
+                base_url=self.base_url,
+            )
+            if self._snapshots and self._snapshots[-1].digest == digest:
+                return self._snapshots[-1]
+            for snapshot in reversed(self._snapshots):
+                if snapshot.digest == digest:
+                    return snapshot
+            snapshot = RegistrySnapshot.from_state(
+                registry=self._registry,
+                urls=self._urls,
+                retracted=self._retracted,
+                retraction_reasons=self._retraction_reasons,
+                base_url=self.base_url,
+            )
+            self._snapshots.append(snapshot)
+            return snapshot
+
+    def _preserve_file(
+        self,
+        fname: str,
+        path: Path,
+        algorithm: str,
+        digest: str,
+        registry_version: str,
+        known_hash: str,
+        status: str = "superseded",
+    ) -> Optional[ProvenanceRecord]:
+        """
+        Copy content into the history folder and record its provenance.
+        """
+        history_root = self._history_root()
+        destination = history_root / algorithm / digest.lower()
+        if not destination.exists():
+            (history_root / algorithm).mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(
+                dir=history_root / algorithm, prefix=".copy-", delete=False
+            ) as tmp:
+                temporary = Path(tmp.name)
+            try:
+                shutil.copy2(path, temporary)
+                os.replace(str(temporary), str(destination))
+            finally:
+                if temporary.exists():
+                    temporary.unlink()
+        for record in self._provenance:
+            if (
+                record.fname == fname
+                and record.algorithm == algorithm
+                and record.digest == digest.lower()
+                and record.registry_version == registry_version
+                and record.status == status
+            ):
+                return record
+        record = ProvenanceRecord(
+            fname=fname,
+            path=destination,
+            algorithm=algorithm,
+            digest=digest.lower(),
+            registry_version=registry_version,
+            known_hash=known_hash,
+            captured_at=datetime.now(timezone.utc).isoformat(),
+            status=status,
+        )
+        self._provenance.append(record)
+        self._write_provenance_index()
+        get_logger().info(
+            "Preserved %s content of '%s' as %s:%s (from registry version '%s').",
+            status,
+            fname,
+            algorithm,
+            digest.lower(),
+            registry_version,
+        )
+        return record
+
+    def _preserve_superseded_entries(
+        self,
+        registry: dict[str, str],
+        retracted: dict[str, str],
+    ) -> None:
+        """
+        Preserve local content for files whose declaration is about to change.
+
+        This covers both a checksum change and an explicit retraction. The
+        preserved copy carries the registry version and hash under which the
+        content was valid, so it can be identified later without being
+        mistaken for the new version.
+        """
+        current = self.registry_snapshot
+        for fname, known_hash in current.registry.items():
+            new_hash = registry.get(fname)
+            if new_hash == known_hash and fname not in retracted:
+                continue
+            if fname in retracted:
+                status = "retracted"
+            elif new_hash is None:
+                # The new registry does not declare this file. That is not a
+                # retraction, but local content still needs an identity before
+                # any later version can overwrite it.
+                status = "undeclared"
+            else:
+                status = "superseded"
+            path = self.abspath / fname
+            if not path.exists():
+                continue
+            algorithm = hash_algorithm(known_hash)
+            try:
+                digest = file_hash(str(path), alg=algorithm)
+            except (OSError, ValueError):
+                continue
+            if digest.lower() == known_hash.split(":")[-1].lower():
+                self._preserve_file(
+                    fname=fname,
+                    path=path,
+                    algorithm=algorithm,
+                    digest=digest,
+                    registry_version=current.version,
+                    known_hash=known_hash,
+                    status=status,
+                )
+
+    def _history_root(self) -> Path:
+        "Root folder for preserved content."
+        return self.abspath / ".pooch-history"
+
+    def _write_provenance_index(self) -> None:
+        "Write a human-readable index of preserved content."
+        if not self._provenance:
+            return
+        history_root = self._history_root()
+        history_root.mkdir(parents=True, exist_ok=True)
+        index = []
+        for record in self._provenance:
+            index.append(
+                {
+                    "file": record.fname,
+                    "algorithm": record.algorithm,
+                    "digest": record.digest,
+                    "preserved_path": str(
+                        record.path.relative_to(history_root).as_posix()
+                    ),
+                    "registry_version": record.registry_version,
+                    "known_hash": record.known_hash,
+                    "captured_at": record.captured_at,
+                    "status": record.status,
+                }
+            )
+        with self._lock:
+            registries = [snapshot.as_dict() for snapshot in self._snapshots]
+        payload = {"history": index, "registries": registries}
+        with tempfile.NamedTemporaryFile(
+            "w", dir=history_root, prefix=".index-", suffix=".tmp", delete=False
+        ) as tmp:
+            tmp.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+            temporary = Path(tmp.name)
+        os.replace(str(temporary), str(history_root / "index.json"))
+
+    def _load_provenance_index(self) -> None:
+        "Load preserved-content metadata from a previous session, if present."
+        index_path = self._history_root() / "index.json"
+        if not index_path.exists():
+            return
+        try:
+            payload = json.loads(index_path.read_text(encoding="utf-8"))
+            entries = payload.get("history", [])
+        except (OSError, ValueError):
+            get_logger().warning(
+                "Could not read preserved-content index '%s'.", str(index_path)
+            )
+            return
+        history_root = self._history_root()
+        for entry in entries:
+            try:
+                path = history_root / entry["preserved_path"]
+                record = ProvenanceRecord(
+                    fname=entry["file"],
+                    path=path,
+                    algorithm=entry["algorithm"],
+                    digest=entry["digest"],
+                    registry_version=entry["registry_version"],
+                    known_hash=entry["known_hash"],
+                    captured_at=entry["captured_at"],
+                    status=entry.get("status", "superseded"),
+                )
+            except (KeyError, TypeError):
+                continue
+            if path.exists():
+                self._provenance.append(record)
+        restored = []
+        for snapshot_data in payload.get("registries", []):
+            try:
+                restored.append(RegistrySnapshot.from_dict(snapshot_data))
+            except (KeyError, TypeError):
+                continue
+        with self._lock:
+            known_digests = {snapshot.digest for snapshot in self._snapshots}
+            self._snapshots[:0] = [
+                snapshot
+                for snapshot in restored
+                if snapshot.digest not in known_digests
+            ]
+
+    def retract(
+        self,
+        fname: str,
+        reason: str = "",
+        version: Optional[str] = None,
+    ) -> RegistrySnapshot:
+        """
+        Explicitly retract a file from the current registry.
+
+        Retraction is different from removal. A removed file is no longer
+        declared; a retracted file is declared as unusable and fetching it
+        raises :class:`~pooch.registry.RetractedFileError`. Local content that
+        matches the current declaration is preserved first.
+
+        Parameters
+        ----------
+        fname : str
+            The file name to retract.
+        reason : str
+            Optional explanation stored with the retraction.
+        version : str or None
+            Optional label for the resulting snapshot.
+
+        Returns
+        -------
+        snapshot : RegistrySnapshot
+            The immutable snapshot that was published.
+        """
+        with self._lock:
+            registry = dict(self._registry)
+            urls = dict(self._urls)
+            retracted = dict(self._retracted)
+            reasons = dict(self._retraction_reasons)
+            registry.pop(fname, None)
+            urls.pop(fname, None)
+            retracted[fname] = reason
+            reasons[fname] = reason
+            self._preserve_superseded_entries(registry, retracted)
+            return self._commit_registry(
+                registry,
+                urls,
+                version,
+                retracted=retracted,
+                retraction_reasons=reasons,
+            )
+
+    def is_retracted(self, fname: str) -> bool:
+        "Return True if *fname* is explicitly retracted by the current registry."
+        return self.registry_snapshot.is_retracted(fname)
+
+    @property
+    def retracted_files(self) -> list[str]:
+        "List of file names explicitly retracted by the current registry."
+        return self.registry_snapshot.retracted_files
+
+    @property
+    def registry_versions(self) -> list[str]:
+        "List of all published registry versions, oldest first."
+        with self._lock:
+            return [snapshot.version for snapshot in self._snapshots]
 
     def load_registry_from_doi(self) -> None:
         """
@@ -714,8 +1376,24 @@ class Pooch:
             **downloader.kwargs,
         )
 
-        # Call registry population for this repository
-        return repository.populate_registry(self)
+        # Populate a private mapping first so an API failure cannot leave a
+        # partially populated registry behind.
+        staging = SimpleNamespace(registry=dict(self._registry), urls=dict(self._urls))
+        repository.populate_registry(staging)
+        registry, urls, retracted, reasons = apply_directives(
+            staging.registry,
+            staging.urls,
+            self._retracted,
+            self._retraction_reasons,
+            [],
+        )
+        return self._commit_registry(
+            registry,
+            urls,
+            None,
+            retracted=retracted,
+            retraction_reasons=reasons,
+        )
 
     def is_available(self, fname: str, downloader: Optional[Downloader] = None):
         """
@@ -740,8 +1418,15 @@ class Pooch:
             True if the file is available for download. False otherwise.
 
         """
-        self._assert_file_in_registry(fname)
-        url = self.get_url(fname)
+        snapshot = self.registry_snapshot
+        if snapshot.is_retracted(fname):
+            raise RetractedFileError(self._retraction_message(snapshot, fname))
+        if fname not in snapshot.registry:
+            msg = (
+                f"File '{fname}' is not in the registry (version '{snapshot.version}')."
+            )
+            raise FileNotInRegistryError(msg)
+        url = snapshot.get_url(fname)
         if downloader is None:
             downloader = choose_downloader(url)
         try:

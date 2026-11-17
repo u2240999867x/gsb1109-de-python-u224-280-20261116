@@ -24,6 +24,18 @@ Core
     pooch.Pooch
     pooch.retrieve
 
+Registry versions
+-----------------
+
+.. autosummary::
+    :toctree: generated/
+
+    pooch.RegistrySnapshot
+    pooch.RegistryError
+    pooch.FileNotInRegistryError
+    pooch.RetractedFileError
+    pooch.ProvenanceRecord
+
 Utilities
 ---------
 

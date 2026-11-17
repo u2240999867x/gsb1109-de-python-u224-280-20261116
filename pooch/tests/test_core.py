@@ -10,18 +10,24 @@ Test the core class and factory function.
 """
 
 import hashlib
+import io
 import os
 import re
+import shutil
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import pytest
+import requests
+
+import pooch
 
 # Import the core module so that we can monkeypatch some functions
 from .. import core
 from ..core import Pooch, create, download_action, retrieve, stream_download
 from ..downloaders import FTPDownloader, HTTPDownloader
 from ..hashes import file_hash, hash_matches
+from ..registry import FileNotInRegistryError, RetractedFileError
 from ..utils import get_logger, os_cache, temporary_file
 from .utils import (
     capture_log,
@@ -519,7 +525,9 @@ def test_check_availability_on_ftp(ftpserver):
             path=DATA_DIR,
             base_url=url.replace("tiny-data.txt", ""),
             registry={
-                "tiny-data.txt": "baee0894dba14b12085eacb204284b97e362f4f3e5a5807693cc90ef415c1b2d",
+                "tiny-data.txt": (
+                    "baee0894dba14b12085eacb204284b97e362f4f3e5a5807693cc90ef415c1b2d"
+                ),
                 "doesnot_exist.zip": "jdjdjdjdflld",
             },
         )
@@ -687,3 +695,610 @@ def test_wrong_load_registry_from_doi():
     msg = "only implemented for DOIs"
     with pytest.raises(ValueError, match=msg):
         pup.load_registry_from_doi()
+
+
+def test_fetch_uses_one_registry_snapshot_while_refreshing(tmp_path):
+    """
+    A fetch must keep using the snapshot it started with.
+
+    The downloader refreshes the registry before downloading. If the fetch
+    re-read the live registry after that point, it would use the new hash and
+    fail. It must instead finish against the version it started with.
+    """
+    path = tmp_path / "cache"
+    path.mkdir()
+    source = Path(DATA_DIR) / "tiny-data.txt"
+    local = path / "tiny-data.txt"
+    local.write_text("stale content", encoding="utf-8")
+    old_hash = file_hash(str(source))
+    new_hash = hashlib.sha256(b"a completely different file").hexdigest()
+    pup = Pooch(
+        path=path,
+        base_url="some bogus URL",
+        registry={"tiny-data.txt": old_hash},
+        registry_version="2026.11.1",
+    )
+
+    def downloader(url, output_file, pooch):  # noqa: ARG001
+        pooch.load_registry(
+            io.StringIO(f"tiny-data.txt {new_hash}\n"), version="2026.11.2"
+        )
+        shutil.copyfile(str(source), output_file)
+
+    fname = pup.fetch("tiny-data.txt", downloader=downloader)
+    assert fname == str(path / "tiny-data.txt")
+    check_tiny_data(fname)
+    assert pup.registry_version == "2026.11.2"
+    assert pup.registry["tiny-data.txt"] == new_hash
+
+
+def test_fetches_use_fixed_snapshots_between_refreshes(tmp_path):
+    "Two fetches without a refresh must both use the same registry version."
+    path = tmp_path / "cache"
+    path.mkdir()
+    source = Path(DATA_DIR) / "tiny-data.txt"
+    local = path / "tiny-data.txt"
+    local.write_text("v1 content", encoding="utf-8")
+    hash_v1 = file_hash(str(source))
+    pup = Pooch(
+        path=path,
+        base_url="some bogus URL",
+        registry={"tiny-data.txt": hash_v1},
+        registry_version="v1",
+    )
+    seen = []
+
+    def downloader(url, output_file, pooch):  # noqa: ARG001
+        seen.append((pooch.registry_version, pooch.registry["tiny-data.txt"]))
+        shutil.copyfile(str(source), output_file)
+
+    pup.fetch("tiny-data.txt", downloader=downloader)
+    # The contents already match the snapshot now, so the second fetch must
+    # be a no-op that still reports the same fixed version.
+    pup.fetch("tiny-data.txt", downloader=downloader)
+    assert seen == [("v1", hash_v1)]
+    assert pup.registry_version == "v1"
+
+
+def test_failed_registry_refresh_keeps_old_registry(tmp_path):
+    "A registry file with a bad line must not publish any of its entries."
+    before = Pooch(
+        path=tmp_path,
+        base_url="",
+        registry={"tiny-data.txt": REGISTRY["tiny-data.txt"]},
+        registry_version="old",
+    )
+    with pytest.raises(OSError, match="Invalid entry in Pooch registry file"):
+        before.load_registry(
+            io.StringIO(
+                "new-file.txt " + REGISTRY["large-data.txt"] + "\n"
+                "broken line with too many elements here\n"
+            ),
+            version="broken",
+        )
+    assert before.registry == {"tiny-data.txt": REGISTRY["tiny-data.txt"]}
+    assert before.registry_version == "old"
+    assert "new-file.txt" not in before.registry
+    assert [snapshot.version for snapshot in before.registry_history] == ["old"]
+
+
+def test_refresh_registry_is_atomic(tmp_path):
+    "A refresh whose source fails must leave the current registry untouched."
+    pup = Pooch(
+        path=tmp_path,
+        base_url="",
+        registry={"tiny-data.txt": REGISTRY["tiny-data.txt"]},
+        registry_version="v1",
+    )
+
+    def failing_source(fileobj):
+        fileobj.write(b"new-file.txt " + REGISTRY["large-data.txt"].encode() + b"\n")
+        fileobj.flush()
+        message = "connection dropped"
+        raise RuntimeError(message)
+
+    with pytest.raises(RuntimeError, match="connection dropped"):
+        pup.refresh_registry(failing_source, version="v2")
+    assert pup.registry == {"tiny-data.txt": REGISTRY["tiny-data.txt"]}
+    assert pup.registry_version == "v1"
+
+
+def test_omitted_file_is_not_a_retraction(tmp_path):
+    "A file missing from a new registry is undeclared, not retracted."
+    pup = Pooch(path=tmp_path, base_url="", registry=REGISTRY, registry_version="v1")
+    pup.load_registry(
+        io.StringIO(f"tiny-data.txt {REGISTRY['tiny-data.txt']}\n"),
+        version="v2",
+    )
+    assert "large-data.txt" not in pup.registry
+    assert "large-data.txt" not in pup.registry_snapshot.retracted
+    with pytest.raises(ValueError, match="is not in the registry"):
+        pup.fetch("large-data.txt")
+    with pytest.raises(ValueError, match="is not in the registry"):
+        pup.get_url("large-data.txt")
+    with pytest.raises(ValueError, match="is not in the registry"):
+        pup._assert_file_in_registry("large-data.txt")
+
+
+def test_explicit_retraction_is_not_an_omission(tmp_path):
+    "An explicit retraction must raise a distinct error from an omission."
+    pup = Pooch(path=tmp_path, base_url="", registry=REGISTRY, registry_version="v1")
+    pup.load_registry(
+        io.StringIO(
+            f"tiny-data.txt {REGISTRY['tiny-data.txt']}\n"
+            "large-data.txt retracted replaced by a revised calibration\n"
+        ),
+        version="v2",
+    )
+    assert "large-data.txt" not in pup.registry
+    assert "large-data.txt" in pup.registry_snapshot.retracted
+    with pytest.raises(RetractedFileError, match="explicitly retracted"):
+        pup.fetch("large-data.txt")
+    with pytest.raises(RetractedFileError) as error:
+        pup.get_url("large-data.txt")
+    assert "revised calibration" in str(error.value)
+    with pytest.raises(RetractedFileError, match="explicitly retracted"):
+        pup._assert_file_in_registry("large-data.txt")
+    assert issubclass(RetractedFileError, ValueError)
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "large-data.txt retracted because",
+        "!large-data.txt because",
+        "! large-data.txt because",
+        "- large-data.txt because",
+        "withdrawn large-data.txt because",
+        f"large-data.txt {REGISTRY['large-data.txt']} retracted because",
+    ],
+)
+def test_retraction_syntaxes(tmp_path, line):
+    "All supported explicit retraction forms must parse as retractions."
+    pup = Pooch(path=tmp_path, base_url="", registry=REGISTRY)
+    pup.load_registry(io.StringIO(line + "\n"))
+    assert "large-data.txt" in pup.registry_snapshot.retracted
+    assert pup.registry_snapshot.reason("large-data.txt") == "because"
+
+
+def test_retracted_file_can_be_revived(tmp_path):
+    "A later entry for a retracted file must declare it again."
+    pup = Pooch(path=tmp_path, base_url="", registry=REGISTRY)
+    pup.load_registry(io.StringIO("large-data.txt retracted mistaken identity\n"))
+    assert "large-data.txt" in pup.registry_snapshot.retracted
+    pup.load_registry(io.StringIO(f"large-data.txt {REGISTRY['large-data.txt']}\n"))
+    assert "large-data.txt" in pup.registry
+    assert "large-data.txt" not in pup.registry_snapshot.retracted
+
+
+def test_registry_replacement_removes_old_entries(tmp_path):
+    "A replacing refresh publishes a complete, not merged, registry."
+    pup = Pooch(
+        path=tmp_path,
+        base_url="",
+        registry={"a.txt": "sha256:aa", "b.txt": "sha256:bb"},
+        urls={"a.txt": "https://example.com/a.txt"},
+        registry_version="v1",
+    )
+    pup.load_registry(io.StringIO("c.txt sha256:cc\n"), version="v2")
+    assert pup.registry == {"c.txt": "sha256:cc"}
+    assert pup.urls == {}
+
+
+def test_registry_digest_is_content_addressed(tmp_path):
+    "The same registry content must have the same digest regardless of order."
+    first = Pooch(
+        path=tmp_path,
+        base_url="",
+        registry={"a.txt": "sha256:aa", "b.txt": "sha256:bb"},
+    )
+    second = Pooch(
+        path=tmp_path,
+        base_url="",
+        registry={"b.txt": "sha256:bb", "a.txt": "sha256:aa"},
+    )
+    assert first.registry_digest == second.registry_digest
+    first.load_registry(io.StringIO("a.txt sha256:changed\n"))
+    assert first.registry_digest != second.registry_digest
+
+
+def test_old_registry_version_remains_fetchable(tmp_path):
+    "A prior snapshot must stay usable and keep its own checksum and URL."
+    path = tmp_path / "cache"
+    path.mkdir()
+    source = Path(DATA_DIR) / "tiny-data.txt"
+    shutil.copyfile(str(source), str(path / "tiny-data.txt"))
+    hash_v1 = file_hash(str(source))
+    pup = Pooch(
+        path=path,
+        base_url="",
+        urls={"tiny-data.txt": "https://old.example.com/tiny-data.txt"},
+        registry={"tiny-data.txt": hash_v1},
+        registry_version="v1",
+    )
+    pup.load_registry(
+        io.StringIO(f"tiny-data.txt {REGISTRY['large-data.txt']}\n"),
+        version="v2",
+    )
+    preserved = pup.fetch_version("tiny-data.txt", "v1")
+    assert Path(preserved).read_text(encoding="utf-8") == source.read_text(
+        encoding="utf-8"
+    )
+    assert Path(preserved) != path / "tiny-data.txt"
+    old = pup.registry_at("v1")
+    assert old.registry["tiny-data.txt"] == hash_v1
+    assert old.get_url("tiny-data.txt") == "https://old.example.com/tiny-data.txt"
+
+
+def test_pinned_fetch_can_read_retracted_snapshot(tmp_path):
+    "Pinning an earlier version must keep working after a retraction."
+    path = tmp_path / "cache"
+    path.mkdir()
+    source = Path(DATA_DIR) / "tiny-data.txt"
+    shutil.copyfile(str(source), str(path / "tiny-data.txt"))
+    hash_v1 = file_hash(str(source))
+    pup = Pooch(
+        path=path,
+        base_url="",
+        registry={"tiny-data.txt": hash_v1},
+        registry_version="v1",
+    )
+    pup.retract("tiny-data.txt", reason="bad calibration")
+    preserved = pup.fetch_version("tiny-data.txt", "v1")
+    assert Path(preserved).read_text(encoding="utf-8") == source.read_text(
+        encoding="utf-8"
+    )
+    with pytest.raises(RetractedFileError, match="bad calibration"):
+        pup.fetch("tiny-data.txt")
+
+
+def test_superseded_content_is_preserved_with_provenance(tmp_path):
+    "Changing a checksum must keep the old content under a stable identity."
+    path = tmp_path / "cache"
+    path.mkdir()
+    old_content = b"old version of the data\n"
+    local = path / "tiny-data.txt"
+    local.write_bytes(old_content)
+    old_hash = file_hash(str(local))
+    omitted_content = b"content that will be left undeclared\n"
+    omitted = path / "other.txt"
+    omitted.write_bytes(omitted_content)
+    omitted_hash = file_hash(str(omitted))
+    pup = Pooch(
+        path=path,
+        base_url="",
+        registry={"tiny-data.txt": old_hash, "other.txt": omitted_hash},
+        registry_version="v1",
+    )
+    pup.load_registry(
+        io.StringIO(f"tiny-data.txt {REGISTRY['tiny-data.txt']}\n"),
+        version="v2",
+    )
+    records = pup.provenance
+    by_file = {record.fname: record for record in records}
+    record = by_file["tiny-data.txt"]
+    assert record.registry_version == "v1"
+    assert record.status == "superseded"
+    assert record.known_hash == old_hash
+    assert record.path.read_bytes() == old_content
+    assert record.path.name == old_hash
+    index = path / ".pooch-history" / "index.json"
+    assert index.exists()
+    index_text = index.read_text(encoding="utf-8")
+    assert '"registry_version": "v1"' in index_text
+    assert '"status": "superseded"' in index_text
+    assert by_file["other.txt"].status == "undeclared"
+    assert by_file["other.txt"].path.read_bytes() == omitted_content
+
+
+def test_retraction_preserves_local_content(tmp_path):
+    "Retracting a file must preserve matching local content and metadata."
+    path = tmp_path / "cache"
+    path.mkdir()
+    content = b"content that will be withdrawn\n"
+    local = path / "data.txt"
+    local.write_bytes(content)
+    known_hash = file_hash(str(local))
+    pup = Pooch(
+        path=path,
+        base_url="",
+        registry={"data.txt": known_hash},
+        registry_version="v1",
+    )
+    pup.retract("data.txt", reason="wrong instrument")
+    assert pup.registry_snapshot.retracted == frozenset({"data.txt"})
+    assert pup.registry_snapshot.reason("data.txt") == "wrong instrument"
+    assert len(pup.provenance) == 1
+    assert pup.provenance[0].status == "retracted"
+    assert pup.provenance[0].path.read_bytes() == content
+    with pytest.raises(RetractedFileError, match="wrong instrument"):
+        pup.fetch("data.txt")
+
+
+def test_refresh_registry_success(tmp_path):
+    "A successful refresh must publish a complete new snapshot."
+    pup = Pooch(
+        path=tmp_path,
+        base_url="",
+        registry={"old.txt": "sha256:old"},
+        registry_version="v1",
+    )
+
+    def source(fileobj):
+        fileobj.write(f"tiny-data.txt {REGISTRY['tiny-data.txt']}\n".encode())
+
+    snapshot = pup.refresh_registry(source, version="v2")
+    assert snapshot.version == "v2"
+    assert pup.registry == {"tiny-data.txt": REGISTRY["tiny-data.txt"]}
+    assert "old.txt" not in pup.registry
+    assert [item.version for item in pup.registry_history] == ["v1", "v2"]
+
+
+def test_registry_version_defaults_to_digest(tmp_path):
+    "Without an explicit label, the digest must be the version."
+    pup = Pooch(path=tmp_path, base_url="", registry={"a.txt": "sha256:aa"})
+    assert pup.registry_version == pup.registry_digest
+    assert pup.registry_version.startswith("sha256:")
+
+
+def test_load_registry_can_merge_for_compatibility(tmp_path):
+    "Merging must remain available for callers that rely on it."
+    pup = Pooch(path=tmp_path, base_url="", registry={"a.txt": "sha256:aa"})
+    pup.load_registry(io.StringIO("b.txt sha256:bb\n"), replace=False)
+    assert pup.registry == {"a.txt": "sha256:aa", "b.txt": "sha256:bb"}
+
+
+def test_registry_error_types_are_distinct_but_backwards_compatible(tmp_path):
+    "Absence and retraction must be distinguishable and still ValueErrors."
+    pup = Pooch(
+        path=tmp_path,
+        base_url="",
+        registry={"a.txt": "sha256:aa"},
+        registry_version="v1",
+    )
+    pup.load_registry(io.StringIO("b.txt retracted gone\n"), version="v2")
+    assert issubclass(FileNotInRegistryError, ValueError)
+    assert issubclass(RetractedFileError, ValueError)
+    assert not issubclass(RetractedFileError, FileNotInRegistryError)
+    with pytest.raises(FileNotInRegistryError):
+        pup.fetch("a.txt")
+    with pytest.raises(RetractedFileError):
+        pup.fetch("b.txt")
+    assert type(pup.fetch.__self__) is Pooch
+
+
+def test_api_errors_are_exposed_at_top_level():
+    "The new registry errors and snapshot type must be importable from pooch."
+    assert pooch.RegistryError is not None
+    assert pooch.RegistrySnapshot is not None
+    assert pooch.ProvenanceRecord is not None
+
+
+def test_pooch_repr_contains_registry_version(tmp_path):
+    "The repr must identify which registry version an instance is using."
+    pup = Pooch(path=tmp_path, base_url="", registry={}, registry_version="v9")
+    assert "registry_version='v9'" in repr(pup)
+
+
+def test_provenance_is_not_created_for_unchanged_content(tmp_path):
+    "Reloading the same registry must not create spurious history records."
+    path = tmp_path / "cache"
+    path.mkdir()
+    content = b"stable content\n"
+    local = path / "a.txt"
+    local.write_bytes(content)
+    known_hash = file_hash(str(local))
+    pup = Pooch(
+        path=path,
+        base_url="",
+        registry={"a.txt": known_hash},
+        registry_version="v1",
+    )
+    pup.load_registry(io.StringIO(f"a.txt {known_hash}\n"), version="v2")
+    assert pup.provenance == ()
+    assert local.read_bytes() == content
+
+
+def test_provenance_digest_is_shared_for_identical_content(tmp_path):
+    "Identical old content stored under two names must share one blob."
+    path = tmp_path / "cache"
+    path.mkdir()
+    content = b"same bytes\n"
+    for name in ("a.txt", "b.txt"):
+        (path / name).write_bytes(content)
+    known_hash = file_hash(str(path / "a.txt"))
+    pup = Pooch(
+        path=path,
+        base_url="",
+        registry={"a.txt": known_hash, "b.txt": known_hash},
+        registry_version="v1",
+    )
+    pup.load_registry(io.StringIO("c.txt sha256:cc\n"), version="v2")
+    records = {record.fname: record for record in pup.provenance}
+    assert records["a.txt"].path == records["b.txt"].path
+    assert records["a.txt"].path.read_bytes() == content
+
+
+def test_load_registry_accepts_binary_file_object(tmp_path):
+    "Binary registry files must still be parsed and published atomically."
+    pup = Pooch(path=tmp_path, base_url="", registry={"old.txt": "sha256:old"})
+    data = io.BytesIO(b"new.txt sha256:new\n")
+    snapshot = pup.load_registry(data, version="v2")
+    assert snapshot.version == "v2"
+    assert pup.registry == {"new.txt": "sha256:new"}
+
+
+def test_load_registry_rejects_empty_retraction(tmp_path):
+    "A retraction without a file name must fail without changing state."
+    pup = Pooch(
+        path=tmp_path,
+        base_url="",
+        registry={"a.txt": "sha256:aa"},
+        registry_version="v1",
+    )
+    with pytest.raises(OSError, match="missing a file name"):
+        pup.load_registry(io.StringIO("!\n"), version="bad")
+    assert pup.registry == {"a.txt": "sha256:aa"}
+    assert pup.registry_version == "v1"
+
+
+def test_pinned_version_download_uses_isolated_folder(tmp_path):
+    "A pinned fetch that must download must not write over current content."
+    path = tmp_path / "cache"
+    path.mkdir()
+    pup = Pooch(
+        path=path,
+        base_url="",
+        urls={"tiny-data.txt": "https://example.invalid/tiny-data.txt"},
+        registry={"tiny-data.txt": "sha256:" + "0" * 64},
+        registry_version="v1",
+    )
+    pup.load_registry(io.StringIO(f"other.txt {REGISTRY['large-data.txt']}\n"))
+    target = path / "tiny-data.txt"
+    target.write_bytes(b"current version content")
+    before = target.read_bytes()
+    with pytest.raises(requests.exceptions.ConnectionError):
+        pup.fetch("tiny-data.txt", registry_version="v1")
+    assert target.read_bytes() == before
+    version_folder = pup._version_cache_root(pup.registry_at("v1"))
+    assert version_folder.name.startswith("sha256-")
+    assert version_folder.parent.name == ".pooch-versions"
+
+
+def test_fetch_rejects_unknown_registry_version(tmp_path):
+    "Pinning a version that was never published must fail clearly."
+    pup = Pooch(path=tmp_path, base_url="", registry={"a.txt": "sha256:aa"})
+    with pytest.raises(KeyError, match="Unknown registry version"):
+        pup.fetch("a.txt", registry_version="does-not-exist")
+
+
+def test_registry_versions_listing_and_retraction_queries(tmp_path):
+    "The public helpers must report history and retraction state."
+    pup = Pooch(
+        path=tmp_path,
+        base_url="",
+        registry={"a.txt": "sha256:aa"},
+        registry_version="v1",
+    )
+    pup.retract("a.txt", reason="broke", version="v2")
+    assert pup.registry_versions == ["v1", "v2"]
+    assert pup.retracted_files == ["a.txt"]
+    assert pup.is_retracted("a.txt")
+    assert not pup.is_retracted("b.txt")
+
+
+def test_provenance_survives_a_new_pooch_instance(tmp_path):
+    "Preserved content must remain identifiable after a process restart."
+    path = tmp_path / "cache"
+    path.mkdir()
+    first = path / "tiny-data.txt"
+    first.write_bytes(b"first generation\n")
+    first_hash = file_hash(str(first))
+    pup = Pooch(
+        path=path,
+        base_url="",
+        registry={"tiny-data.txt": first_hash},
+        registry_version="v1",
+    )
+    pup.load_registry(
+        io.StringIO(f"tiny-data.txt {REGISTRY['tiny-data.txt']}\n"), version="v2"
+    )
+    preserved = pup.provenance[0].path
+    assert preserved.exists()
+
+    restarted = Pooch(
+        path=path,
+        base_url="",
+        registry={"tiny-data.txt": REGISTRY["tiny-data.txt"]},
+        registry_version="v2",
+    )
+    assert len(restarted.provenance) == 1
+    record = restarted.provenance[0]
+    assert record.fname == "tiny-data.txt"
+    assert record.status == "superseded"
+    assert record.registry_version == "v1"
+    assert record.path == preserved
+    assert preserved.read_bytes() == b"first generation\n"
+
+
+def test_is_available_distinguishes_retraction(tmp_path):
+    "Availability checks must not report a retracted file as simply missing."
+    pup = Pooch(
+        path=tmp_path,
+        base_url="",
+        registry={"a.txt": "sha256:aa"},
+        registry_version="v1",
+    )
+    pup.retract("a.txt", reason="poisoned")
+    with pytest.raises(RetractedFileError, match="poisoned"):
+        pup.is_available("a.txt")
+    with pytest.raises(FileNotInRegistryError):
+        pup.is_available("never-declared.txt")
+
+
+def test_load_registry_from_doi_failure_is_atomic(tmp_path, monkeypatch):
+    "A repository API failure must not publish a partial DOI registry."
+    pup = Pooch(
+        path=tmp_path,
+        base_url="doi:10.0000/example",
+        registry={"a.txt": "sha256:aa"},
+        registry_version="v1",
+    )
+
+    class Repository:
+        def populate_registry(self, pooch):
+            pooch.registry["partial.txt"] = "sha256:bb"
+            message = "API failed mid-listing"
+            raise RuntimeError(message)
+
+    def make_repository(*args, **kwargs):  # noqa: ARG001
+        return Repository()
+
+    class Downloader:
+        def __init__(self):
+            self.headers = {}
+            self.timeout = 1
+            self.kwargs = {}
+
+    def make_downloader(*args, **kwargs):  # noqa: ARG001
+        return Downloader()
+
+    monkeypatch.setattr(core, "doi_to_repository", make_repository)
+    monkeypatch.setattr(core, "choose_downloader", make_downloader)
+    monkeypatch.setattr(core, "DOIDownloader", Downloader)
+    with pytest.raises(RuntimeError, match="mid-listing"):
+        pup.load_registry_from_doi()
+    assert pup.registry == {"a.txt": "sha256:aa"}
+    assert pup.registry_version == "v1"
+
+
+def test_registry_versions_survive_a_new_pooch_instance(tmp_path):
+    "A restart must be able to resolve and fetch a previously preserved version."
+    path = tmp_path / "cache"
+    path.mkdir()
+    first = path / "tiny-data.txt"
+    first.write_bytes(b"first generation\n")
+    first_hash = file_hash(str(first))
+    pup = Pooch(
+        path=path,
+        base_url="",
+        registry={"tiny-data.txt": first_hash},
+        registry_version="v1",
+    )
+    pup.load_registry(
+        io.StringIO(f"tiny-data.txt {REGISTRY['tiny-data.txt']}\n"), version="v2"
+    )
+    preserved = pup.provenance[0].path
+
+    restarted = Pooch(
+        path=path,
+        base_url="",
+        registry={"tiny-data.txt": REGISTRY["tiny-data.txt"]},
+        registry_version="v2",
+    )
+    assert restarted.registry_versions == ["v1", "v2"]
+    old = restarted.registry_at("v1")
+    assert old.registry["tiny-data.txt"] == first_hash
+    fetched = restarted.fetch_version("tiny-data.txt", "v1")
+    assert Path(fetched) == preserved
+    assert Path(fetched).read_bytes() == b"first generation\n"

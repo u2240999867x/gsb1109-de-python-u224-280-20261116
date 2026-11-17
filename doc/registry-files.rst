@@ -177,3 +177,121 @@ after downloading each data file through :func:`pooch.retrieve`:
     know the file hashes before hand). Only do this for trusted data sources
     and over a secure connection. If you have access to file hashes/checksums,
     **we highly recommend using them** to set the ``known_hash`` argument.
+
+
+Versioned registries
+--------------------
+
+A registry is treated as a **versioned document**.  Each time you load one, a
+complete, immutable snapshot is published.  A call to
+:meth:`pooch.Pooch.fetch` takes one snapshot before it starts and uses that
+snapshot for the whole operation, including the checksum and the download URL.
+Refreshing the registry from another thread or process therefore cannot change
+the meaning of a fetch that is already running.
+
+.. code:: python
+
+    POOCH = pooch.create(
+        path=pooch.os_cache("plumbus"),
+        base_url="https://github.com/rick/plumbus/raw/{version}/data/",
+        version=version,
+        registry=None,
+    )
+    # A loaded registry is a complete version, not a patch to the old one.
+    POOCH.load_registry(registry_file, version="2026.11.1")
+
+    print(POOCH.registry_version)  # 2026.11.1
+    print(POOCH.registry_digest)    # sha256:... (content identity)
+
+If you do not supply a version label, the content digest becomes the version.
+This gives every distinct registry a traceable identity without claiming a
+release number it does not have.  The digest ignores comments and line order
+but changes whenever a checksum, URL, or retraction changes.
+
+Previous snapshots remain available through
+:attr:`pooch.Pooch.registry_history` and :attr:`pooch.Pooch.registry_versions`
+and can be used explicitly:
+
+.. code:: python
+
+    # Fetch with the checksum and URLs of the 2026.11.1 registry
+    path = POOCH.fetch_version("c137.csv", version="2026.11.1")
+
+    # Inspect the snapshot without changing the current one
+    old = POOCH.registry_at("2026.11.1")
+    print(old.files)
+
+Refreshing a registry is **atomic**.  The complete new file is parsed and
+validated first; if anything is wrong, the current registry is left untouched.
+A failed refresh never publishes a partial registry:
+
+.. code:: python
+
+    def download_registry(fileobj):
+        response = requests.get(registry_url, timeout=30)
+        response.raise_for_status()
+        fileobj.write(response.content)
+
+    try:
+        POOCH.refresh_registry(download_registry, version="2026.12.0")
+    except OSError:
+        # The old registry is still intact and still in use.
+        pass
+
+:meth:`~pooch.Pooch.load_registry` treats the file as a complete new registry
+by default.  Pass ``replace=False`` when the file only adds entries to the
+existing registry.
+
+Retractions are explicit
+------------------------
+
+A file that is **missing** from a new registry is simply no longer declared.
+That is not the same as a file that has been **retracted**.  A retraction means
+that the registry explicitly declares the file as withdrawn, and trying to
+fetch it raises :class:`pooch.RetractedFileError` instead of the
+:class:`pooch.FileNotInRegistryError` used for an ordinary omission.  Both are
+subclasses of :class:`ValueError`.
+
+Retractions are written on their own line, using any of these forms:
+
+.. code-block:: none
+
+    adios.csv retracted replaced by c137-v2.csv
+    adios.csv withdrawn because of a calibration error
+    !adios.csv revoked
+    - adios.csv superseded
+
+A later normal entry for the same file revives it:
+
+.. code-block:: none
+
+    adios.csv 19uheidhlkjdwhoiwuhc0uhcwljchw9ochwochw89dcgw9dcgwc
+
+You can also retract a file programmatically:
+
+.. code:: python
+
+    POOCH.retract("cronen.csv", reason="replaced by the revised dataset")
+
+Preserving old content
+----------------------
+
+When a registry refresh changes a checksum, omits a declared file, or retracts
+one, local content that matches the **old** declaration is copied into a
+content-addressed history folder before it can be overwritten:
+
+.. code-block:: none
+
+    ~/.cache/plumbus/v1.0/.pooch-history/
+        index.json
+        sha256/
+            <digest-of-old-content>
+
+Each entry in ``index.json`` records the original file name, the old checksum,
+the registry version under which it was valid, when it was preserved, and why
+it was superseded (``superseded``, ``undeclared``, or ``retracted``).  Old
+content therefore keeps a stable, traceable identity without being presented
+as the content of the new registry.  The same records are available in Python
+through :attr:`pooch.Pooch.provenance`.  The index and the registry versions it
+references are loaded again automatically, so a new Python process can still
+resolve ``fetch_version`` against an earlier snapshot.
