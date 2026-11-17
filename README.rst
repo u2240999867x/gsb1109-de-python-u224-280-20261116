@@ -69,6 +69,8 @@ Key Features
    (``"August 14, 2015 EST"``, ``"21 July 2013 10:15 pm +0500"``...)
 -  `Search dates <#search-for-dates-in-longer-chunks-of-text>`__
    in longer texts.
+-  Assign `announcement date roles <#announcement-date-roles>`__
+   (publication, effective and referenced historical dates).
 -  Time span detection for expressions like "past month", "last week".
 
 Online demo
@@ -309,6 +311,45 @@ error-prone on short text. If no date is found, ``None`` is returned:
 See the `API reference
 <https://dateparser.readthedocs.io/en/latest/dateparser.html#dateparser.search.search_dates>`__
 for other parameters, such as ``strategy``.
+
+Announcement Date Roles
+-----------------------
+
+An announcement can name several dates at once: when it was published, when
+the measure takes effect and an earlier document it references.
+``find_date_roles`` finds each date, keeps its position and the word that
+argues for its role, then assigns one date per role only when the choice
+satisfies the time relations of a single document.
+
+.. code:: python
+
+    >>> from dateparser.search import find_date_roles, DateRole
+    >>> result = find_date_roles(
+    ...     "Published on 10 January 2025. Effective 01 March 2025. "
+    ...     "As amended on 01 December 2024.",
+    ...     languages=["en"],
+    ... )
+    >>> result.chosen()[DateRole.PUBLICATION].date
+    datetime.datetime(2025, 1, 10, 0, 0)
+    >>> result.chosen()[DateRole.EFFECTIVE].date
+    datetime.datetime(2025, 3, 1, 0, 0)
+    >>> result.chosen()[DateRole.HISTORICAL].date
+    datetime.datetime(2024, 12, 1, 0, 0)
+
+Use ``extract_role_candidates`` for the raw evidence: each candidate carries
+its ``[start, end)`` position and one ``RoleEvidence`` per nearby role word.
+A role with more than one candidate, or a single fragment that two role words
+both point at, is left in ``ambiguous_roles`` rather than guessed, and a
+combination that violates the ordering (for example an effective date before
+publication) sets ``consistent`` to ``False``.
+
+.. code:: python
+
+    >>> ambiguous = find_date_roles(
+    ...     "Published and effective 10 January 2025.", languages=["en"]
+    ... )
+    >>> sorted(role.value for role in ambiguous.ambiguous_roles)
+    ['effective', 'publication']
 
 Time Span Detection
 -------------------

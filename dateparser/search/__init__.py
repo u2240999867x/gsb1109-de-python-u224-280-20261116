@@ -3,6 +3,15 @@ from datetime import datetime
 from typing import Any
 
 from dateparser.conf import Settings
+from dateparser.search.date_roles import DateRole as DateRole
+from dateparser.search.date_roles import RoleAssignment as RoleAssignment
+from dateparser.search.date_roles import RoleCandidate as RoleCandidate
+from dateparser.search.date_roles import RoleEvidence as RoleEvidence
+from dateparser.search.date_roles import assign_roles as assign_roles
+from dateparser.search.date_roles import (
+    extract_role_candidates as extract_role_candidates,
+)
+from dateparser.search.date_roles import find_date_roles as find_date_roles
 from dateparser.search.search import DateSearchWithDetection
 
 _search_with_detection = DateSearchWithDetection()
