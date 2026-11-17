@@ -1,0 +1,380 @@
+{
+  "legacy_registry": "pooch/tests/data/registry.txt",
+  "cache_roots": [
+    "pooch/tests/data",
+    "data"
+  ],
+  "algorithms": {
+    "legacy": "sha256",
+    "new": "sha512"
+  },
+  "policy": "new credentials are computed from the cached bytes after the legacy credential is verified against those same bytes; they are never derived from the legacy digest",
+  "summary": {
+    "total": 10,
+    "published": 10,
+    "pending": 0
+  },
+  "entries": [
+    {
+      "name": "subdir/tiny-data.txt",
+      "line_number": 1,
+      "legacy_credential": "baee0894dba14b12085eacb204284b97e362f4f3e5a5807693cc90ef415c1b2d",
+      "url": null,
+      "status": "published",
+      "reason": null,
+      "legacy_algorithm": "sha256",
+      "legacy_digest": "baee0894dba14b12085eacb204284b97e362f4f3e5a5807693cc90ef415c1b2d",
+      "new_credential": "sha512:e3117ce3572046c0cff33f31d112c95973d372744e27f44d0b058ac13e9bf78e5f94c1eaabe311261e6a95736bff92223fcb2407e128d120252c790b4c44cd39",
+      "new_algorithm": "sha512",
+      "new_digest": "e3117ce3572046c0cff33f31d112c95973d372744e27f44d0b058ac13e9bf78e5f94c1eaabe311261e6a95736bff92223fcb2407e128d120252c790b4c44cd39",
+      "size": 59,
+      "cache_copies": [
+        {
+          "root": "data",
+          "relative_path": "subdir/tiny-data.txt",
+          "absolute_path": "/Users/guo/Documents/GSB/1109/batches/de-u224-20261116/control/questions/GSB1109-20261116-U224-DE-PY-087/workspace/data/subdir/tiny-data.txt",
+          "size": 59,
+          "legacy_digest": "baee0894dba14b12085eacb204284b97e362f4f3e5a5807693cc90ef415c1b2d",
+          "matches_legacy": true
+        }
+      ]
+    },
+    {
+      "name": "tiny-data.txt",
+      "line_number": 2,
+      "legacy_credential": "baee0894dba14b12085eacb204284b97e362f4f3e5a5807693cc90ef415c1b2d",
+      "url": null,
+      "status": "published",
+      "reason": null,
+      "legacy_algorithm": "sha256",
+      "legacy_digest": "baee0894dba14b12085eacb204284b97e362f4f3e5a5807693cc90ef415c1b2d",
+      "new_credential": "sha512:e3117ce3572046c0cff33f31d112c95973d372744e27f44d0b058ac13e9bf78e5f94c1eaabe311261e6a95736bff92223fcb2407e128d120252c790b4c44cd39",
+      "new_algorithm": "sha512",
+      "new_digest": "e3117ce3572046c0cff33f31d112c95973d372744e27f44d0b058ac13e9bf78e5f94c1eaabe311261e6a95736bff92223fcb2407e128d120252c790b4c44cd39",
+      "size": 59,
+      "cache_copies": [
+        {
+          "root": "pooch/tests/data",
+          "relative_path": "tiny-data.txt",
+          "absolute_path": "/Users/guo/Documents/GSB/1109/batches/de-u224-20261116/control/questions/GSB1109-20261116-U224-DE-PY-087/workspace/pooch/tests/data/tiny-data.txt",
+          "size": 59,
+          "legacy_digest": "baee0894dba14b12085eacb204284b97e362f4f3e5a5807693cc90ef415c1b2d",
+          "matches_legacy": true
+        },
+        {
+          "root": "data",
+          "relative_path": "tiny-data.txt",
+          "absolute_path": "/Users/guo/Documents/GSB/1109/batches/de-u224-20261116/control/questions/GSB1109-20261116-U224-DE-PY-087/workspace/data/tiny-data.txt",
+          "size": 59,
+          "legacy_digest": "baee0894dba14b12085eacb204284b97e362f4f3e5a5807693cc90ef415c1b2d",
+          "matches_legacy": true
+        }
+      ]
+    },
+    {
+      "name": "large-data.txt",
+      "line_number": 3,
+      "legacy_credential": "98de171fb320da82982e6bf0f3994189fff4b42b23328769afce12bdd340444a",
+      "url": null,
+      "status": "published",
+      "reason": null,
+      "legacy_algorithm": "sha256",
+      "legacy_digest": "98de171fb320da82982e6bf0f3994189fff4b42b23328769afce12bdd340444a",
+      "new_credential": "sha512:06a6cba82e69daca0062fcbba39a374f6e695d24bcbf4044579da1b556700d1f25bd033ea96960a604e7c50137f40ccec64d8dfdfd2741b87378f816cb3b05b0",
+      "new_algorithm": "sha512",
+      "new_digest": "06a6cba82e69daca0062fcbba39a374f6e695d24bcbf4044579da1b556700d1f25bd033ea96960a604e7c50137f40ccec64d8dfdfd2741b87378f816cb3b05b0",
+      "size": 102077,
+      "cache_copies": [
+        {
+          "root": "pooch/tests/data",
+          "relative_path": "large-data.txt",
+          "absolute_path": "/Users/guo/Documents/GSB/1109/batches/de-u224-20261116/control/questions/GSB1109-20261116-U224-DE-PY-087/workspace/pooch/tests/data/large-data.txt",
+          "size": 102077,
+          "legacy_digest": "98de171fb320da82982e6bf0f3994189fff4b42b23328769afce12bdd340444a",
+          "matches_legacy": true
+        }
+      ]
+    },
+    {
+      "name": "tiny-data.zip",
+      "line_number": 4,
+      "legacy_credential": "0d49e94f07bc1866ec57e7fd1b93a351fba36842ec9b13dd50bf94e8dfa35cbb",
+      "url": null,
+      "status": "published",
+      "reason": null,
+      "legacy_algorithm": "sha256",
+      "legacy_digest": "0d49e94f07bc1866ec57e7fd1b93a351fba36842ec9b13dd50bf94e8dfa35cbb",
+      "new_credential": "sha512:2051706c41fd5818ae72b547e60dfc92d84455f2d22272397b8bfd04491d01d44e1919bb3b7e2a7ee96c254feafba57d36a133028067bcfa9e0323bc5ea274b2",
+      "new_algorithm": "sha512",
+      "new_digest": "2051706c41fd5818ae72b547e60dfc92d84455f2d22272397b8bfd04491d01d44e1919bb3b7e2a7ee96c254feafba57d36a133028067bcfa9e0323bc5ea274b2",
+      "size": 235,
+      "cache_copies": [
+        {
+          "root": "pooch/tests/data",
+          "relative_path": "tiny-data.zip",
+          "absolute_path": "/Users/guo/Documents/GSB/1109/batches/de-u224-20261116/control/questions/GSB1109-20261116-U224-DE-PY-087/workspace/pooch/tests/data/tiny-data.zip",
+          "size": 235,
+          "legacy_digest": "0d49e94f07bc1866ec57e7fd1b93a351fba36842ec9b13dd50bf94e8dfa35cbb",
+          "matches_legacy": true
+        }
+      ]
+    },
+    {
+      "name": "store.zip",
+      "line_number": 6,
+      "legacy_credential": "0498D2A001E71051BBD2ACD2346F38DA7CBD345A633CB7BF0F8A20938714B51A",
+      "url": null,
+      "status": "published",
+      "reason": null,
+      "legacy_algorithm": "sha256",
+      "legacy_digest": "0498d2a001e71051bbd2acd2346f38da7cbd345a633cb7bf0f8a20938714b51a",
+      "new_credential": "sha512:9cec48d2b636cb46637f6f36ab7f1299bc2f9b20f44953579e43169d5a4007555e43bec4580054ef3a874c39fa0f3905cb6c9220f46a7c5764beb5880fa44538",
+      "new_algorithm": "sha512",
+      "new_digest": "9cec48d2b636cb46637f6f36ab7f1299bc2f9b20f44953579e43169d5a4007555e43bec4580054ef3a874c39fa0f3905cb6c9220f46a7c5764beb5880fa44538",
+      "size": 780,
+      "cache_copies": [
+        {
+          "root": "pooch/tests/data",
+          "relative_path": "store.zip",
+          "absolute_path": "/Users/guo/Documents/GSB/1109/batches/de-u224-20261116/control/questions/GSB1109-20261116-U224-DE-PY-087/workspace/pooch/tests/data/store.zip",
+          "size": 780,
+          "legacy_digest": "0498d2a001e71051bbd2acd2346f38da7cbd345a633cb7bf0f8a20938714b51a",
+          "matches_legacy": true
+        },
+        {
+          "root": "data",
+          "relative_path": "store.zip",
+          "absolute_path": "/Users/guo/Documents/GSB/1109/batches/de-u224-20261116/control/questions/GSB1109-20261116-U224-DE-PY-087/workspace/data/store.zip",
+          "size": 780,
+          "legacy_digest": "0498d2a001e71051bbd2acd2346f38da7cbd345a633cb7bf0f8a20938714b51a",
+          "matches_legacy": true
+        }
+      ]
+    },
+    {
+      "name": "tiny-data.tar.gz",
+      "line_number": 7,
+      "legacy_credential": "41503f083814f43a01a8e9a30c28d7a9fe96839a99727a7fdd0acf7cd5bab63b",
+      "url": null,
+      "status": "published",
+      "reason": null,
+      "legacy_algorithm": "sha256",
+      "legacy_digest": "41503f083814f43a01a8e9a30c28d7a9fe96839a99727a7fdd0acf7cd5bab63b",
+      "new_credential": "sha512:5f495fb71ba1844a1c2d6bd237fd8c9078536081a263059003f97d89714e7bd1f376d17ecdaaa275dd887d53c27903e83493b2b1fb47350d00937ae0e96dfceb",
+      "new_algorithm": "sha512",
+      "new_digest": "5f495fb71ba1844a1c2d6bd237fd8c9078536081a263059003f97d89714e7bd1f376d17ecdaaa275dd887d53c27903e83493b2b1fb47350d00937ae0e96dfceb",
+      "size": 176,
+      "cache_copies": [
+        {
+          "root": "pooch/tests/data",
+          "relative_path": "tiny-data.tar.gz",
+          "absolute_path": "/Users/guo/Documents/GSB/1109/batches/de-u224-20261116/control/questions/GSB1109-20261116-U224-DE-PY-087/workspace/pooch/tests/data/tiny-data.tar.gz",
+          "size": 176,
+          "legacy_digest": "41503f083814f43a01a8e9a30c28d7a9fe96839a99727a7fdd0acf7cd5bab63b",
+          "matches_legacy": true
+        }
+      ]
+    },
+    {
+      "name": "store.tar.gz",
+      "line_number": 9,
+      "legacy_credential": "088c7f4e0f1859b1c769bb6065de24376f366374817ede8691a6ac2e49f29511",
+      "url": null,
+      "status": "published",
+      "reason": null,
+      "legacy_algorithm": "sha256",
+      "legacy_digest": "088c7f4e0f1859b1c769bb6065de24376f366374817ede8691a6ac2e49f29511",
+      "new_credential": "sha512:7d00e4460c35c019a2d449604f63a0ad13be8652a4dbb7401ebb9ab21ad2b3592276cfe485666b88ad6065804a4c1e8740086a2ac5352ba79fc27e19cde3c3e7",
+      "new_algorithm": "sha512",
+      "new_digest": "7d00e4460c35c019a2d449604f63a0ad13be8652a4dbb7401ebb9ab21ad2b3592276cfe485666b88ad6065804a4c1e8740086a2ac5352ba79fc27e19cde3c3e7",
+      "size": 243,
+      "cache_copies": [
+        {
+          "root": "pooch/tests/data",
+          "relative_path": "store.tar.gz",
+          "absolute_path": "/Users/guo/Documents/GSB/1109/batches/de-u224-20261116/control/questions/GSB1109-20261116-U224-DE-PY-087/workspace/pooch/tests/data/store.tar.gz",
+          "size": 243,
+          "legacy_digest": "088c7f4e0f1859b1c769bb6065de24376f366374817ede8691a6ac2e49f29511",
+          "matches_legacy": true
+        }
+      ]
+    },
+    {
+      "name": "tiny-data.txt.bz2",
+      "line_number": 10,
+      "legacy_credential": "753663687a4040c90c8578061867d1df623e6aa8011c870a5dbd88ee3c82e306",
+      "url": null,
+      "status": "published",
+      "reason": null,
+      "legacy_algorithm": "sha256",
+      "legacy_digest": "753663687a4040c90c8578061867d1df623e6aa8011c870a5dbd88ee3c82e306",
+      "new_credential": "sha512:d789c9941fc5563715199ce0ec35df7484034b7418c995958a3eeb0b46bed4c5aed2a8797335629d7ecf6739c5704687fe931c852dccf93776a461f698afb8ae",
+      "new_algorithm": "sha512",
+      "new_digest": "d789c9941fc5563715199ce0ec35df7484034b7418c995958a3eeb0b46bed4c5aed2a8797335629d7ecf6739c5704687fe931c852dccf93776a461f698afb8ae",
+      "size": 91,
+      "cache_copies": [
+        {
+          "root": "pooch/tests/data",
+          "relative_path": "tiny-data.txt.bz2",
+          "absolute_path": "/Users/guo/Documents/GSB/1109/batches/de-u224-20261116/control/questions/GSB1109-20261116-U224-DE-PY-087/workspace/pooch/tests/data/tiny-data.txt.bz2",
+          "size": 91,
+          "legacy_digest": "753663687a4040c90c8578061867d1df623e6aa8011c870a5dbd88ee3c82e306",
+          "matches_legacy": true
+        }
+      ]
+    },
+    {
+      "name": "tiny-data.txt.gz",
+      "line_number": 11,
+      "legacy_credential": "2e2da6161291657617c32192dba95635706af80c6e7335750812907b58fd4b52",
+      "url": null,
+      "status": "published",
+      "reason": null,
+      "legacy_algorithm": "sha256",
+      "legacy_digest": "2e2da6161291657617c32192dba95635706af80c6e7335750812907b58fd4b52",
+      "new_credential": "sha512:3190bfa50ada571c34dc16a4a780079482fd0dc210a5e92fa3551ae50c41a72a831603a297239493f0fa64165478c58ab353ed650ab9b577d1a3eeacc294c5b0",
+      "new_algorithm": "sha512",
+      "new_digest": "3190bfa50ada571c34dc16a4a780079482fd0dc210a5e92fa3551ae50c41a72a831603a297239493f0fa64165478c58ab353ed650ab9b577d1a3eeacc294c5b0",
+      "size": 91,
+      "cache_copies": [
+        {
+          "root": "pooch/tests/data",
+          "relative_path": "tiny-data.txt.gz",
+          "absolute_path": "/Users/guo/Documents/GSB/1109/batches/de-u224-20261116/control/questions/GSB1109-20261116-U224-DE-PY-087/workspace/pooch/tests/data/tiny-data.txt.gz",
+          "size": 91,
+          "legacy_digest": "2e2da6161291657617c32192dba95635706af80c6e7335750812907b58fd4b52",
+          "matches_legacy": true
+        }
+      ]
+    },
+    {
+      "name": "tiny-data.txt.xz",
+      "line_number": 12,
+      "legacy_credential": "99dcb5c32a6e916344bacb4badcbc2f2b6ee196977d1d8187610c21e7e607765",
+      "url": null,
+      "status": "published",
+      "reason": null,
+      "legacy_algorithm": "sha256",
+      "legacy_digest": "99dcb5c32a6e916344bacb4badcbc2f2b6ee196977d1d8187610c21e7e607765",
+      "new_credential": "sha512:7a851780ff24349c88e66aca1d9006d3b054540dd3d4938f23fe9ff2d0eff2f514307fcc04074825daf619fc1c370278788d89f2908d7bbdf2608e2e1c4232a3",
+      "new_algorithm": "sha512",
+      "new_digest": "7a851780ff24349c88e66aca1d9006d3b054540dd3d4938f23fe9ff2d0eff2f514307fcc04074825daf619fc1c370278788d89f2908d7bbdf2608e2e1c4232a3",
+      "size": 116,
+      "cache_copies": [
+        {
+          "root": "pooch/tests/data",
+          "relative_path": "tiny-data.txt.xz",
+          "absolute_path": "/Users/guo/Documents/GSB/1109/batches/de-u224-20261116/control/questions/GSB1109-20261116-U224-DE-PY-087/workspace/pooch/tests/data/tiny-data.txt.xz",
+          "size": 116,
+          "legacy_digest": "99dcb5c32a6e916344bacb4badcbc2f2b6ee196977d1d8187610c21e7e607765",
+          "matches_legacy": true
+        }
+      ]
+    }
+  ],
+  "byte_identity": [
+    {
+      "sha256": "024d5f0c546af8b272ac241b54cbde41153e7e6bda09858d953e4f93b21c81a4",
+      "cache_paths": [
+        "pooch/tests/data/registry-spaces.txt"
+      ],
+      "registry_entry": null
+    },
+    {
+      "sha256": "0498d2a001e71051bbd2acd2346f38da7cbd345a633cb7bf0f8a20938714b51a",
+      "cache_paths": [
+        "pooch/tests/data/store.zip",
+        "data/store.zip"
+      ],
+      "registry_entry": "store.zip"
+    },
+    {
+      "sha256": "088c7f4e0f1859b1c769bb6065de24376f366374817ede8691a6ac2e49f29511",
+      "cache_paths": [
+        "pooch/tests/data/store.tar.gz"
+      ],
+      "registry_entry": "store.tar.gz"
+    },
+    {
+      "sha256": "0d49e94f07bc1866ec57e7fd1b93a351fba36842ec9b13dd50bf94e8dfa35cbb",
+      "cache_paths": [
+        "pooch/tests/data/tiny-data.zip"
+      ],
+      "registry_entry": "tiny-data.zip"
+    },
+    {
+      "sha256": "19d00bdb48756da06ebf627d4d0b5b0539b7f32b3f684a23afb970bfbf1b8ea1",
+      "cache_paths": [
+        "pooch/tests/data/registry_comments.txt"
+      ],
+      "registry_entry": null
+    },
+    {
+      "sha256": "2e2da6161291657617c32192dba95635706af80c6e7335750812907b58fd4b52",
+      "cache_paths": [
+        "pooch/tests/data/tiny-data.txt.gz"
+      ],
+      "registry_entry": "tiny-data.txt.gz"
+    },
+    {
+      "sha256": "41503f083814f43a01a8e9a30c28d7a9fe96839a99727a7fdd0acf7cd5bab63b",
+      "cache_paths": [
+        "pooch/tests/data/tiny-data.tar.gz"
+      ],
+      "registry_entry": "tiny-data.tar.gz"
+    },
+    {
+      "sha256": "426c19aebe552f85ff39e0f2fa74356cf70aa38519c809e34566fa30c653b0f7",
+      "cache_paths": [
+        "pooch/tests/data/registry-custom-url.txt"
+      ],
+      "registry_entry": null
+    },
+    {
+      "sha256": "44d3c7ca1edb427d2b09360aeb21d8066ea3a275d98454fa82101ee9ccc04073",
+      "cache_paths": [
+        "pooch/tests/data/registry-invalid.txt"
+      ],
+      "registry_entry": null
+    },
+    {
+      "sha256": "700629ad582327027ee10942da5e71b5d80be9736f1fbfbe25de8e8c69096f95",
+      "cache_paths": [
+        "pooch/tests/data/registry.txt"
+      ],
+      "registry_entry": null
+    },
+    {
+      "sha256": "753663687a4040c90c8578061867d1df623e6aa8011c870a5dbd88ee3c82e306",
+      "cache_paths": [
+        "pooch/tests/data/tiny-data.txt.bz2"
+      ],
+      "registry_entry": "tiny-data.txt.bz2"
+    },
+    {
+      "sha256": "98de171fb320da82982e6bf0f3994189fff4b42b23328769afce12bdd340444a",
+      "cache_paths": [
+        "pooch/tests/data/large-data.txt"
+      ],
+      "registry_entry": "large-data.txt"
+    },
+    {
+      "sha256": "99dcb5c32a6e916344bacb4badcbc2f2b6ee196977d1d8187610c21e7e607765",
+      "cache_paths": [
+        "pooch/tests/data/tiny-data.txt.xz"
+      ],
+      "registry_entry": "tiny-data.txt.xz"
+    },
+    {
+      "sha256": "baee0894dba14b12085eacb204284b97e362f4f3e5a5807693cc90ef415c1b2d",
+      "cache_paths": [
+        "pooch/tests/data/store/subdir/tiny-data.txt",
+        "pooch/tests/data/store/tiny-data.txt",
+        "pooch/tests/data/tiny-data.txt",
+        "data/subdir/tiny-data.txt",
+        "data/tiny-data.txt"
+      ],
+      "registry_entry": "tiny-data.txt"
+    }
+  ]
+}
