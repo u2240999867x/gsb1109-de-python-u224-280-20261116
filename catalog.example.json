@@ -1,0 +1,13 @@
+{
+  "machines": [
+    {"id":"laptop","volumes":[{"id":"os","label":"Windows","drive":"C:"}],
+     "shortcuts":[{"id":"laptop-report","volume":"os","path":"C:\\Users\\ana\\report.docx"}]},
+    {"id":"desktop","volumes":[{"id":"sys","label":"Windows","drive":"C:"},{"id":"data","label":"Backup","drive":"D:"}],
+     "shortcuts":[{"id":"desktop-report","volume":"data","path":"D:\\restore\\report.docx"}]}
+  ],
+  "candidate_volume_mappings":[
+    {"id":"maybe-os","a":"laptop:os","b":"desktop:sys"},
+    {"id":"maybe-data","a":"laptop:os","b":"desktop:data"}
+  ],
+  "verified_objects":[{"id":"same-report","members":["laptop-report","desktop-report"]}]
+}

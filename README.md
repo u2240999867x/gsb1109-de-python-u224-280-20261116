@@ -112,6 +112,101 @@ Windows Shortcut Information:
 }
 ```
 
+# Merging catalogs from several machines
+
+`LnkParse3.reconcile` answers the question "which volumes and targets on
+these machines are the same object?" without trusting coincidence. A volume
+label, a drive letter or an identical path is evidence belonging to the
+machine that declared it; none of those alone establishes cross-machine
+identity. Identity comes only from the declarations you supply:
+
+- `candidate_volume_mappings`: volume pairs that *may* be one entity.
+- `verified_objects`: shortcut sets already confirmed to be one object.
+- `distinct_volumes` / `distinct_targets`: pairs known to be different.
+
+The reconciler enumerates the maximal, jointly feasible identity assignments,
+keeps every one that is valid, and reports only relations present in **all**
+of them. Each machine keeps its own volume declaration and original path in
+the output; no synthetic drive letter is introduced.
+
+```console
+$ lnkreconcile catalog.json
+$ lnkreconcile catalog.json --compact          # omit per-plan entities
+$ lnkreconcile catalog.json --all-feasible     # include non-maximal plans
+$ lnkreconcile catalog.json --fail-on-conflict # exit 2 when unsatisfiable
+```
+
+The repository ships `catalog.example.json`, the sample described below:
+
+```json
+{
+  "machines": [
+    {
+      "id": "laptop",
+      "volumes": [
+        {"id": "os", "label": "Windows", "drive": "C:", "declared": {"note": "disk0p2"}}
+      ],
+      "shortcuts": [
+        {"id": "laptop-report", "volume": "os", "path": "C:\\Users\\ana\\report.docx"}
+      ]
+    },
+    {
+      "id": "desktop",
+      "volumes": [
+        {"id": "sys", "label": "Windows", "drive": "C:"},
+        {"id": "data", "label": "Backup", "drive": "D:"}
+      ],
+      "shortcuts": [
+        {"id": "desktop-report", "volume": "data", "path": "D:\\restore\\report.docx"}
+      ]
+    }
+  ],
+  "candidate_volume_mappings": [
+    {"id": "maybe-os", "a": "laptop:os", "b": "desktop:sys"},
+    {"id": "maybe-data", "a": "laptop:os", "b": "desktop:data"}
+  ],
+  "verified_objects": [
+    {"id": "same-report", "members": ["laptop-report", "desktop-report"]}
+  ]
+}
+```
+
+The verified object forces `laptop:os` and `desktop:data` to be one entity.
+The remaining `maybe-os` candidate would merge `desktop:sys` into that same
+entity, which then holds two volumes of the `desktop` machine; mutual
+exclusion rejects that plan. The only plan left reports the volume relation
+`laptop:os` = `desktop:data` and the target relation for `same-report`, each
+member keeping its own machine, volume, label, drive and original path.
+
+`distinct_volumes` and `distinct_targets` eliminate matching plans. A
+same-machine pair can never be one entity, so a candidate between two volumes
+of one machine is reported as a warning and never used. Verified objects are
+transitive: if two of them force two distinct volumes of the same machine
+together, that component is unsatisfiable and reports the conflicting records
+and constraint ids. Independent components are still solved and reported.
+
+Programmatic use:
+
+```python
+from LnkParse3.reconcile import Catalog, reconcile
+
+catalog = Catalog.from_dict(data)          # or Catalog.from_lnk_files(...)
+report = reconcile(catalog)
+for relation in report.confirmed_target_relations:
+    print(relation.descriptor())
+if not report.complete:
+    for group in report.unsatisfiable_groups:
+        for conflict in group.conflicts:
+            print(conflict.kind, conflict.message)
+```
+
+`Catalog.from_lnk_files([(machine, shortcut_id, path), ...])` builds the
+volumes and shortcuts from LNK files; the label, drive, serial and DROID
+identifiers are copied into `declared` as that machine's evidence, never used
+as cross-machine identity. Add the supplier's declarations through the
+`candidate_volume_mappings`, `verified_objects`, `distinct_volumes` and
+`distinct_targets` keyword arguments.
+
 # Extracted data
 
 List of data in LNK structure and their current status of implementation.

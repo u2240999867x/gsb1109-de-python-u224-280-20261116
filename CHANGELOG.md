@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html) since v1.0.0.
 
 ## [Unreleased]
+### Added
+- Add `LnkParse3.reconcile` and the `lnkreconcile` CLI for merging shortcut
+  catalogs from several machines. Candidate volume mappings, verified objects
+  and distinct-volume/distinct-target constraints are combined into maximal
+  feasible identity plans; only relations true in every plan are reported.
+  Labels, drive letters and equal paths remain each machine's own evidence.
+  Unsatisfiable constraint components report their conflicting records and
+  constraints while independent components are still solved, and every
+  relation keeps each machine's original path.
 
 ## [1.6.0] - 2026-02-27
 ### Added
