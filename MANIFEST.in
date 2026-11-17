@@ -5,6 +5,7 @@ include BUILDING
 include CONTRIBUTORS
 include TestPyCIFRW.py
 include TestDrel.py
+include TestAtomSites.py
 include RELEASENOTES
 include README.md
 include src/Programs/*.py
@@ -15,6 +16,7 @@ include src/Programs/Web.README
 include src/Makefile
 include src/lib/*
 include docs/*.html
+include docs/atom_sites.txt
 include docs/CifFile/*.html
 include tests/C13H22O3.cif
 include tests/ddl.dic
