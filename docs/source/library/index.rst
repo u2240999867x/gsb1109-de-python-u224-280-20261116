@@ -44,6 +44,7 @@ Calculations, Statistics, and Metrics
     :maxdepth: 2
 
     treemeasure.rst
+    calibration.rst
     treecompare.rst
     treescore.rst
     popgenstat.rst
