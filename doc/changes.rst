@@ -3,6 +3,24 @@
 Changelog
 =========
 
+Version 1.10.0 (unreleased)
+---------------------------
+
+New features:
+
+* Track processed files with processing manifests. The ``Unzip``, ``Untar`` and
+  ``Decompress`` processors now write a JSON manifest next to each processed
+  file recording the verification information of the source file, the
+  identity (type and parameters) of the processor and the list of derived
+  artifacts. Manifests make sure that the same verified source is reused,
+  that derived files from different processor parameters are never mixed up
+  and that a failed processing never leaves a half-finished result that can
+  be mistaken for a valid cache hit. On failure the partial outputs are
+  removed and a ``failed`` manifest is written while the source file is kept
+  untouched so it can be processed again. When the source is updated, stale
+  derived files of unpacking processors are removed before re-extracting.
+
+
 Version 1.9.0
 -------------
 

@@ -75,6 +75,39 @@ class ExtractorProcessor(abc.ABC):
         MUST BE IMPLEMENTED BY CHILD CLASSES.
         """
 
+    def processing_identity(self):
+        """
+        Identity of the processor configuration for the processing manifest.
+
+        The same archive processed with different ``members`` or
+        ``extract_dir`` values gets a different identity, so the derived
+        files of different configurations are never mixed up.
+        """
+        return {
+            "type": f"{type(self).__module__}.{type(self).__name__}",
+            "members": None if not self.members else sorted(self.members),
+            "extract_dir": self.extract_dir,
+        }
+
+    def processing_artifacts(self, result):
+        "The extracted file paths returned by the processor are its artifacts."
+        return list(result)
+
+    def processing_discard(self, fname):
+        "Remove the unpacked folder after a failed processing attempt."
+        extract_dir = self._target_extract_dir(fname)
+        if os.path.isdir(extract_dir):
+            shutil.rmtree(extract_dir)
+
+    def _target_extract_dir(self, fname):
+        """
+        Absolute path of the folder the archive is unpacked into.
+        """
+        if self.extract_dir is None:
+            return fname + self.suffix
+        archive_dir = fname.rsplit(os.path.sep, maxsplit=1)[0]
+        return os.path.join(archive_dir, self.extract_dir)
+
     def __call__(self, fname, action, pooch):  # noqa: ARG002
         """
         Extract all files from the given archive.
@@ -100,11 +133,7 @@ class ExtractorProcessor(abc.ABC):
             A list of the full path to all files in the extracted archive.
 
         """
-        if self.extract_dir is None:
-            self.extract_dir = fname + self.suffix
-        else:
-            archive_dir = fname.rsplit(os.path.sep, maxsplit=1)[0]
-            self.extract_dir = os.path.join(archive_dir, self.extract_dir)
+        extract_dir = self._target_extract_dir(fname)
         # Get a list of everyone who is supposed to be in the unpacked folder
         # so we can check if they are all there or if we need to extract new
         # files.
@@ -114,22 +143,25 @@ class ExtractorProcessor(abc.ABC):
             members = self.members
         if (
             (action in ("update", "download"))
-            or (not os.path.exists(self.extract_dir))
-            or not all(
-                os.path.exists(os.path.join(self.extract_dir, m)) for m in members
-            )
+            or (not os.path.exists(extract_dir))
+            or not all(os.path.exists(os.path.join(extract_dir, m)) for m in members)
         ):
+            # The source was (re)downloaded, so files left over from a
+            # previous version of the archive must be removed to make sure
+            # only products of the current source remain in the folder.
+            if action in ("update", "download") and os.path.isdir(extract_dir):
+                shutil.rmtree(extract_dir)
             # Make sure that the folder with the extracted files exists
-            os.makedirs(self.extract_dir, exist_ok=True)
-            self._extract_file(fname, self.extract_dir)
+            os.makedirs(extract_dir, exist_ok=True)
+            self._extract_file(fname, extract_dir)
 
         # Get a list of all file names (including subdirectories) in our folder
         # of unzipped files, filtered by the given members list
         fnames = []
-        for path, _, files in os.walk(self.extract_dir):
+        for path, _, files in os.walk(extract_dir):
             for filename in files:
                 relpath = os.path.normpath(
-                    os.path.join(os.path.relpath(path, self.extract_dir), filename)
+                    os.path.join(os.path.relpath(path, extract_dir), filename)
                 )
                 if self.members is None or any(
                     relpath.startswith(os.path.normpath(m)) for m in self.members
@@ -347,6 +379,39 @@ class Decompress:
         self.method = method
         self.name = name
 
+    def processing_identity(self):
+        """
+        Identity of the decompression configuration for the processing
+        manifest.
+
+        Decompressing the same file with a different method or output name
+        gets a different identity, so the derived files don't overwrite each
+        other.
+        """
+        return {
+            "type": f"{type(self).__module__}.{type(self).__name__}",
+            "method": self.method,
+            "name": self.name,
+        }
+
+    def processing_artifacts(self, result):
+        "The decompressed file path returned by the processor is its artifact."
+        return [result]
+
+    def processing_discard(self, fname):
+        "Remove the half-written decompressed file after a failed attempt."
+        decompressed = self._target_decompressed(fname)
+        if os.path.exists(decompressed):
+            os.remove(decompressed)
+
+    def _target_decompressed(self, fname):
+        """
+        Absolute path of the file the archive is decompressed into.
+        """
+        if self.name is None:
+            return fname + ".decomp"
+        return os.path.join(os.path.dirname(fname), self.name)
+
     def __call__(self, fname, action, pooch):  # noqa: ARG002
         """
         Decompress the given file.
@@ -374,10 +439,7 @@ class Decompress:
         fname : str
             The full path to the decompressed file.
         """
-        if self.name is None:
-            decompressed = fname + ".decomp"
-        else:
-            decompressed = os.path.join(os.path.dirname(fname), self.name)
+        decompressed = self._target_decompressed(fname)
         if action in ("update", "download") or not os.path.exists(decompressed):
             get_logger().info(
                 "Decompressing '%s' to '%s' using method '%s'.",

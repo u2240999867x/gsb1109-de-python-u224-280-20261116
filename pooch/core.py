@@ -18,6 +18,7 @@ from typing import Any, Optional, Union
 
 from .downloaders import DOIDownloader, choose_downloader, doi_to_repository
 from .hashes import file_hash, hash_matches
+from .processing import apply_processor
 from .typing import Action, Downloader, PathInputType, PathType, Processor
 from .utils import (
     cache_location,
@@ -250,7 +251,7 @@ def retrieve(
             )
 
     if processor is not None:
-        return processor(str(full_path), action, None)
+        return apply_processor(processor, str(full_path), action, None, known_hash)
 
     return str(full_path)
 
@@ -603,7 +604,7 @@ class Pooch:
             )
 
         if processor is not None:
-            return processor(str(full_path), action, self)
+            return apply_processor(processor, str(full_path), action, self, known_hash)
 
         return str(full_path)
 
