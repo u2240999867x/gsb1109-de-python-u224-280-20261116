@@ -1494,8 +1494,9 @@ class MibTableRow(MibTree):
 
     def getIndicesFromInstId(self, instId):
         """Return index values for instance identification"""
-        if instId in self.__idToIdxCache:
-            return self.__idToIdxCache[instId]
+        originalInstId = instId
+        if originalInstId in self.__idToIdxCache:
+            return self.__idToIdxCache[originalInstId]
 
         indices = []
         for impliedFlag, modName, symName in self.indexNames:
@@ -1520,7 +1521,7 @@ class MibTableRow(MibTree):
             )
 
         indices = tuple(indices)
-        self.__idToIdxCache[instId] = indices
+        self.__idToIdxCache[originalInstId] = indices
 
         return indices
 

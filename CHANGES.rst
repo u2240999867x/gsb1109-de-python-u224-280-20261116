@@ -1,5 +1,15 @@
 .. current-version: 7.1.33 (managed by bump2version)
 
+Unreleased
+----------
+
+- Added ``pysnmp.smi.collection`` for deriving supplementary MIB collection
+  plans from table indices, RowStatus and units, with de-duplicated requests
+  and generation-scoped row assembly.
+- Fixed ``MibTableRow.getIndicesFromInstId`` caching decoded indices under the
+  consumed remainder instead of the original instance identifier, which could
+  return another row's indices.
+
 Revision 7.1.33, released on Nov 15, 2026
 -----------------------------------------
 

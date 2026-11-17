@@ -282,6 +282,34 @@ MACRO definitions.
 .. autoclass:: pysnmp.smi.rfc1902.ObjectType
    :members:
 
+.. _collection-planning:
+
+MIB Collection Planning
++++++++++++++++++++++++
+
+A partial inspection often leaves a few business fields unresolved. The
+:py:mod:`~pysnmp.smi.collection` module derives which variables are still
+needed from MIB metadata: table ``INDEX`` columns, the ``RowStatus`` column
+and the field's own instance. ``UNITS`` is read from the MIB and exposed as
+metadata rather than requested over SNMP.
+
+The resulting :py:class:`~pysnmp.smi.collection.CollectionPlan` contains at
+most one request per OID. Variables confirmed earlier are reused when their
+MIB revision and syntax are compatible. When assembled back into rows, values
+are grouped by device generation, so values from one generation are never
+reported as part of another generation's row.
+
+.. autoclass:: pysnmp.smi.collection.CollectionPlanner
+   :members: describe, plan
+
+.. autoclass:: pysnmp.smi.collection.CollectionPlan
+   :members: resolve, prettyPrint, units
+
+.. autoclass:: pysnmp.smi.collection.CollectionField
+   :members:
+
+.. autofunction:: pysnmp.smi.collection.build_collection_plan
+
 .. _notification-types:
 
 MIB Notification Types
