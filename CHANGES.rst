@@ -1,3 +1,16 @@
+Unreleased
+----------
+
+-   Versioned taxon catalogs (``dendropy.TaxonCatalog``): a shared,
+    versioned directory of leaf identities supporting rename, alias-merge and
+    split (undo-erroneous-merge) corrections that each produce a new immutable
+    catalog version, explicit tree/TreeList migration that remaps leaf taxa
+    while leaving internal node labels untouched and invalidating split and
+    distance caches, indeterminate-split detection, and per-leaf provenance
+    tracing every identity back to the base catalog declaration. Unmigrated
+    historical trees and comparison results retain their original
+    interpretation.
+
 Release 4.5.2
 -------------
 

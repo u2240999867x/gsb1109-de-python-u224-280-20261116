@@ -2201,6 +2201,23 @@ class Tree(
         for nd in self.seed_node.leaf_iter(filter_fn=f):
             yield nd.edge
 
+    def invalidate_derived_taxon_caches(self):
+        """
+        Clears cached structures whose correctness depends on the identity or
+        accessioning of leaf taxa within
+        :attr:`Tree.taxon_namespace`: the bipartition encoding, the
+        split/bipartition edge maps, and any per-edge split bitmasks.
+        Subsequent split, distance and leaf-set queries recompute these
+        against the current taxon namespace instead of reusing stale
+        bitmasks.
+        """
+        self.bipartition_encoding = None
+        self._split_bitmask_edge_map = None
+        self._bipartition_edge_map = None
+        if self._seed_node is not None:
+            for edge in self.postorder_edge_iter():
+                edge._bipartition = None
+
     def reconstruct_taxon_namespace(
         self, unify_taxa_by_label=True, taxon_mapping_memo=None
     ):
@@ -2226,6 +2243,9 @@ class Tree(
                     # taxon to use is given by mapping
                     self.taxon_namespace.add_taxon(t)
                 node.taxon = t
+        # remapped taxa may carry different accession indexes/bitmasks: any
+        # previously encoded split information is no longer valid
+        self.invalidate_derived_taxon_caches()
 
     def update_taxon_namespace(self):
         """

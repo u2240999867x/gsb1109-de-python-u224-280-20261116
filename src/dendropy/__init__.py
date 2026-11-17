@@ -32,6 +32,14 @@ from dendropy.datamodel.taxonmodel import TaxonNamespace
 from dendropy.datamodel.taxonmodel import TaxonNamespacePartition
 from dendropy.datamodel.taxonmodel import TaxonNamespaceMapping
 from dendropy.datamodel.taxonmodel import TaxonSet # Legacy
+from dendropy.datamodel.taxoncatalogmodel import TaxonCatalog
+from dendropy.datamodel.taxoncatalogmodel import TaxonCatalogVersion
+from dendropy.datamodel.taxoncatalogmodel import TaxonCatalogRevision
+from dendropy.datamodel.taxoncatalogmodel import TaxonCatalogCorrectionError
+from dendropy.datamodel.taxoncatalogmodel import IndeterminateLeafIdentityError
+from dendropy.datamodel.taxoncatalogmodel import RENAME_OPERATION
+from dendropy.datamodel.taxoncatalogmodel import MERGE_OPERATION
+from dendropy.datamodel.taxoncatalogmodel import SPLIT_OPERATION
 from dendropy.datamodel.treemodel import Bipartition
 from dendropy.datamodel.treemodel import Edge
 from dendropy.datamodel.treemodel import Node

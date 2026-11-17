@@ -15,6 +15,7 @@ Data Model
 
     basemodel.rst
     taxonmodel.rst
+    taxoncatalogmodel.rst
     treemodel.rst
     treecollectionmodel.rst
     charstatemodel.rst
