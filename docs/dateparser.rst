@@ -12,6 +12,14 @@ Subpackages
 Submodules
 ----------
 
+dateparser.batch module
+-----------------------
+
+.. automodule:: dateparser.batch
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 dateparser.conf module
 ----------------------
 
