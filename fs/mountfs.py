@@ -11,6 +11,7 @@ from . import errors
 from .base import FS
 from .memoryfs import MemoryFS
 from .mode import validate_open_mode, validate_openbin_mode
+from .ownership import Ownership, parse_ownership, parse_policy
 from .path import abspath, forcedir, normpath
 
 if typing.TYPE_CHECKING:
@@ -19,6 +20,7 @@ if typing.TYPE_CHECKING:
         Any,
         BinaryIO,
         Collection,
+        Dict,
         Iterator,
         List,
         MutableSequence,
@@ -40,6 +42,14 @@ class MountError(Exception):
     """Thrown when mounts conflict."""
 
 
+def _ownership_from_auto_close(auto_close):
+    # type: (Any) -> Ownership
+    """Translate the historical ``auto_close`` flag to an ownership role."""
+    if isinstance(auto_close, bool):
+        return Ownership.OWNED if auto_close else Ownership.BORROWED
+    return parse_ownership(auto_close)
+
+
 class MountFS(FS):
     """A virtual filesystem that maps directories on to other file-systems."""
 
@@ -51,19 +61,45 @@ class MountFS(FS):
         "invalid_path_chars": "\0",
     }
 
-    def __init__(self, auto_close=True):
-        # type: (bool) -> None
+    close_cascade = "owned"
+
+    def __init__(
+        self,
+        auto_close=True,  # type: Any
+        ownership=None,  # type: Any
+        close_policy="abort",  # type: Any
+    ):
+        # type: (...) -> None
         """Create a new `MountFS` instance.
 
         Arguments:
-            auto_close (bool): If `True` (the default), the child
-                filesystems will be closed when `MountFS` is closed.
+            auto_close (bool or str): If `True` (the default), mounted
+                children are owned by this filesystem and are closed when
+                `MountFS` is closed *and no other wrapper still holds
+                them*. If `False`, mounted children are borrowed and are
+                never closed by this filesystem. The strings ``"owned"``
+                and ``"borrowed"`` are accepted as explicit aliases.
+            ownership (str, optional): The default ownership role for
+                mounts, if ``auto_close`` is not already explicit.
+            close_policy (str): How close treats open handles and admitted
+                operations: ``"drain"``, ``"abort"`` or ``"defer"``.
 
         """
         super(MountFS, self).__init__()
-        self.auto_close = auto_close
+        self._close_policy = parse_policy(close_policy)
+        self._default_ownership = (
+            parse_ownership(ownership)
+            if ownership is not None
+            else _ownership_from_auto_close(auto_close)
+        )
+        self.auto_close = self._default_ownership is Ownership.OWNED
+        self._closed = False
         self.default_fs = MemoryFS()  # type: FS
         self.mounts = []  # type: MutableSequence[Tuple[Text, FS]]
+        self._mount_holds = {}  # type: Dict[int, Any]
+        self._default_hold = self.own(
+            self.default_fs, label="default", share=True
+        )
 
     def __repr__(self):
         # type: () -> str
@@ -72,6 +108,73 @@ class MountFS(FS):
     def __str__(self):
         # type: () -> str
         return "<mountfs>"
+
+    def __enter__(self):
+        # type: -> M
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        # type: (Any, Any, Any) -> None
+        self.close()
+
+    def mount(self, path, fs, ownership=None, auto_close=None):
+        # type: (Text, Union[FS, Text], Any, Any) -> None
+        """Mounts a host FS object on a given path.
+
+        Arguments:
+            path (str): A path within the MountFS.
+            fs (FS or str): A filesystem (instance or URL) to mount.
+            ownership (str, optional): ``"owned"`` (this mount is
+                responsible for closing ``fs`` once no other wrapper needs
+                it) or ``"borrowed"`` (this mount never closes ``fs``).
+                Defaults to the value configured on the `MountFS`.
+            auto_close (bool, optional): Legacy alias for ``ownership``.
+
+        """
+        if isinstance(fs, text_type):
+            from .opener import open_fs
+
+            fs = open_fs(fs)
+
+        if not isinstance(fs, FS):
+            raise TypeError("fs argument must be an FS object or a FS URL")
+
+        self.check()
+        if fs is self:
+            raise ValueError("Unable to mount self")
+        _path = forcedir(abspath(normpath(path)))
+
+        for mount_path, _ in self.mounts:
+            if _path.startswith(mount_path):
+                raise MountError("mount point overlaps existing mount")
+
+        if auto_close is not None:
+            role = _ownership_from_auto_close(auto_close)
+        elif ownership is not None:
+            role = parse_ownership(ownership)
+        else:
+            role = self._default_ownership
+
+        hold = self.hold(fs, role, label=_path, share=True)
+        self.mounts.append((_path, fs))
+        self._mount_holds[id(fs)] = hold
+        self.default_fs.makedirs(_path, recreate=True)
+
+    def close(self, policy=None, timeout=None):
+        # type: (Any, Optional[float]) -> Any
+        """Close the mount and release only the references it holds."""
+        result = super(MountFS, self).close(policy=policy, timeout=timeout)
+        if result is not None and result.complete:
+            for hold in list(self._held):
+                if hold.active:
+                    self.release_hold(hold=hold)
+            self._mount_holds.clear()
+            del self.mounts[:]
+        return result
+
+    def _finalize_close(self, report):
+        # type: (Any) -> None
+        super(MountFS, self)._finalize_close(report)
 
     def _delegate(self, path):
         # type: (Text) -> Tuple[FS, Text]
@@ -94,44 +197,6 @@ class MountFS(FS):
                 return fs, _path[len(mount_path) :].rstrip("/")
 
         return self.default_fs, path
-
-    def mount(self, path, fs):
-        # type: (Text, Union[FS, Text]) -> None
-        """Mounts a host FS object on a given path.
-
-        Arguments:
-            path (str): A path within the MountFS.
-            fs (FS or str): A filesystem (instance or URL) to mount.
-
-        """
-        if isinstance(fs, text_type):
-            from .opener import open_fs
-
-            fs = open_fs(fs)
-
-        if not isinstance(fs, FS):
-            raise TypeError("fs argument must be an FS object or a FS URL")
-
-        if fs is self:
-            raise ValueError("Unable to mount self")
-        _path = forcedir(abspath(normpath(path)))
-
-        for mount_path, _ in self.mounts:
-            if _path.startswith(mount_path):
-                raise MountError("mount point overlaps existing mount")
-
-        self.mounts.append((_path, fs))
-        self.default_fs.makedirs(_path, recreate=True)
-
-    def close(self):
-        # type: () -> None
-        # Explicitly closes children if requested
-        if self.auto_close:
-            for _path, fs in self.mounts:
-                fs.close()
-            del self.mounts[:]
-        self.default_fs.close()
-        super(MountFS, self).close()
 
     def desc(self, path):
         # type: (Text) -> Text
@@ -164,8 +229,10 @@ class MountFS(FS):
         # type: (Text, Text, int, **Any) -> BinaryIO
         validate_openbin_mode(mode)
         self.check()
-        fs, _path = self._delegate(path)
-        return fs.openbin(_path, mode=mode, buffering=-1, **kwargs)
+        with self._operation():
+            fs, _path = self._delegate(path)
+            bin_file = fs.openbin(_path, mode=mode, buffering=-1, **kwargs)
+        return self._manage_handle(bin_file, path)
 
     def remove(self, path):
         # type: (Text) -> None
@@ -185,13 +252,16 @@ class MountFS(FS):
     def readbytes(self, path):
         # type: (Text) -> bytes
         self.check()
-        fs, _path = self._delegate(path)
-        return fs.readbytes(_path)
+        with self._operation():
+            fs, _path = self._delegate(path)
+            return fs.readbytes(_path)
 
     def download(self, path, file, chunk_size=None, **options):
         # type: (Text, BinaryIO, Optional[int], **Any) -> None
-        fs, _path = self._delegate(path)
-        return fs.download(_path, file, chunk_size=chunk_size, **options)
+        self.check()
+        with self._operation():
+            fs, _path = self._delegate(path)
+            return fs.download(_path, file, chunk_size=chunk_size, **options)
 
     def readtext(
         self,
@@ -202,8 +272,24 @@ class MountFS(FS):
     ):
         # type: (...) -> Text
         self.check()
+        with self._operation():
+            fs, _path = self._delegate(path)
+            return fs.readtext(
+                _path, encoding=encoding, errors=errors, newline=newline
+            )
+
+    def scandir(
+        self,
+        path,  # type: Text
+        namespaces=None,  # type: Optional[Collection[Text]]
+        page=None,  # type: Optional[Tuple[int, int]]
+    ):
+        # type: (...) -> Iterator[Info]
+        self.check()
         fs, _path = self._delegate(path)
-        return fs.readtext(_path, encoding=encoding, errors=errors, newline=newline)
+        return self._iterate_operation(
+            fs.scandir(_path, namespaces=namespaces, page=page)
+        )
 
     def getsize(self, path):
         # type: (Text) -> int
@@ -247,17 +333,6 @@ class MountFS(FS):
         fs, _path = self._delegate(path)
         return fs.isfile(_path)
 
-    def scandir(
-        self,
-        path,  # type: Text
-        namespaces=None,  # type: Optional[Collection[Text]]
-        page=None,  # type: Optional[Tuple[int, int]]
-    ):
-        # type: (...) -> Iterator[Info]
-        self.check()
-        fs, _path = self._delegate(path)
-        return fs.scandir(_path, namespaces=namespaces, page=page)
-
     def setinfo(self, path, info):
         # type: (Text, RawInfo) -> None
         self.check()
@@ -285,16 +360,18 @@ class MountFS(FS):
         # type: (...) -> IO
         validate_open_mode(mode)
         self.check()
-        fs, _path = self._delegate(path)
-        return fs.open(
-            _path,
-            mode=mode,
-            buffering=buffering,
-            encoding=encoding,
-            errors=errors,
-            newline=newline,
-            **options
-        )
+        with self._operation():
+            fs, _path = self._delegate(path)
+            open_file = fs.open(
+                _path,
+                mode=mode,
+                buffering=buffering,
+                encoding=encoding,
+                errors=errors,
+                newline=newline,
+                **options
+            )
+        return self._manage_handle(open_file, path)
 
     def upload(self, path, file, chunk_size=None, **options):
         # type: (Text, BinaryIO, Optional[int], **Any) -> None

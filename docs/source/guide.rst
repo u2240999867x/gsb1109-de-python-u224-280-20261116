@@ -100,6 +100,8 @@ If you use FS objects as a context manager, ``close`` will be called automatical
 
 Using FS objects as a context manager is recommended as it will ensure every FS is closed.
 
+When filesystems are composed, closing one wrapper does not close a backend that another wrapper still references. Mounts, multi-filesystem entries and sub-directories record whether they own or borrow their child; see :doc:`reference/ownership` for the full contract and for the shutdown policies which govern open handles.
+
 Directory Information
 ~~~~~~~~~~~~~~~~~~~~~
 

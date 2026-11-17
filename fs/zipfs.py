@@ -271,7 +271,7 @@ class WriteZipFS(WrapFS):
         self._temp_fs_url = temp_fs
         self._temp_fs = open_fs(temp_fs)
         self._meta = dict(self._temp_fs.getmeta())  # type: ignore
-        super(WriteZipFS, self).__init__(self._temp_fs)
+        super(WriteZipFS, self).__init__(self._temp_fs, ownership="owned")
 
     def __repr__(self):
         # type: () -> Text
@@ -290,14 +290,11 @@ class WriteZipFS(WrapFS):
         # type: () -> FS
         return self._temp_fs
 
-    def close(self):
-        # type: () -> None
+    def _finalize_close(self, report):
+        # type: (Any) -> None
         if not self.isclosed():
-            try:
-                self.write_zip()
-            finally:
-                self._temp_fs.close()
-        super(WriteZipFS, self).close()
+            self.write_zip()
+        super(WriteZipFS, self)._finalize_close(report)
 
     def write_zip(
         self,
@@ -474,7 +471,7 @@ class ReadZipFS(FS):
             raise errors.FileExpected(path)
 
         zip_name = self._path_to_zip_name(path)
-        return _ZipExtFile(self, zip_name)  # type: ignore
+        return self._manage_handle(_ZipExtFile(self, zip_name), path)  # type: ignore
 
     def remove(self, path):
         # type: (Text) -> None
@@ -486,9 +483,9 @@ class ReadZipFS(FS):
         self.check()
         raise errors.ResourceReadOnly(path)
 
-    def close(self):
-        # type: () -> None
-        super(ReadZipFS, self).close()
+    def _finalize_close(self, report):
+        # type: (Any) -> None
+        super(ReadZipFS, self)._finalize_close(report)
         if hasattr(self, "_zip"):
             self._zip.close()
 

@@ -765,7 +765,7 @@ class FTPFS(FS):
                 if _mode.exclusive:
                     raise errors.FileExists(path)
             ftp_file = FTPFile(self, _path, _mode.to_platform_bin())
-        return ftp_file  # type: ignore
+        return self._manage_handle(ftp_file, path)  # type: ignore
 
     def remove(self, path):
         # type: (Text) -> None
@@ -897,12 +897,12 @@ class FTPFS(FS):
         data_bytes = data.getvalue()
         return data_bytes
 
-    def close(self):
-        # type: () -> None
+    def _finalize_close(self, report):
+        # type: (Any) -> None
         if not self.isclosed():
             try:
                 self.ftp.quit()
             except Exception:  # pragma: no cover
                 pass
             self._ftp = None
-        super(FTPFS, self).close()
+        super(FTPFS, self)._finalize_close(report)

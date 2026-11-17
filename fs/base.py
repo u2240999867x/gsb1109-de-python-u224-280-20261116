@@ -18,7 +18,7 @@ import six
 import threading
 import time
 import warnings
-from contextlib import closing
+from contextlib import closing, contextmanager
 from functools import partial, wraps
 
 from . import copy, errors, fsencode, glob, iotools, tools, walk, wildcard
@@ -54,6 +54,7 @@ if typing.TYPE_CHECKING:
 
     from .enums import ResourceType
     from .info import Info, RawInfo
+    from .ownership import ClosePolicy, CloseReport, Hold, Ownership
     from .permissions import Permissions
     from .subfs import SubFS
     from .walk import BoundWalker
@@ -106,16 +107,43 @@ class FS(object):
     # default to SubFS, used by opendir and should be returned by makedir(s)
     subfs_class = None
 
+    #: How this filesystem closes its own children, if it has any. Wrappers
+    #: which dispose of child filesystems must declare ``"owned"`` so that
+    #: callers can decide whether sharing a child is safe. ``None`` means
+    #: the behaviour is not declared and sharing will be refused.
+    close_cascade = None
+
     def __init__(self):
         # type: (...) -> None
         """Create a filesystem. See help(type(self)) for accurate signature."""
         self._closed = False
         self._lock = threading.RLock()
+        self._lifecycle_lock = threading.RLock()
+        self._condition = threading.Condition(self._lifecycle_lock)
+        self._lifecycle_state = "open"
+        self._admitted = 0
+        self._handles = {}  # type: Dict[object, Any]
+        self._holds = []  # type: List[Hold]
+        self._held = []  # type: List[Hold]
+        self._pending_children = []  # type: List[FS]
+        self._close_after_holders = False
+        self._close_after_holders_policy = None
+        self._close_policy = "abort"
+        self._close_report = None
+        self._close_result = None  # type: Optional[Any]
+        self._close_error = None  # type: Optional[BaseException]
         super(FS, self).__init__()
 
     def __del__(self):
-        """Auto-close the filesystem on exit."""
-        self.close()
+        """Auto-close the filesystem on exit.
+
+        A filesystem which is still referenced by another wrapper is left
+        open: its holders are the real basis for ownership of the backend.
+        """
+        try:
+            self.close()
+        except Exception:
+            pass
 
     def __enter__(self):
         # type: (...) -> FS
@@ -372,8 +400,8 @@ class FS(object):
             ) as append_file:
                 append_file.write(text)
 
-    def close(self):
-        # type: () -> None
+    def close(self, policy=None, timeout=None):
+        # type: (Optional[Text], Optional[float]) -> Any
         """Close the filesystem and release any resources.
 
         It is important to call this method when you have finished
@@ -382,6 +410,21 @@ class FS(object):
         call this method explicitly (it is safe to call close multiple
         times), or you can use the filesystem as a context manager to
         automatically close.
+
+        A filesystem which is part of a shared wrapper graph is closed
+        cooperatively.  Closing one wrapper releases only the references
+        it holds; a child which is still held by another wrapper remains
+        open.  The return value is a `~fs.ownership.CloseReport` which can
+        be queried for the actual basis of the result.
+
+        Arguments:
+            policy (str, optional): What to do with operations which were
+                already admitted and file handles which are still open.
+                One of ``"drain"``, ``"abort"`` or ``"defer"``.  Defaults
+                to the filesystem's configured policy (``"abort"`` unless
+                set).
+            timeout (float, optional): Maximum time to spend draining.
+                If it elapses, a deferred report is returned.
 
         Example:
             >>> with OSFS('~/Desktop') as desktop_fs:
@@ -394,7 +437,746 @@ class FS(object):
         `~fs.errors.FilesystemClosed` exception will be thrown.
 
         """
-        self._closed = True
+        request_policy = self._resolve_close_policy(policy)
+
+        with self._lifecycle_lock:
+            from .ownership import CloseStatus
+
+            if self._lifecycle_state == "closed" and self._close_result is not None:
+                return self._close_result
+
+            if request_policy is not None:
+                self._close_policy = request_policy
+
+            if self._pending_children:
+                return self._resume_child_shutdown(request_policy, timeout)
+
+            self._collect_holds()
+            blocking = [
+                hold
+                for hold in self._holds
+                if hold.active and hold.holder_alive and hold.holder is not self
+            ]
+            if not blocking:
+                if self._lifecycle_state == "open":
+                    self._lifecycle_state = "draining"
+                return self._run_shutdown(request_policy, timeout, from_holder=False)
+
+            # A direct close on a resource which another wrapper still holds
+            # is deferred: the holder must release its reference first.
+            report = self._make_close_report(
+                request_policy,
+                status=CloseStatus.DEFERRED,
+                reason="resource is still held by another wrapper",
+            )
+            report.retained_holds = list(blocking)
+            report.details["holders"] = [repr(hold.holder) for hold in blocking]
+            self._close_report = report
+            self._close_result = None
+            self._lifecycle_state = "open"
+            self._notify_lifecycle()
+            return report
+
+    def shutdown(
+        self,
+        policy="drain",  # type: Text
+        timeout=None,  # type: Optional[float]
+    ):
+        # type: (Text, Optional[float]) -> Any
+        """Enter shutdown and return an explicit `~fs.ownership.CloseReport`.
+
+        This is a named alias for `~FS.close` with an explicit policy, and
+        makes the intent of a coordinated shutdown clearer at call sites.
+        """
+        return self.close(policy=policy, timeout=timeout)
+
+    def _resolve_close_policy(self, policy):
+        # type: (Any) -> Any
+        from .ownership import ClosePolicy, parse_policy
+
+        if policy is not None:
+            return parse_policy(policy)
+        configured = getattr(self, "_close_policy", None)
+        return parse_policy(configured or "abort")
+
+    def _run_shutdown(self, policy, timeout=None, from_holder=False):
+        # type: (Any, Optional[float], bool) -> Any
+        from .ownership import CloseReport, CloseStatus
+
+        with self._lifecycle_lock:
+            self._lifecycle_state = "closing"
+
+            report = self._make_close_report(policy)
+            report.already_closed = False
+            report.active_operations = self._admitted
+            report.open_handles = len(self._handles)
+
+            if policy.value == "defer":
+                if self._admitted or self._handles:
+                    report.status = CloseStatus.DEFERRED
+                    report.reason = "operations or file handles are still active"
+                    self._close_report = report
+                    self._close_result = None
+                    self._lifecycle_state = "draining"
+                    self._notify_lifecycle()
+                    return report
+            elif policy.value == "drain":
+                self._drain_locked(timeout)
+                if self._admitted or self._handles:
+                    report.status = CloseStatus.DEFERRED
+                    report.reason = "drain timeout elapsed with active work"
+                    report.active_operations = self._admitted
+                    report.open_handles = len(self._handles)
+                    self._close_report = report
+                    self._close_result = None
+                    self._lifecycle_state = "draining"
+                    self._notify_lifecycle()
+                    return report
+            else:
+                # Abort: handles can be closed from underneath their users,
+                # but active read operations can not be pre-empted. If any
+                # remain we return an explicit deferred result rather than
+                # pretending the resource was released.
+                errors = self._abort_handles_locked()
+                for error, token in errors:
+                    report.add_error(error, action="close_handle")
+                    report.details.setdefault("handles", []).append(repr(token))
+                if self._admitted:
+                    report.status = CloseStatus.DEFERRED
+                    report.reason = "admitted operations did not complete"
+                    report.active_operations = self._admitted
+                    self._close_report = report
+                    self._close_result = None
+                    self._lifecycle_state = "draining"
+                    self._notify_lifecycle()
+                    return report
+
+            report.active_operations = self._admitted
+            report.open_handles = len(self._handles)
+
+            finalize_error = None
+            # Finalization runs before owned children are released, so an
+            # archive can read its temporary filesystem before that child
+            # is allowed to close. Implementations which use ``isclosed``
+            # internally still see that they have work to do.
+            try:
+                self._finalize_close(report)
+            except Exception as error:
+                finalize_error = error
+                report.add_error(error, action="finalize")
+                self._close_error = error
+
+            holds = list(self._held)
+            self._held = []
+            child_pending = []
+            for hold in holds:
+                try:
+                    outcome = self._release_hold(hold, policy=policy, timeout=timeout)
+                except Exception as error:  # pragma: no cover - defensive
+                    hold.release(error)
+                    report.add_error(error, action="release_hold", holder=hold.holder)
+                    continue
+                if outcome is None:
+                    report.released_holds.append(hold)
+                elif isinstance(outcome, CloseReport):
+                    report.released_holds.append(hold)
+                    hold.close_report = outcome
+                    for item in outcome.errors:
+                        report.details.setdefault("child_errors", []).append(item)
+                        report.add_error(
+                            Exception(item.get("error", "child close failed")),
+                            action="close_child",
+                            holder=hold.resource,
+                        )
+                    if self._child_still_closing(outcome):
+                        child_pending.append((hold.resource, outcome))
+
+            if child_pending:
+                report.status = CloseStatus.DEFERRED
+                report.reason = "owned child filesystems are still closing"
+                report.retained_holds = [
+                    hold
+                    for hold in holds
+                    if hold.resource in [pending[0] for pending in child_pending]
+                ]
+                report.details["pending_children"] = [
+                    repr(child) for child, _ in child_pending
+                ]
+                report.finished = time.time()
+                self._close_report = report
+                self._close_result = None
+                self._lifecycle_state = "draining"
+                self._pending_children = [child for child, _ in child_pending]
+                self._notify_lifecycle()
+                return report
+
+            if report.errors:
+                report.status = CloseStatus.FAILED
+                report.reason = "one or more resources could not be released"
+            else:
+                report.status = CloseStatus.CLOSED
+                report.reason = "all references released"
+            report.finished = time.time()
+            self._closed = True
+            self._lifecycle_state = "closed"
+            self._close_report = report
+            self._close_result = report
+            self._notify_lifecycle()
+            if self._release_handles_on_close():
+                self._handles.clear()
+            if finalize_error is not None:
+                raise finalize_error
+            return report
+
+    def _finalize_close(self, report):
+        # type: (Any) -> None
+        """Release resources specific to a filesystem implementation.
+
+        Called exactly once when the shutdown reaches its terminal state.
+        Subclasses which need to flush data or release OS resources should
+        override this rather than ``close``, so that deferred shutdown
+        does not finalize a filesystem while it is still in use.
+        """
+        return None
+
+    def _release_handles_on_close(self):
+        # type: () -> bool
+        return True
+
+    def _child_still_closing(self, report):
+        # type: (Any) -> bool
+        """Whether a child's deferred close is worth retrying."""
+        if report.complete or report.failed:
+            return False
+        if report.reason == "resource is still held by another wrapper":
+            # Other wrappers keep the child open by design. That is a
+            # stable result: this owner has released its edge and the
+            # child's eventual close belongs to whoever still uses it.
+            return False
+        return report.deferred
+
+    def _resume_child_shutdown(self, policy, timeout=None):
+        # type: (Any, Optional[float]) -> Any
+        """Retry closing owned children which were still draining."""
+        from .ownership import CloseStatus
+
+        with self._lifecycle_lock:
+            pending = list(getattr(self, "_pending_children", ()))
+            self._pending_children = []
+            if pending:
+                report = self._make_close_report(policy)
+                still_pending = []
+                for child in pending:
+                    try:
+                        outcome = child._close_from_owner(
+                            policy=policy, timeout=timeout, holder=self
+                        )
+                    except Exception as error:  # pragma: no cover - defensive
+                        report.add_error(error, action="close_child", holder=self)
+                        continue
+                    if isinstance(outcome, CloseReport):
+                        if outcome.failed:
+                            for item in outcome.errors:
+                                report.details.setdefault(
+                                    "child_errors", []
+                                ).append(item)
+                            report.add_error(
+                                Exception(item.get("error", "child close failed")),
+                                action="close_child",
+                                holder=child,
+                            )
+                        elif self._child_still_closing(outcome):
+                            still_pending.append(child)
+
+                if still_pending:
+                    report.status = CloseStatus.DEFERRED
+                    report.reason = "owned child filesystems are still closing"
+                    report.details["pending_children"] = [
+                        repr(child) for child in still_pending
+                    ]
+                    report.finished = time.time()
+                    self._close_report = report
+                    self._close_result = None
+                    self._pending_children = still_pending
+                    self._notify_lifecycle()
+                    return report
+            return self._run_shutdown(policy, timeout)
+
+    def _make_close_report(self, policy, status=None, reason=""):
+        # type: (Any, Any, Text) -> Any
+        from .ownership import CloseReport, CloseStatus
+
+        report = CloseReport(self, policy, status or CloseStatus.CLOSED)
+        report.reason = reason
+        report.active_operations = self._admitted
+        report.open_handles = len(self._handles)
+        return report
+
+    def _drain_locked(self, timeout=None):
+        # type: (Optional[float]) -> None
+        deadline = None if timeout is None else time.time() + timeout
+        while self._admitted or self._handles:
+            if deadline is None:
+                self._condition.wait(0.05)
+            else:
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    break
+                self._condition.wait(remaining)
+
+    def _abort_handles_locked(self):
+        # type: () -> List[Any]
+        errors = []
+        for token, handle in list(self._handles.items()):
+            force_close = getattr(handle, "force_close", None)
+            if force_close is None:
+                continue
+            error = force_close()
+            if error is not None:
+                errors.append((error, token))
+            self._handles.pop(token, None)
+        return errors
+
+    def _notify_lifecycle(self):
+        # type: () -> None
+        try:
+            self._condition.notify_all()
+        except RuntimeError:  # pragma: no cover - defensive
+            pass
+
+    def _release_hold(self, hold, policy=None, timeout=None):
+        # type: (Any, Optional[Any], Optional[float]) -> Any
+        """Release one hold, closing an unshared owned child."""
+        from .ownership import CloseStatus
+
+        if hold.released:
+            return None
+
+        resource = hold.resource
+        get_lock = getattr(resource, "_lifecycle_lock", None)
+        if get_lock is None:
+            hold.release()
+            return None
+
+        with get_lock:
+            remaining = [
+                other
+                for other in getattr(resource, "_holds", ())
+                if other.active
+                and other is not hold
+                and other.holder_alive
+            ]
+            pending_close = bool(
+                getattr(resource, "_close_after_holders", False) or hold.is_owned
+            )
+            hold.release()
+            if not remaining:
+                if pending_close:
+                    resource._close_after_holders = False
+                    close_policy = (
+                        getattr(resource, "_close_after_holders_policy", None)
+                        or policy
+                    )
+                    resource._close_after_holders_policy = None
+                    close_child = getattr(resource, "_close_from_owner", None)
+                    if close_child is None:
+                        return None
+                    try:
+                        return close_child(
+                            policy=close_policy, timeout=timeout, holder=hold.holder
+                        )
+                    except Exception as error:
+                        hold.release(error)
+                        raise
+                return None
+
+            if pending_close:
+                # An owner asked to close, but another wrapper is still
+                # using the backend. Record that the close is owed so the
+                # last borrower's release can finish the job, instead of
+                # leaking a backend whose owner has already gone away.
+                resource._close_after_holders = True
+                resource._close_after_holders_policy = policy or resource._close_policy
+                try:
+                    resource._close_report = resource._make_close_report(
+                        policy or resource._close_policy,
+                        status=CloseStatus.DEFERRED,
+                        reason="resource is still held by another wrapper",
+                    )
+                    resource._close_report.retained_holds = list(remaining)
+                except Exception:  # pragma: no cover - defensive
+                    pass
+            return None
+
+    def _close_from_owner(self, policy=None, timeout=None, holder=None):
+        # type: (Any, Optional[float], Any) -> Any
+        """Close after the last owning reference has been released."""
+        from .ownership import CloseStatus, parse_policy
+
+        with self._lifecycle_lock:
+            if self._lifecycle_state == "closed" and self._close_result is not None:
+                return self._close_result
+            if self._pending_children:
+                return self._resume_child_shutdown(policy, timeout)
+            active = [
+                hold
+                for hold in self._holds
+                if hold.active and hold.holder_alive and hold.holder is not self
+            ]
+            if active:
+                report = self._make_close_report(
+                    policy or self._close_policy,
+                    status=CloseStatus.DEFERRED,
+                    reason="resource is still held by another wrapper",
+                )
+                report.retained_holds = list(active)
+                self._close_report = report
+                self._close_after_holders = True
+                self._close_after_holders_policy = policy or self._close_policy
+                return report
+            self._close_after_holders = False
+            resolved = parse_policy(policy or self._close_policy)
+            self._close_policy = resolved
+            return self._run_shutdown(resolved, timeout, from_holder=True)
+
+    # ---------------------------------------------------------------- #
+    # Ownership ledger                                                 #
+    # ---------------------------------------------------------------- #
+
+    @property
+    def lifecycle_state(self):
+        # type: () -> Any
+        """`~fs.ownership.LifecycleState`: open, draining, or closed."""
+        from .ownership import LifecycleState
+
+        state = getattr(self, "_lifecycle_state", "open")
+        if state == "closing":
+            return LifecycleState.DRAINING
+        try:
+            return LifecycleState(state)
+        except ValueError:
+            return LifecycleState.OPEN
+
+    def _collect_holds(self):
+        # type: () -> None
+        """Drop holds whose holder has been garbage collected."""
+        holds = getattr(self, "_holds", None)
+        if holds is None:
+            return
+        holds[:] = [
+            hold
+            for hold in holds
+            if hold.holder_alive or hold.released
+        ]
+
+    @property
+    def close_policy(self):
+        # type: () -> Any
+        """`~fs.ownership.ClosePolicy`: the configured shutdown policy."""
+        from .ownership import parse_policy
+
+        return parse_policy(getattr(self, "_close_policy", "abort"))
+
+    @close_policy.setter
+    def close_policy(self, value):
+        # type: (Any) -> None
+        from .ownership import parse_policy
+
+        self._close_policy = parse_policy(value)
+
+    @property
+    def close_report(self):
+        # type: () -> Any
+        """`~fs.ownership.CloseReport`: the last close/shutdown report."""
+        return getattr(self, "_close_report", None)
+
+    @property
+    def close_result(self):
+        # type: () -> Any
+        """The terminal close report, or `None` while a close is deferred."""
+        return getattr(self, "_close_result", None)
+
+    @property
+    def is_closing(self):
+        # type: () -> bool
+        """`bool`: `True` once shutdown has been requested."""
+        return self.lifecycle_state in ("draining", "closed")
+
+    def holds(self, active_only=True, ownership=None):
+        # type: (bool, Any) -> List[Any]
+        """Get the recorded holds on this filesystem.
+
+        Each item is a `~fs.ownership.Hold` describing the holder, the
+        ownership role of the edge, and whether it has been released.
+        """
+        from .ownership import parse_ownership
+
+        self._collect_holds()
+        wanted = None if ownership is None else parse_ownership(ownership)
+        holds = [
+            hold
+            for hold in getattr(self, "_holds", ())
+            if (not active_only or hold.active)
+            and (wanted is None or hold.ownership is wanted)
+        ]
+        return holds
+
+    def holders(self, active_only=True):
+        # type: (bool) -> List[Any]
+        """Get the distinct holders currently recorded for this filesystem."""
+        return list(
+            dict.fromkeys(
+                hold.holder
+                for hold in self.holds(active_only=active_only)
+                if hold.holder is not None
+            )
+        )
+
+    def held_by(self, holder, active_only=True):
+        # type: (Any, bool) -> List[Any]
+        """Get holds on this filesystem made by a specific holder."""
+        return [hold for hold in self.holds(active_only) if hold.holder is holder]
+
+    def holding(self, active_only=True):
+        # type: (bool) -> List[Any]
+        """Get the holds this filesystem has on its children."""
+        held = getattr(self, "_held", None)
+        if held is not None:
+            held[:] = [hold for hold in held if hold.holder_alive]
+        return [
+            hold
+            for hold in getattr(self, "_held", ())
+            if (not active_only or hold.active) and hold.holder_alive
+        ]
+
+    def holds_report(self, active_only=True):
+        # type: (bool) -> Dict[Text, Any]
+        """Get a serialisable description of this filesystem's holds."""
+        return {
+            "fs": repr(self),
+            "state": self.lifecycle_state.value,
+            "holds": [hold.to_dict() for hold in self.holds(active_only)],
+            "holding": [hold.to_dict() for hold in self.holding(active_only)],
+        }
+
+    def ownership_report(self):
+        # type: () -> Dict[Text, Any]
+        """Alias for `~FS.holds_report`."""
+        return self.holds_report()
+
+    def explain_open(self):
+        # type: () -> Dict[Text, Any]
+        """Explain why this filesystem is still open in terms of real holds.
+
+        The result contains the active holds, open handle count, admitted
+        operation count, and a human readable ``reason``. A closed
+        filesystem reports that all references were released.
+        """
+        state = self.lifecycle_state
+        active_holds = self.holds(active_only=True)
+        reason = ""
+        if state.value == "closed":
+            reason = "closed: all references released"
+        elif active_holds:
+            reason = "held by " + ", ".join(
+                repr(hold.holder) for hold in active_holds
+            )
+        elif len(self._handles):
+            reason = "{} open file handle(s)".format(len(self._handles))
+        elif self._admitted:
+            reason = "{} admitted operation(s)".format(self._admitted)
+        else:
+            reason = "open: no active holds, handles, or operations"
+        return {
+            "fs": repr(self),
+            "state": state.value,
+            "open": state.value != "closed",
+            "reason": reason,
+            "holds": [hold.to_dict() for hold in active_holds],
+            "holding": [hold.to_dict() for hold in self.holding(active_only=True)],
+            "open_handles": len(self._handles),
+            "active_operations": self._admitted,
+            "close_report": self.close_report.as_dict()
+            if self.close_report is not None
+            else None,
+        }
+
+    why_open = explain_open
+
+    def own(self, resource, label=None, share=False):
+        # type: (FS, Optional[Text], bool) -> Any
+        """Record an owning hold on ``resource`` and return the hold."""
+        from .ownership import Ownership
+
+        return self._add_hold(resource, Ownership.OWNED, label=label, share=share)
+
+    def borrow(self, resource, label=None, share=False):
+        # type: (FS, Optional[Text], bool) -> Any
+        """Record a borrowed hold on ``resource`` and return the hold."""
+        from .ownership import Ownership
+
+        return self._add_hold(resource, Ownership.BORROWED, label=label, share=share)
+
+    def hold(self, resource, ownership="owned", label=None, share=False):
+        # type: (FS, Any, Optional[Text], bool) -> Any
+        """Record a hold of ``resource`` with an explicit ownership role."""
+        from .ownership import Ownership, parse_ownership
+
+        return self._add_hold(
+            resource,
+            parse_ownership(ownership, default=Ownership.BORROWED),
+            label=label,
+            share=share,
+        )
+
+    def __repr__(self):
+        # type: () -> Text
+        state = getattr(self, "_lifecycle_state", "open")
+        return "{}({!r})".format(type(self).__name__, state)
+
+    def _add_hold(self, resource, ownership, label=None, share=False):
+        # type: (FS, Any, Optional[Text], bool) -> Any
+        from .ownership import Hold, Ownership, cascade_of
+        from .errors import UnsafeSharing
+
+        if not isinstance(resource, FS):
+            raise TypeError("hold target must be an FS object")
+        if resource is self:
+            raise ValueError("a filesystem may not hold itself")
+
+        with self._lifecycle_lock:
+            self.check()
+
+        with resource._lifecycle_lock:
+            existing = [
+                other
+                for other in resource._holds
+                if other.active and other.holder_alive
+            ]
+            if ownership is Ownership.OWNED and resource.isclosed():
+                raise ValueError("cannot own a closed filesystem")
+
+            # A single reference is never "shared": the holder is the sole
+            # custodian and may do what it likes with its child. When more
+            # than one wrapper references the same node, every participant
+            # must declare how it closes, otherwise one task could silently
+            # cascade into another task's backend.
+            if share and existing:
+                participants = [resource, self]
+                participants.extend(other.holder for other in existing)
+                for node in participants:
+                    if node is None:
+                        continue
+                    cascade = cascade_of(node)
+                    if not cascade.safe_to_share:
+                        raise UnsafeSharing(
+                            resource, holder=node, cascade=cascade
+                        )
+
+            hold = Hold(resource, self, ownership, label=label)
+            resource._holds.append(hold)
+        with self._lifecycle_lock:
+            self._held.append(hold)
+        return hold
+
+    def release_hold(self, resource=None, hold=None):
+        # type: (Optional[FS], Optional[Any]) -> Any
+        """Release a previously recorded hold, without closing borrowed children."""
+        target = hold
+        if target is None:
+            candidates = [
+                item
+                for item in getattr(self, "_held", ())
+                if item.active and (resource is None or item.resource is resource)
+            ]
+            if not candidates:
+                return None
+            target = candidates[0]
+        if target.released:
+            return target.close_report
+        with self._lifecycle_lock:
+            if target in self._held:
+                self._held.remove(target)
+        return self._release_hold(target, policy=self._close_policy)
+
+    def begin_operation(self):
+        # type: () -> Any
+        """Context manager that admits one operation for shutdown tracking."""
+        return self._operation()
+
+    def operation(self):
+        # type: () -> Any
+        """Alias for `~FS.begin_operation`."""
+        return self._operation()
+
+    @contextmanager
+    def _operation(self):
+        # type: () -> Iterator[None]
+        with self._lifecycle_lock:
+            self.check()
+            self._admitted += 1
+        try:
+            yield
+        finally:
+            with self._lifecycle_lock:
+                self._admitted -= 1
+                self._notify_lifecycle()
+
+    def _iterate_operation(self, iterator):
+        # type: (Iterator[Any]) -> Iterator[Any]
+        """Yield from ``iterator`` while the iteration counts as admitted."""
+        with self._operation():
+            for item in iterator:
+                yield item
+
+    def _manage_handle(self, handle, path, token=None):
+        # type: (Any, Text, Any) -> Any
+        """Register an open file handle so shutdown can drain or abort it."""
+        from .ownership import ManagedFile
+
+        if isinstance(handle, ManagedFile) and handle._fs is self:
+            return handle
+        token = object() if token is None else token
+        managed = ManagedFile(handle, self, token, path)
+        with self._lifecycle_lock:
+            if self.lifecycle_state.value != "open":
+                managed.force_close()
+                raise errors.FilesystemClosed()
+            # A text stream and its binary delegate share one token; the
+            # text stream is the user-facing object which must be closed,
+            # and closing it closes the binary delegate in turn.
+            self._handles[token] = managed
+        return managed
+
+    track_handle = _manage_handle
+
+    def _release_handle(self, token, error=None):
+        # type: (Any, Optional[BaseException]) -> None
+        with self._lifecycle_lock:
+            self._handles.pop(token, None)
+            self._notify_lifecycle()
+
+    @property
+    def close_cascade_declared(self):
+        # type: () -> bool
+        """`bool`: whether this instance safely declares its close cascade."""
+        from .ownership import cascade_of
+
+        return cascade_of(self).safe_to_share
+
+    @property
+    def cascade(self):
+        # type: () -> Any
+        """`~fs.ownership.CloseCascade`: how this object cascades close."""
+        from .ownership import cascade_of
+
+        return cascade_of(self)
+
+    def _close_child_handles(self):
+        # type: () -> List[Any]
+        """Force close all open handles and return any errors."""
+        with self._lifecycle_lock:
+            return self._abort_handles_locked()
 
     def copy(
         self,
@@ -975,6 +1757,12 @@ class FS(object):
         """Check if the filesystem is closed."""
         return getattr(self, "_closed", False)
 
+    @property
+    def is_open(self):
+        # type: () -> bool
+        """`bool`: `True` while the filesystem admits new operations."""
+        return not self.isclosed() and self.lifecycle_state.value == "open"
+
     def isdir(self, path):
         # type: (Text) -> bool
         """Check if a path maps to an existing directory.
@@ -1255,7 +2043,14 @@ class FS(object):
             newline=newline,
             **options
         )
-        return io_stream
+        from .ownership import ManagedFile
+
+        if isinstance(bin_file, ManagedFile) and bin_file._fs is self:
+            # The binary handle is already tracked. Track the text wrapper
+            # under the same token so a shutdown closes the user-facing
+            # object (and therefore also the binary handle) exactly once.
+            return self._manage_handle(io_stream, path, token=bin_file._token)
+        return self._manage_handle(io_stream, path)
 
     def opendir(
         self,  # type: _F
@@ -1666,10 +2461,11 @@ class FS(object):
         """Check if a filesystem may be used.
 
         Raises:
-            fs.errors.FilesystemClosed: if the filesystem is closed.
+            fs.errors.FilesystemClosed: if the filesystem is closed or
+                shutdown has begun and is no longer admitting operations.
 
         """
-        if self.isclosed():
+        if self.isclosed() or self.lifecycle_state.value != "open":
             raise errors.FilesystemClosed()
 
     def match(self, patterns, name):

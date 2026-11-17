@@ -174,7 +174,7 @@ class WriteTarFS(WrapFS):
         self._temp_fs_url = temp_fs
         self._temp_fs = open_fs(temp_fs)
         self._meta = dict(self._temp_fs.getmeta())  # type: ignore
-        super(WriteTarFS, self).__init__(self._temp_fs)
+        super(WriteTarFS, self).__init__(self._temp_fs, ownership="owned")
 
     def __repr__(self):
         # type: () -> Text
@@ -193,14 +193,11 @@ class WriteTarFS(WrapFS):
         # type: () -> FS
         return self._temp_fs
 
-    def close(self):
-        # type: () -> None
+    def _finalize_close(self, report):
+        # type: (Any) -> None
         if not self.isclosed():
-            try:
-                self.write_tar()
-            finally:
-                self._temp_fs.close()
-        super(WriteTarFS, self).close()
+            self.write_tar()
+        super(WriteTarFS, self)._finalize_close(report)
 
     def write_tar(
         self,
@@ -443,7 +440,7 @@ class ReadTarFS(FS):
 
             rw.flush = _flush
 
-        return rw  # type: ignore
+        return self._manage_handle(rw, path)  # type: ignore
 
     def remove(self, path):
         # type: (Text) -> None
@@ -455,9 +452,9 @@ class ReadTarFS(FS):
         self.check()
         raise errors.ResourceReadOnly(path)
 
-    def close(self):
-        # type: () -> None
-        super(ReadTarFS, self).close()
+    def _finalize_close(self, report):
+        # type: (Any) -> None
+        super(ReadTarFS, self)._finalize_close(report)
         if hasattr(self, "_tar"):
             self._tar.close()
 

@@ -11,7 +11,7 @@ from .path import abspath, join, normpath, relpath
 from .wrapfs import WrapFS
 
 if typing.TYPE_CHECKING:
-    from typing import Text, Tuple
+    from typing import Any, Text, Tuple
 
     from .base import FS  # noqa: F401
 
@@ -29,10 +29,20 @@ class SubFS(WrapFS[_F], typing.Generic[_F]):
 
     """
 
-    def __init__(self, parent_fs, path):  # noqa: D107
-        # type: (_F, Text) -> None
-        super(SubFS, self).__init__(parent_fs)
+    #: A sub-directory borrows its parent by default. It never closes the
+    #: parent, so the parent may be shared with other sub-directories.
+    close_cascade = "self"
+
+    def __init__(self, parent_fs, path, ownership="borrowed"):  # noqa: D107
+        # type: (_F, Text, Any) -> None
         self._sub_dir = abspath(normpath(path))
+        super(SubFS, self).__init__(parent_fs, ownership=ownership)
+
+    @property
+    def parent_fs(self):
+        # type: () -> _F
+        """The parent filesystem this sub-directory borrows."""
+        return self._wrap_fs
 
     def __repr__(self):
         # type: () -> Text
@@ -55,9 +65,17 @@ class SubFS(WrapFS[_F], typing.Generic[_F]):
 
 
 class ClosingSubFS(SubFS[_F], typing.Generic[_F]):
-    """A version of `SubFS` which closes its parent when closed."""
+    """A version of `SubFS` which closes its parent when closed.
 
-    def close(self):
-        # type: () -> None
-        self.delegate_fs().close()
-        super(ClosingSubFS, self).close()
+    The parent is only closed if this sub-directory *owns* it and no other
+    wrapper still holds a reference. A shared parent therefore survives
+    closing one of its sub-directories.
+    """
+
+    close_cascade = "owned"
+
+    def __init__(self, parent_fs, path, ownership="owned"):  # noqa: D107
+        # type: (_F, Text, Any) -> None
+        super(ClosingSubFS, self).__init__(
+            parent_fs, path, ownership=ownership
+        )

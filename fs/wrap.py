@@ -211,7 +211,9 @@ class WrapReadOnly(WrapFS[_F], typing.Generic[_F]):
         self.check()
         if check_writable(mode):
             raise ResourceReadOnly(path)
-        return self._wrap_fs.openbin(path, mode=mode, buffering=-1, **options)
+        mode = mode.replace("t", "")
+        bin_file = self._wrap_fs.openbin(path, mode=mode, buffering=-1, **options)
+        return self._manage_handle(bin_file, path)
 
     def remove(self, path):
         # type: (Text) -> None
@@ -285,7 +287,7 @@ class WrapReadOnly(WrapFS[_F], typing.Generic[_F]):
         self.check()
         if check_writable(mode):
             raise ResourceReadOnly(path)
-        return self._wrap_fs.open(
+        open_file = self._wrap_fs.open(
             path,
             mode=mode,
             buffering=buffering,
@@ -295,6 +297,7 @@ class WrapReadOnly(WrapFS[_F], typing.Generic[_F]):
             line_buffering=line_buffering,
             **options
         )
+        return self._manage_handle(open_file, path)
 
     def writebytes(self, path, contents):
         # type: (Text, bytes) -> None

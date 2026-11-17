@@ -380,11 +380,11 @@ class MemoryFS(FS):
                 current_entry = current_entry.get_entry(path_component)
             return current_entry
 
-    def close(self):
-        # type: () -> None
+    def _finalize_close(self, report):
+        # type: (Any) -> None
         if not self._closed:
             del self.root
-        return super(MemoryFS, self).close()
+        return super(MemoryFS, self)._finalize_close(report)
 
     def getinfo(self, path, namespaces=None):
         # type: (Text, Optional[Collection[Text]]) -> Info
@@ -544,7 +544,7 @@ class MemoryFS(FS):
                 )
 
                 file_dir_entry.add_open_file(mem_file)
-                return mem_file  # type: ignore
+                return self._manage_handle(mem_file, path)  # type: ignore
 
             if file_name not in parent_dir_entry:
                 raise errors.ResourceNotFound(path)
@@ -557,7 +557,7 @@ class MemoryFS(FS):
                 path=_path, memory_fs=self, mode=mode, dir_entry=file_dir_entry
             )
             file_dir_entry.add_open_file(mem_file)
-            return mem_file  # type: ignore
+            return self._manage_handle(mem_file, path)  # type: ignore
 
     def remove(self, path):
         # type: (Text) -> None

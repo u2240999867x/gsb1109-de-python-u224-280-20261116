@@ -22,6 +22,8 @@ if typing.TYPE_CHECKING:
 
 __all__ = [
     "BulkCopyFailed",
+    "CloseDeferred",
+    "CloseFailed",
     "CreateFailed",
     "DestinationExists",
     "DirectoryExists",
@@ -47,12 +49,14 @@ __all__ = [
     "RemoteConnectionError",
     "RemoveRootError",
     "ResourceError",
+    "ResourceHeld",
     "ResourceInvalid",
     "ResourceLocked",
     "ResourceNotFound",
     "ResourceReadOnly",
     "Unsupported",
     "UnsupportedHash",
+    "UnsafeSharing",
 ]
 
 
@@ -96,6 +100,80 @@ class FilesystemClosed(FSError):
     """Attempt to use a closed filesystem."""
 
     default_message = "attempt to use closed filesystem"
+
+
+class CloseDeferred(FSError):
+    """A filesystem could not be closed while it was still in use.
+
+    The filesystem has stopped admitting new operations, but it remains
+    active until the admitted reads / open handles have drained. Calling
+    `~fs.base.FS.close` again resumes the shutdown.
+    """
+
+    default_message = "filesystem close deferred: {reason}"
+
+    def __init__(self, reason="still in use", report=None):  # noqa: D107
+        # type: (str, object) -> None
+        self.reason = reason
+        self.report = report
+        super(CloseDeferred, self).__init__()
+
+    def __reduce__(self):
+        return type(self), (self.reason, self.report)
+
+
+class CloseFailed(FSError):
+    """One or more resources could not be released during close."""
+
+    default_message = "filesystem close failed: {details}"
+
+    def __init__(self, details="", report=None):  # noqa: D107
+        # type: (str, object) -> None
+        self.details = details
+        self.report = report
+        super(CloseFailed, self).__init__()
+
+    def __reduce__(self):
+        return type(self), (self.details, self.report)
+
+
+class ResourceHeld(FSError):
+    """A resource is still held by another filesystem wrapper."""
+
+    default_message = "resource {resource!r} is still held by {holders}"
+
+    def __init__(self, resource, holders=()):  # noqa: D107
+        # type: (object, object) -> None
+        self.resource = resource
+        self.holders = list(holders)
+        super(ResourceHeld, self).__init__()
+
+    def __str__(self):
+        return self.default_message.format(
+            resource=repr(self.resource),
+            holders=", ".join(repr(holder) for holder in self.holders) or "unknown",
+        )
+
+
+class UnsafeSharing(FSError):
+    """A wrapper cannot safely share a child with an opaque cascade."""
+
+    default_message = (
+        "cannot safely share {resource}: {holder} does not declare "
+        "whether closing it cascades to its children"
+    )
+
+    def __init__(self, resource, holder=None, cascade=None):  # noqa: D107
+        # type: (object, object, object) -> None
+        self.resource = resource
+        self.holder = holder
+        self.cascade = cascade
+        super(UnsafeSharing, self).__init__()
+
+    def __str__(self):
+        return self.default_message.format(
+            resource=repr(self.resource), holder=repr(self.holder)
+        )
 
 
 class BulkCopyFailed(FSError):

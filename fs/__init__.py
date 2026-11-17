@@ -8,5 +8,16 @@ from ._fscompat import fsdecode, fsencode
 from ._version import __version__
 from .enums import ResourceType, Seek
 from .opener import open_fs
+from .ownership import CloseCascade, ClosePolicy, CloseStatus, LifecycleState, Ownership
 
-__all__ = ["__version__", "ResourceType", "Seek", "open_fs"]
+__all__ = [
+    "__version__",
+    "CloseCascade",
+    "ClosePolicy",
+    "CloseStatus",
+    "LifecycleState",
+    "Ownership",
+    "ResourceType",
+    "Seek",
+    "open_fs",
+]

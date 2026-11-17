@@ -16,6 +16,7 @@ Reference
    reference/move.rst
    reference/mode.rst
    reference/opener.rst
+   reference/ownership.rst
    reference/path.rst
    reference/permissions.rst
    reference/tools.rst

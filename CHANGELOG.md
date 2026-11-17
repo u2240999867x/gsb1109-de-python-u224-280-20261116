@@ -11,6 +11,17 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 
 ### Added
 
+- Added an explicit ownership and shutdown protocol for composed
+  filesystems. References are recorded in a queryable ledger (`FS.holds`,
+  `FS.holding`, `FS.explain_open`), and `MountFS`, `MultiFS`, `SubFS`,
+  `ClosingSubFS` and `WrapFS` accept ``ownership`` declarations. Closing
+  one task no longer closes a backend another task still uses; repeated or
+  failed closes release each reference at most once, and sharing a wrapper
+  whose cascade behaviour is unknown raises `fs.errors.UnsafeSharing`.
+- Added ``close(policy=..., timeout=...)`` / ``FS.shutdown()`` with
+  ``drain``, ``abort`` and ``defer`` policies, admitted-operation tracking,
+  managed file handles, and a `fs.ownership.CloseReport` describing why
+  each resource was closed, deferred or retained.
 - Added `filter_glob` and `exclude_glob` parameters to `fs.walk.Walker`.
   Closes [#459](https://github.com/PyFilesystem/pyfilesystem2/issues/459).
 

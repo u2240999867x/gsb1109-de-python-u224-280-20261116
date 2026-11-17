@@ -13,6 +13,7 @@ from . import errors
 from .base import FS
 from .mode import check_writable
 from .opener import open_fs
+from .ownership import Ownership, parse_ownership, parse_policy
 from .path import abspath, normpath
 
 if typing.TYPE_CHECKING:
@@ -21,6 +22,7 @@ if typing.TYPE_CHECKING:
         Any,
         BinaryIO,
         Collection,
+        Dict,
         Iterator,
         List,
         MutableMapping,
@@ -52,18 +54,44 @@ class MultiFS(FS):
 
     _meta = {"virtual": True, "read_only": False, "case_insensitive": False}
 
-    def __init__(self, auto_close=True):
-        # type: (bool) -> None
+    close_cascade = "owned"
+
+    def __init__(
+        self,
+        auto_close=True,  # type: Any
+        ownership=None,  # type: Any
+        close_policy="abort",  # type: Any
+    ):
+        # type: (...) -> None
         """Create a new MultiFS.
 
         Arguments:
-            auto_close (bool): If `True` (the default), the child
-                filesystems will be closed when `MultiFS` is closed.
+            auto_close (bool or str): If `True` (the default), added
+                filesystems are owned and closed when this filesystem is
+                closed *and no other wrapper still holds them*. If
+                `False`, added filesystems are borrowed. The strings
+                ``"owned"`` and ``"borrowed"`` are accepted as explicit
+                aliases.
+            ownership (str, optional): The default ownership role for
+                added filesystems, if ``auto_close`` is not explicit.
+            close_policy (str): How close treats open handles and admitted
+                operations: ``"drain"``, ``"abort"`` or ``"defer"``.
 
         """
         super(MultiFS, self).__init__()
 
-        self._auto_close = auto_close
+        if isinstance(auto_close, bool):
+            default_ownership = (
+                Ownership.OWNED if auto_close else Ownership.BORROWED
+            )
+        else:
+            default_ownership = parse_ownership(auto_close)
+        if ownership is not None:
+            default_ownership = parse_ownership(ownership)
+
+        self._close_policy = parse_policy(close_policy)
+        self._default_ownership = default_ownership
+        self._auto_close = default_ownership is Ownership.OWNED
         self.write_fs = None  # type: Optional[FS]
         self._write_fs_name = None  # type: Optional[Text]
         self._sort_index = 0
@@ -82,8 +110,16 @@ class MultiFS(FS):
         # type: () -> Text
         return "<multifs>"
 
-    def add_fs(self, name, fs, write=False, priority=0):
-        # type: (Text, FS, bool, int) -> None
+    def add_fs(
+        self,
+        name,  # type: Text
+        fs,  # type: Union[FS, Text]
+        write=False,  # type: bool
+        priority=0,  # type: int
+        ownership=None,  # type: Any
+        auto_close=None,  # type: Any
+    ):
+        # type: (...) -> None
         """Add a filesystem to the MultiFS.
 
         Arguments:
@@ -97,14 +133,28 @@ class MultiFS(FS):
                 descending priority order and then by the reverse order
                 they were added. So by default, the most recently added
                 filesystem will be looked at first.
+            ownership (str, optional): ``"owned"`` or ``"borrowed"``.
+                Defaults to the MultiFS default.
+            auto_close (bool, optional): Legacy alias for ``ownership``.
 
         """
+        self.check()
         if isinstance(fs, text_type):
             fs = open_fs(fs)
 
         if not isinstance(fs, FS):
             raise TypeError("fs argument should be an FS object or FS URL")
+        if fs is self:
+            raise ValueError("Unable to add self")
 
+        if auto_close is not None:
+            role = Ownership.OWNED if bool(auto_close) else Ownership.BORROWED
+        elif ownership is not None:
+            role = parse_ownership(ownership)
+        else:
+            role = self._default_ownership
+
+        self.hold(fs, role, label=name, share=True)
         self._filesystems[name] = _PrioritizedFS(
             priority=(priority, self._sort_index), fs=fs
         )
@@ -187,16 +237,14 @@ class MultiFS(FS):
                 return name, fs
         return None, None
 
-    def close(self):
-        # type: () -> None
-        self._closed = True
-        if self._auto_close:
-            try:
-                for _order, fs in self._filesystems.values():
-                    fs.close()
-            finally:
+    def close(self, policy=None, timeout=None):
+        # type: (Any, Optional[float]) -> Any
+        result = super(MultiFS, self).close(policy=policy, timeout=timeout)
+        if result is not None and result.complete:
+            if self._auto_close:
                 self._filesystems.clear()
                 self._resort()
+        return result
 
     def getinfo(self, path, namespaces=None):
         # type: (Text, Optional[Collection[Text]]) -> Info
@@ -212,17 +260,18 @@ class MultiFS(FS):
     def listdir(self, path):
         # type: (Text) -> List[Text]
         self.check()
-        directory = []
-        exists = False
-        for _name, _fs in self.iterate_fs():
-            try:
-                directory.extend(_fs.listdir(path))
-            except errors.ResourceNotFound:
-                pass
-            else:
-                exists = True
-        if not exists:
-            raise errors.ResourceNotFound(path)
+        with self._operation():
+            directory = []
+            exists = False
+            for _name, _fs in self.iterate_fs():
+                try:
+                    directory.extend(_fs.listdir(path))
+                except errors.ResourceNotFound:
+                    pass
+                else:
+                    exists = True
+            if not exists:
+                raise errors.ResourceNotFound(path)
         directory = list(OrderedDict.fromkeys(directory))
         return directory
 
@@ -244,7 +293,9 @@ class MultiFS(FS):
             _fs = self._writable_required(path)
         else:
             _fs = self._delegate_required(path)
-        return _fs.openbin(path, mode=mode, buffering=buffering, **options)
+        with self._operation():
+            bin_file = _fs.openbin(path, mode=mode, buffering=buffering, **options)
+        return self._manage_handle(bin_file, path)
 
     def remove(self, path):
         # type: (Text) -> None
@@ -270,7 +321,9 @@ class MultiFS(FS):
         exists = False
         for _name, fs in self.iterate_fs():
             try:
-                for info in fs.scandir(path, namespaces=namespaces, page=page):
+                for info in self._iterate_operation(
+                    fs.scandir(path, namespaces=namespaces, page=page)
+                ):
                     if info.name not in seen:
                         yield info
                         seen.add(info.name)
@@ -284,21 +337,27 @@ class MultiFS(FS):
     def readbytes(self, path):
         # type: (Text) -> bytes
         self.check()
-        fs = self._delegate(path)
-        if fs is None:
-            raise errors.ResourceNotFound(path)
-        return fs.readbytes(path)
+        with self._operation():
+            fs = self._delegate(path)
+            if fs is None:
+                raise errors.ResourceNotFound(path)
+            return fs.readbytes(path)
 
     def download(self, path, file, chunk_size=None, **options):
         # type: (Text, BinaryIO, Optional[int], **Any) -> None
-        fs = self._delegate_required(path)
-        return fs.download(path, file, chunk_size=chunk_size, **options)
+        self.check()
+        with self._operation():
+            fs = self._delegate_required(path)
+            return fs.download(path, file, chunk_size=chunk_size, **options)
 
     def readtext(self, path, encoding=None, errors=None, newline=""):
         # type: (Text, Optional[Text], Optional[Text], Text) -> Text
         self.check()
-        fs = self._delegate_required(path)
-        return fs.readtext(path, encoding=encoding, errors=errors, newline=newline)
+        with self._operation():
+            fs = self._delegate_required(path)
+            return fs.readtext(
+                path, encoding=encoding, errors=errors, newline=newline
+            )
 
     def getsize(self, path):
         # type: (Text) -> int
@@ -391,15 +450,17 @@ class MultiFS(FS):
             _fs = self._writable_required(path)
         else:
             _fs = self._delegate_required(path)
-        return _fs.open(
-            path,
-            mode=mode,
-            buffering=buffering,
-            encoding=encoding,
-            errors=errors,
-            newline=newline,
-            **kwargs
-        )
+        with self._operation():
+            open_file = _fs.open(
+                path,
+                mode=mode,
+                buffering=buffering,
+                encoding=encoding,
+                errors=errors,
+                newline=newline,
+                **kwargs
+            )
+        return self._manage_handle(open_file, path)
 
     def upload(self, path, file, chunk_size=None, **options):
         # type: (Text, BinaryIO, Optional[int], **Any) -> None

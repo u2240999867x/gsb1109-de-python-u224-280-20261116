@@ -356,7 +356,7 @@ class OSFS(FS):
             binary_file = io.open(
                 sys_path, mode=_mode.to_platform_bin(), buffering=buffering, **options
             )
-        return binary_file  # type: ignore
+        return self._manage_handle(binary_file, path)  # type: ignore
 
     def remove(self, path):
         # type: (Text) -> None
@@ -647,7 +647,7 @@ class OSFS(FS):
             if six.PY2 and _mode.exclusive:
                 sys_path = os.open(sys_path, os.O_RDWR | os.O_CREAT | os.O_EXCL)
             _encoding = encoding or "utf-8"
-            return io.open(
+            open_file = io.open(
                 sys_path,
                 mode=_mode.to_platform(),
                 buffering=buffering,
@@ -656,6 +656,7 @@ class OSFS(FS):
                 newline=None if _mode.binary else newline,
                 **options
             )
+        return self._manage_handle(open_file, path)
 
     def setinfo(self, path, info):
         # type: (Text, RawInfo) -> None
