@@ -2,6 +2,17 @@
 Release History
 ===============
 
+Unreleased
+==========
+
+SLCDriver
+---------
+
+- |:sparkles:| timer, counter and string elements decode status bits and numeric words from their own locations
+- |:sparkles:| multi-element reads use a fixed element stride, so values are never borrowed from the next element
+- |:sparkles:| added ``collect`` / ``export`` for element records with per-subfield error isolation and canonical addresses
+- |:bug:| fixed ``ST`` addresses being parsed as timer addresses and subfields being dropped from addresses
+
 1.2.14
 ======
 

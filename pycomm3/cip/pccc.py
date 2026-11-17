@@ -133,6 +133,58 @@ PCCC_CT = {
     "UA": 10,
 }
 
+# SLC timer / counter / string element layouts.
+#
+# Each field is ``(name, offset, kind, bit)`` where ``offset`` is the byte
+# offset inside a single element, ``kind`` is one of ``numeric``,
+# ``unsigned``, ``status`` or ``data`` and ``bit`` is the bit number for
+# ``status`` fields (``None`` otherwise).  Numeric fields are whole 16-bit
+# words and status fields live in the dedicated status word; a status field
+# is never read from a numeric word.
+#
+# Timer and counter elements are 3 words: a status word followed by the
+# preset and accumulated values.  String elements are a length word followed
+# by the character data.
+PCCC_ELEMENT_FIELDS = {
+    "T": (
+        ("EN", 0, "status", 15),
+        ("TT", 0, "status", 14),
+        ("DN", 0, "status", 13),
+        ("PRE", 2, "numeric", None),
+        ("ACC", 4, "numeric", None),
+    ),
+    "C": (
+        ("CU", 0, "status", 15),
+        ("CD", 0, "status", 14),
+        ("DN", 0, "status", 13),
+        ("OV", 0, "status", 12),
+        ("UN", 0, "status", 11),
+        ("UA", 0, "status", 10),
+        ("PRE", 2, "numeric", None),
+        ("ACC", 4, "numeric", None),
+    ),
+    "ST": (
+        ("LEN", 0, "unsigned", None),
+        ("DATA", 2, "data", None),
+    ),
+}
+
+PCCC_ELEMENT_TYPE_NAMES = {
+    "T": "TIMER",
+    "C": "COUNTER",
+    "ST": "STRING",
+}
+
+PCCC_ELEMENT_FIELD_NAMES = {
+    file_type: tuple(field[0] for field in fields)
+    for file_type, fields in PCCC_ELEMENT_FIELDS.items()
+}
+
+PCCC_ELEMENT_FIELD_KINDS = {
+    file_type: {field[0]: field[2] for field in fields}
+    for file_type, fields in PCCC_ELEMENT_FIELDS.items()
+}
+
 _PCCC_DATA_TYPE = {
     "N": b"\x89",
     "B": b"\x85",
