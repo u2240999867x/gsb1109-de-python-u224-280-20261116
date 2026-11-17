@@ -58,8 +58,15 @@ from psrpcore._exceptions import (
     InvalidRunspacePoolState,
     MissingCipherError,
     PSRPCoreError,
+    SecureStringMigrationError,
 )
 from psrpcore._host import ClientHostResponder, ServerHostRequestor
+from psrpcore._migration import (
+    FieldMigration,
+    MigrationStatus,
+    SessionMigrationReport,
+    migrate_session_object,
+)
 from psrpcore._payload import PSRPPayload, StreamType
 from psrpcore._pipeline import GetMetadata, PowerShell
 from psrpcore._server import ServerPipeline, ServerRunspacePool
@@ -79,6 +86,7 @@ __all__ = [
     "EncryptedSessionKeyEvent",
     "EndOfPipelineInputEvent",
     "ErrorRecordEvent",
+    "FieldMigration",
     "GetAvailableRunspacesEvent",
     "GetCommandMetadataEvent",
     "GetMetadata",
@@ -88,6 +96,7 @@ __all__ = [
     "InvalidPipelineState",
     "InvalidProtocolVersion",
     "InvalidRunspacePoolState",
+    "MigrationStatus",
     "MissingCipherError",
     "PSRPCoreError",
     "PSRPEvent",
@@ -107,10 +116,12 @@ __all__ = [
     "RunspacePoolHostResponseEvent",
     "RunspacePoolInitDataEvent",
     "RunspacePoolStateEvent",
+    "SecureStringMigrationError",
     "ServerHostRequestor",
     "ServerPipeline",
     "ServerRunspacePool",
     "SessionCapabilityEvent",
+    "SessionMigrationReport",
     "SetMaxRunspacesEvent",
     "SetMinRunspacesEvent",
     "SetRunspaceAvailabilityEvent",
@@ -119,4 +130,5 @@ __all__ = [
     "UserEventEvent",
     "VerboseRecordEvent",
     "WarningRecordEvent",
+    "migrate_session_object",
 ]

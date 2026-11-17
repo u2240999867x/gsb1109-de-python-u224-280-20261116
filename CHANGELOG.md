@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+* Added `psrpcore.migrate_session_object` to re-key `PSSecureString` fields of an object package from one session key to another
+  * Migrated fields stay encrypted and are readable by the new session, plain strings and other values are untouched
+  * Returns a `psrpcore.SessionMigrationReport` with the per field outcome; fields that cannot be re-keyed stay pending and unchanged
+  * `psrpcore.SecureStringMigrationError` is raised in strict mode and locates the failing field by path without exposing plaintext
+
 ## 0.3.1 - 2024-11-11
 
 * Fixed CLIXML string pattern matching to only match valid hex sequences and not just any alphanumeric character

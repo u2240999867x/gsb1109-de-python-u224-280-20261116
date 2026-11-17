@@ -24,6 +24,30 @@ class MissingCipherError(PSRPCoreError):
         return self.message
 
 
+class SecureStringMigrationError(PSRPCoreError):
+    """A Secure String field could not be migrated to the new session.
+
+    The ``path`` attribute locates the field inside the migrated object
+    graph. Neither the message nor the attributes contain the plaintext or
+    ciphertext value of the field.
+    """
+
+    def __init__(
+        self,
+        path: str,
+        reason: str,
+    ) -> None:
+        self.path = path
+        self.reason = reason
+
+    @property
+    def message(self) -> str:
+        return f"Cannot migrate secure field at '{self.path}': {self.reason}"
+
+    def __str__(self) -> str:
+        return self.message
+
+
 class _InvalidState(PSRPCoreError, typing.Generic[T]):
     _STATE_OBJ: typing.Optional[str] = None
 
