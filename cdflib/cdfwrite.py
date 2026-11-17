@@ -17,6 +17,7 @@ import numpy.typing as npt
 
 import cdflib.epochs as cdfepoch
 from cdflib._gzip_wrapper import gzip_deflate
+from cdflib.dataclasses import AttEntry, GlobalAttEntry, VariableAttEntry
 from cdflib.logging import logger
 
 __all__ = ["CDF"]
@@ -495,13 +496,17 @@ class CDF:
                     offsetA = self.attrsinfo[attrNum][2]
                 else:
                     attrNum, offsetA = self._write_adr(f, False, attr)
-                entries = 0
                 if attrs is None:
                     continue
                 if not (isinstance(attrs, dict)):
                     raise ValueError("An attribute" "s attribute(s) not in dictionary form")
-                entryNumX = -1
-                poffset = -1
+                # The r and z entries live in independent AEDR chains, each with
+                # its own head/count/max fields in the ADR. Track them separately
+                # so an r entry and a z entry never get linked by entry number.
+                chain_state = {
+                    True: {"head": False, "count": 0, "max": -1, "prev": -1},
+                    False: {"head": False, "count": 0, "max": -1, "prev": -1},
+                }
                 for entryID, value in attrs.items():
                     if isinstance(entryID, str) and (not (entryID in self.zvars) and not (entryID in self.rvars)):
                         raise KeyError(f"{entryID} not found in the CDF")
@@ -535,8 +540,6 @@ class CDF:
                                 raise ValueError("Variable id: ", entryID, " not found")
                             else:
                                 zVar = False
-                    if entryNum > entryNumX:
-                        entryNumX = entryNum
                     if hasattr(value, "__len__") and not isinstance(value, str):
                         if len(value) == 2:
                             value2 = value[1]
@@ -586,28 +589,98 @@ class CDF:
                             logger.warning("Unknown data")
                             return
                     offset = self._write_aedr(f, False, attrNum, entryNum, data, dataType, numElems, zVar)
-                    if entries == 0:
+                    state = chain_state[zVar]
+                    if not state["head"]:
                         if zVar:
                             # ADR's AzEDRhead
                             self._update_offset_value(f, offsetA + 48, 8, offset)
                         else:
                             # ADR's AgrEDRhead
                             self._update_offset_value(f, offsetA + 20, 8, offset)
+                        state["head"] = True
                     else:
-                        # ADR's ADRnext
-                        self._update_offset_value(f, poffset + 12, 8, offset)
-                    poffset = offset
-                    entries = entries + 1
-                if zVar:
-                    # ADR's NzEntries
-                    self._update_offset_value(f, offsetA + 56, 4, entries)
-                    # ADR's MAXzEntry
-                    self._update_offset_value(f, offsetA + 60, 4, entryNumX)
-                else:
-                    # ADR's NgrEntries
-                    self._update_offset_value(f, offsetA + 36, 4, entries)
-                    # ADR's MAXgrEntry
-                    self._update_offset_value(f, offsetA + 40, 4, entryNumX)
+                        # AEDR's AEDRnext, within the same r/z chain
+                        self._update_offset_value(f, state["prev"] + 12, 8, offset)
+                    state["prev"] = offset
+                    state["count"] += 1
+                    if entryNum > state["max"]:
+                        state["max"] = entryNum
+
+                for zVar, state in chain_state.items():
+                    if state["count"] == 0:
+                        continue
+                    if zVar:
+                        # ADR's NzEntries
+                        self._update_offset_value(f, offsetA + 56, 4, state["count"])
+                        # ADR's MAXzEntry
+                        self._update_offset_value(f, offsetA + 60, 4, state["max"])
+                    else:
+                        # ADR's NgrEntries
+                        self._update_offset_value(f, offsetA + 36, 4, state["count"])
+                        # ADR's MAXgrEntry
+                        self._update_offset_value(f, offsetA + 40, 4, state["max"])
+
+    def _att_entry_payload(self, entry: AttEntry) -> List[Any]:
+        """
+        Turn a catalog entry back into the [value, data-type] payload understood
+        by write_globalattrs/write_variableattrs, preserving the original type.
+        """
+        data: Any = entry.value
+        if isinstance(data, np.ndarray):
+            if entry.data_type in (self.CDF_CHAR, self.CDF_UCHAR):
+                # Multi-string entries are stored in one CHAR value separated by "\N ".
+                data = "\\N ".join(str(item) for item in np.atleast_1d(data).tolist())
+            else:
+                # Numeric arrays must be plain lists for the writer to count
+                # every element instead of treating the array as one value.
+                data = np.atleast_1d(data).tolist()
+        return [data, entry.data_type_description]
+
+    @is_open
+    def write_globalatts_catalog(self, catalog: Dict[str, List[GlobalAttEntry]]) -> None:
+        """
+        Write global attributes from a sparse entry catalog (e.g. the output of
+        ``CDF.globalattscatalog``).
+
+        Every entry is written at its original ``entry_num``, so holes in the
+        entry numbering and empty (entry-less) attributes are preserved.
+        """
+        payload: Dict[str, Dict[int, Any]] = {}
+        for name, entries in catalog.items():
+            payload[name] = {entry.entry_num: self._att_entry_payload(entry) for entry in entries}
+        self.write_globalattrs(payload)
+
+    @is_open
+    def write_variableatts_catalog(self, catalog: Dict[str, List[VariableAttEntry]]) -> None:
+        """
+        Write variable attributes from a catalog bound by variable name and
+        r/z scope (e.g. the output of ``CDF.attcatalog`` for variable
+        attributes).
+
+        Bindings follow the variable names rather than the old entry numbers,
+        so the variables may have been filtered or reordered before this call.
+        Entries whose variable is not present in the new file are skipped. A
+        collision (two entries claiming the same attribute on the same
+        variable) raises instead of silently keeping only the last value.
+        """
+        payload: Dict[str, Dict[str, Any]] = {}
+        for name, entries in catalog.items():
+            mapping: Dict[str, Any] = {}
+            for entry in entries:
+                if entry.variable not in self.zvars and entry.variable not in self.rvars:
+                    logger.warning(
+                        f"Skipping variable attribute {name!r}: bound variable {entry.variable!r} "
+                        "does not exist in the new CDF."
+                    )
+                    continue
+                if entry.variable in mapping:
+                    raise ValueError(
+                        f"Conflicting entries for variable attribute {name!r} on variable "
+                        f"{entry.variable!r}; refusing to collapse them to the last value."
+                    )
+                mapping[entry.variable] = self._att_entry_payload(entry)
+            payload[name] = mapping
+        self.write_variableattrs(payload)
 
     @is_open
     def write_var(self, var_spec, var_attrs=None, var_data=None):

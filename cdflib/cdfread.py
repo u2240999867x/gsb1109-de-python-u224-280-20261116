@@ -5,6 +5,7 @@ import struct
 import sys
 import tempfile
 import urllib.request
+from numbers import Number
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -17,11 +18,14 @@ from cdflib.dataclasses import (
     AEDR,
     VDR,
     ADRInfo,
+    AttConflict,
     AttData,
     CDFInfo,
     CDRInfo,
     GDRInfo,
+    GlobalAttEntry,
     VDRInfo,
+    VariableAttEntry,
 )
 from cdflib.s3 import S3object
 from cdflib.utils import _squeeze_or_scalar
@@ -564,6 +568,217 @@ class CDF:
             if variable < 0 or variable >= num_variable:
                 raise ValueError(f"No variable by this number: {variable}")
             return self._read_varatts(variable, zVar)
+
+    def _get_adr(self, attribute: Union[str, int]) -> ADRInfo:
+        """
+        Resolve an attribute name or number to its ADRInfo.
+        """
+        position = self._first_adr
+        if isinstance(attribute, str):
+            for _ in range(self._num_att):
+                name, next_adr = self._read_adr_fast(position)
+                if name.strip().lower() == attribute.strip().lower():
+                    return self._read_adr(position)
+                position = next_adr
+            raise KeyError(f"No attribute {attribute}")
+        if isinstance(attribute, int):
+            if attribute < 0 or attribute >= self._num_att:
+                raise KeyError(f"No attribute {attribute}")
+            for _ in range(attribute):
+                _, next_adr = self._read_adr_fast(position)
+                position = next_adr
+            return self._read_adr(position)
+        raise ValueError("attribute keyword must be a string or integer")
+
+    def _read_aedr_chain(self, first_entry: int, num_entries: int) -> List[AEDR]:
+        """
+        Read every AEDR in an entry chain, in file order. Entry numbers are
+        kept on each AEDR, so gaps are preserved rather than compacted.
+        """
+        chain = []
+        position = first_entry
+        for _ in range(num_entries):
+            aedr_info = self._read_aedr(position)
+            chain.append(aedr_info)
+            position = aedr_info.next_aedr
+        return chain
+
+    def _aedr_entry_value(self, aedr_info: AEDR) -> Union[Number, str, np.ndarray]:
+        """
+        Convert the raw AEDR entry into the same scalar/string/array form that
+        attget returns for AttData.Data.
+        """
+        data = aedr_info.entry
+        if isinstance(data, str):
+            if aedr_info.num_strings is not None and aedr_info.num_strings > 1:
+                data = np.array(data.split("\\N "))
+            return data
+        return _squeeze_or_scalar(data)
+
+    def _global_att_entries(self, adr_info: ADRInfo) -> List[GlobalAttEntry]:
+        entries = []
+        for aedr_info in self._read_aedr_chain(adr_info.first_gr_entry, adr_info.num_gr_entry):
+            entries.append(
+                GlobalAttEntry(
+                    entry_num=aedr_info.entry_num,
+                    data_type=aedr_info.data_type,
+                    data_type_description=self._datatype_token(aedr_info.data_type),
+                    num_elements=aedr_info.num_elements,
+                    value=self._aedr_entry_value(aedr_info),
+                )
+            )
+        return entries
+
+    def _variable_att_entries(
+        self, adr_info: ADRInfo
+    ) -> Tuple[List[VariableAttEntry], List[AttConflict]]:
+        r_names, z_names = self._get_varnames()
+        entries: List[VariableAttEntry] = []
+        conflicts: List[AttConflict] = []
+        seen: Dict[str, VariableAttEntry] = {}
+        chains = (
+            ("rVariable", r_names, adr_info.first_gr_entry, adr_info.num_gr_entry),
+            ("zVariable", z_names, adr_info.first_z_entry, adr_info.num_z_entry),
+        )
+        for scope_name, names, first_entry, num_entries in chains:
+            for aedr_info in self._read_aedr_chain(first_entry, num_entries):
+                if 0 <= aedr_info.entry_num < len(names):
+                    variable_name = names[aedr_info.entry_num]
+                else:
+                    variable_name = str(aedr_info.entry_num)
+                entry = VariableAttEntry(
+                    entry_num=aedr_info.entry_num,
+                    data_type=aedr_info.data_type,
+                    data_type_description=self._datatype_token(aedr_info.data_type),
+                    num_elements=aedr_info.num_elements,
+                    value=self._aedr_entry_value(aedr_info),
+                    variable=variable_name,
+                    variable_scope=scope_name,
+                )
+                entries.append(entry)
+                if variable_name in seen:
+                    conflicts.append(
+                        AttConflict(
+                            target=variable_name,
+                            entries=[seen[variable_name], entry],
+                            message=(
+                                f"Variable attribute {adr_info.name!r} has more than one entry bound to "
+                                f"variable {variable_name!r}; all entries are retained instead of "
+                                "collapsing to the last value."
+                            ),
+                        )
+                    )
+                else:
+                    seen[variable_name] = entry
+        return entries, conflicts
+
+    def attcatalog(
+        self, attribute: Union[str, int]
+    ) -> Union[List[GlobalAttEntry], Tuple[List[VariableAttEntry], List[AttConflict]]]:
+        """
+        Return the full, sparse entry catalog of one attribute.
+
+        Every entry keeps its original entry number, numeric CDF data type and
+        value; global entry numbers may therefore have holes and are not
+        compacted.
+
+        Parameters
+        ----------
+        attribute : str, int
+            Attribute name or number.
+
+        Returns
+        -------
+        list
+            For a global attribute, a list of ``GlobalAttEntry`` ordered by
+            entry number.
+        tuple
+            For a variable attribute, a ``(entries, conflicts)`` tuple. Each
+            ``VariableAttEntry`` is bound to its variable by name and r/z
+            scope (not by entry number), and ``conflicts`` lists any entries
+            that collapse onto the same variable name.
+        """
+        adr_info = self._get_adr(attribute)
+        if adr_info.scope == 1:
+            return self._global_att_entries(adr_info)
+        return self._variable_att_entries(adr_info)
+
+    def globalattscatalog(self) -> Dict[str, List[GlobalAttEntry]]:
+        """
+        Return every global attribute as a sparse, entry-number-keyed catalog.
+
+        Attributes with no entries are present with an empty list, and gaps in
+        the entry numbers are preserved (each entry carries its own
+        ``entry_num``).
+        """
+        catalog: Dict[str, List[GlobalAttEntry]] = {}
+        position = self._first_adr
+        for _ in range(self._num_att):
+            adr_info = self._read_adr(position)
+            if adr_info.scope == 1:
+                catalog[adr_info.name] = self._global_att_entries(adr_info)
+            position = adr_info.next_adr_loc
+        return catalog
+
+    def varattscatalog(self, variable: Union[str, int]) -> Dict[str, VariableAttEntry]:
+        """
+        Return the variable attributes bound to one variable.
+
+        Each entry is bound through the variable name and r/z scope, so
+        filtering or reordering the variables in a rebuilt file does not rely
+        on entry numbers lining up.
+        """
+        r_names, z_names = self._get_varnames()
+        if isinstance(variable, str):
+            if variable in z_names:
+                var_num = z_names.index(variable)
+                z_var = True
+            elif variable in r_names:
+                var_num = r_names.index(variable)
+                z_var = False
+            else:
+                raise ValueError(f"No variable by this name: {variable}")
+        elif isinstance(variable, int):
+            if self._num_zvariable > 0 and self._num_rvariable > 0:
+                raise ValueError("This CDF has both r and z variables. Use variable name instead")
+            if self._num_zvariable > 0:
+                num_variable = self._num_zvariable
+                z_var = True
+            else:
+                num_variable = self._num_rvariable
+                z_var = False
+            if variable < 0 or variable >= num_variable:
+                raise ValueError(f"No variable by this number: {variable}")
+            var_num = variable
+        else:
+            raise ValueError("variable must be a string or an integer")
+
+        names = z_names if z_var else r_names
+        variable_name = names[var_num]
+        scope_name = "zVariable" if z_var else "rVariable"
+        catalog: Dict[str, VariableAttEntry] = {}
+        position = self._first_adr
+        for _ in range(self._num_att):
+            adr_info = self._read_adr(position)
+            if adr_info.scope != 1:
+                if z_var:
+                    first_entry, num_entries = adr_info.first_z_entry, adr_info.num_z_entry
+                else:
+                    first_entry, num_entries = adr_info.first_gr_entry, adr_info.num_gr_entry
+                for aedr_info in self._read_aedr_chain(first_entry, num_entries):
+                    if aedr_info.entry_num == var_num:
+                        catalog[adr_info.name] = VariableAttEntry(
+                            entry_num=aedr_info.entry_num,
+                            data_type=aedr_info.data_type,
+                            data_type_description=self._datatype_token(aedr_info.data_type),
+                            num_elements=aedr_info.num_elements,
+                            value=self._aedr_entry_value(aedr_info),
+                            variable=variable_name,
+                            variable_scope=scope_name,
+                        )
+                        break
+            position = adr_info.next_adr_loc
+        return catalog
 
     def _uncompress_rle(self, data: bytes) -> bytearray:
         result = bytearray()

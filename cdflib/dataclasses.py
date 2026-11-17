@@ -5,7 +5,21 @@ from typing import Dict, List, Optional, Union
 
 import numpy as np
 
-__all__ = ["ADRInfo", "CDFInfo", "CDRInfo", "GDRInfo", "VDRInfo", "AEDR", "VDR", "AEDR", "AttData"]
+__all__ = [
+    "ADRInfo",
+    "CDFInfo",
+    "CDRInfo",
+    "GDRInfo",
+    "VDRInfo",
+    "AEDR",
+    "VDR",
+    "AEDR",
+    "AttData",
+    "AttEntry",
+    "GlobalAttEntry",
+    "VariableAttEntry",
+    "AttConflict",
+]
 
 
 @dataclass
@@ -161,3 +175,71 @@ class AttData:
     Num_Items: int
     #: Data as a scalar value, a numpy array or a string.
     Data: Union[Number, str, np.ndarray]
+
+
+@dataclass
+class AttEntry:
+    """
+    A single attribute entry descriptor record (AEDR).
+
+    Attributes are sparse collections: entry numbers may have holes, so the
+    original entry number is always carried explicitly instead of being implied
+    by position.
+    """
+
+    #: Original entry number written in the AEDR. For a variable attribute this
+    #: is the variable number the entry is bound to; for a global attribute it
+    #: is the global attribute entry number.
+    entry_num: int
+    #: Numeric CDF data type (e.g. 52 for CDF_UCHAR, 4 for CDF_INT4).
+    data_type: int
+    #: Name of the CDF data type.
+    data_type_description: str
+    #: Number of elements in the entry.
+    num_elements: int
+    #: The entry value, as a scalar, string, or numpy array.
+    value: Union[Number, str, np.ndarray]
+
+
+@dataclass
+class GlobalAttEntry(AttEntry):
+    """
+    A global attribute entry. ``entry_num`` is the global entry number, which
+    may have gaps relative to the surrounding entries.
+    """
+
+
+@dataclass
+class VariableAttEntry(AttEntry):
+    """
+    A variable attribute entry bound to a specific variable.
+
+    The binding is carried as the variable name and r/z scope, so filtering
+    or reordering variables (which changes the variable number) does not break
+    the link.
+    """
+
+    #: Name of the variable this entry is bound to.
+    variable: str
+    #: ``"zVariable"`` or ``"rVariable"``.
+    variable_scope: str
+
+
+@dataclass
+class AttConflict:
+    """
+    Reports multiple entries that claim the same target in a flattened,
+    keyed representation of an attribute.
+
+    CDF never stores two entries with the same target, but a flattening step
+    (e.g. collapsing the r and z chains of a variable attribute onto one
+    variable-number key) can make them collide. The collision is reported
+    instead of silently keeping only the last value.
+    """
+
+    #: Target key that collided: an int entry number or a variable name.
+    target: Union[int, str]
+    #: Every entry claiming the target, in file order.
+    entries: List[AttEntry]
+    #: Human-readable description of the collision.
+    message: str
