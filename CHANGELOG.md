@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 
 - Added `filter_glob` and `exclude_glob` parameters to `fs.walk.Walker`.
   Closes [#459](https://github.com/PyFilesystem/pyfilesystem2/issues/459).
+- Added `fs.sync.sync`, a resumable alternative to `fs.mirror.mirror`.
+  Progress is recorded in a checkpoint state file built from a single
+  complete scan of the source; resuming binds to that stored plan unless
+  `rebuild=True` is passed, verified destination files are reused, and
+  receipts are re-validated against the live destination on resume.
 
 ### Fixed
 - Elaborated documentation of `filter_dirs` and `exclude_dirs` in `fs.walk.Walker`.

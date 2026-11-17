@@ -18,6 +18,7 @@ Reference
    reference/opener.rst
    reference/path.rst
    reference/permissions.rst
+   reference/sync.rst
    reference/tools.rst
    reference/tree.rst
    reference/walk.rst
