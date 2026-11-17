@@ -19,13 +19,15 @@
 ##############################################################################
 
 """
-Statistics, metrics, measurements, and values calculated *between* *two* trees.
+Statistics, metrics, measurements, and values calculated *between* trees or
+across collections of trees.
 """
 
 import math
 import collections
 import itertools
 from dendropy.utility import error
+from dendropy.utility import bitprocessing
 
 ###############################################################################
 ## Public Functions
@@ -398,6 +400,1057 @@ def find_missing_bipartitions(reference_tree, comparison_tree, is_bipartitions_u
         else:
             missing.append(bipartition)
     return missing
+
+###############################################################################
+### Resolution-Aware Split Support
+
+SPLIT_SUPPORT_SUPPORTED = "supported"
+SPLIT_SUPPORT_UNRESOLVED = "unresolved"
+SPLIT_SUPPORT_CONFLICTING = "conflicting"
+
+
+class IncomparableTreeScope(object):
+    """
+    Records why a tree cannot contribute evidence about splits defined on a
+    particular leaf set.
+    """
+
+    def __init__(self, tree, tree_index, leafset, missing_taxa, extra_taxa):
+        self.tree = tree
+        self.tree_index = tree_index
+        self.leafset = frozenset(leafset)
+        self.missing_taxa = tuple(sorted(missing_taxa, key=lambda t: (t.label or "")))
+        self.extra_taxa = tuple(sorted(extra_taxa, key=lambda t: (t.label or "")))
+
+    @property
+    def missing_taxon_labels(self):
+        return tuple(t.label for t in self.missing_taxa)
+
+    @property
+    def extra_taxon_labels(self):
+        return tuple(t.label for t in self.extra_taxa)
+
+    def __bool__(self):
+        return bool(self.missing_taxa or self.extra_taxa)
+
+    def __repr__(self):
+        return "<IncomparableTreeScope tree_index={} missing={} extra={}>".format(
+                self.tree_index,
+                self.missing_taxon_labels,
+                self.extra_taxon_labels)
+
+    def as_dict(self):
+        return {
+                "tree_index": self.tree_index,
+                "missing_taxon_labels": self.missing_taxon_labels,
+                "extra_taxon_labels": self.extra_taxon_labels,
+                }
+
+
+class SplitSupport(object):
+    """
+    Support evidence for a single split within a single leaf-set group.
+
+    Each comparable tree is classified as:
+
+    - ``"supported"``: the tree contains the split.
+    - ``"unresolved"``: the tree does not contain the split, but every split
+      on the tree is compatible with it. This is the signature of a
+      polytomy/multifurcation: the tree simply does not resolve the grouping.
+    - ``"conflicting"``: the tree contains at least one split incompatible
+      with the split. This is positive evidence against the grouping.
+
+    For a single tree, the status is :attr:`support_status`. Across a
+    collection, the per-tree statuses are exposed by :attr:`status_by_tree`,
+    and :attr:`support_status` follows the majority of informative trees.
+    ``support_frequency`` is calculated over *informative* trees only
+    (``supported + conflicting``). Unresolved trees are deliberately excluded
+    from the denominator; they are not evidence of zero support.
+    """
+
+    def __init__(self,
+            group,
+            bipartition,
+            status_by_tree,
+            incomparable_scopes=None):
+        self.group = group
+        self.bipartition = bipartition
+        self.split_bitmask = bipartition.split_bitmask
+        self.leafset_bitmask = bipartition.leafset_bitmask
+        self.tree_leafset_bitmask = bipartition.tree_leafset_bitmask
+        self._status_by_tree = collections.OrderedDict(status_by_tree)
+        self.incomparable_scopes = tuple(incomparable_scopes or ())
+        self.incomparable_tree_indices = tuple(
+                scope.tree_index for scope in self.incomparable_scopes)
+        taxa = group.taxon_namespace.bitmask_taxa_list(self.leafset_bitmask)
+        taxa = sorted(taxa, key=lambda t: (t.label or ""))
+        self.leafset_taxa = tuple(taxa)
+        self.leafset_labels = tuple(t.label for t in self.leafset_taxa)
+
+    def __repr__(self):
+        return "<SplitSupport {} supported={} unresolved={} conflicting={}>".format(
+                self.leafset_labels,
+                self.supported_count,
+                self.unresolved_count,
+                self.conflicting_count)
+
+    @property
+    def status_by_tree(self):
+        return self._status_by_tree
+
+    def _tree_indices_with_status(self, status):
+        return tuple(idx for idx, value in self._status_by_tree.items() if value == status)
+
+    @property
+    def supported_tree_indices(self):
+        return self._tree_indices_with_status(SPLIT_SUPPORT_SUPPORTED)
+
+    @property
+    def unresolved_tree_indices(self):
+        return self._tree_indices_with_status(SPLIT_SUPPORT_UNRESOLVED)
+
+    @property
+    def conflicting_tree_indices(self):
+        return self._tree_indices_with_status(SPLIT_SUPPORT_CONFLICTING)
+
+    @property
+    def supported_count(self):
+        return len(self.supported_tree_indices)
+
+    @property
+    def unresolved_count(self):
+        return len(self.unresolved_tree_indices)
+
+    @property
+    def conflicting_count(self):
+        return len(self.conflicting_tree_indices)
+
+    @property
+    def comparable_count(self):
+        return len(self._status_by_tree)
+
+    @property
+    def informative_count(self):
+        return self.supported_count + self.conflicting_count
+
+    @property
+    def incomparable_count(self):
+        return len(self.incomparable_scopes)
+
+    @property
+    def total_count(self):
+        return self.comparable_count + self.incomparable_count
+
+    @property
+    def support_frequency(self):
+        """
+        Proportion of *informative* comparable trees that contain the split.
+
+        Returns |None| if no comparable tree resolves the split either way.
+        """
+        if self.informative_count == 0:
+            return None
+        return float(self.supported_count) / self.informative_count
+
+    @property
+    def resolution_frequency(self):
+        """
+        Proportion of comparable trees that resolve the split (i.e., either
+        support or conflict with it).
+        """
+        if self.comparable_count == 0:
+            return None
+        return float(self.informative_count) / self.comparable_count
+
+    @property
+    def observed_frequency(self):
+        """
+        Proportion of all comparable trees that contain the split.
+
+        This is provided for descriptive purposes only: unlike
+        :attr:`support_frequency`, it counts unresolved trees in the
+        denominator, and so should not be interpreted as support.
+        """
+        if self.comparable_count == 0:
+            return None
+        return float(self.supported_count) / self.comparable_count
+
+    @property
+    def support_status(self):
+        """
+        Summary status of the split across comparable trees.
+
+        - ``"unresolved"``: no comparable tree resolves the split either way.
+        - ``"supported"``: more comparable trees support the split than
+          conflict with it.
+        - ``"conflicting"``: at least as many comparable trees conflict with
+          the split as support it.
+
+        Individual conflicts remain visible through
+        :attr:`conflicting_count` and :attr:`conflicting_tree_indices`; a
+        split can be ``"supported"`` and still be contradicted by some trees.
+        """
+        if self.informative_count == 0:
+            return SPLIT_SUPPORT_UNRESOLVED
+        if self.supported_count > self.conflicting_count:
+            return SPLIT_SUPPORT_SUPPORTED
+        return SPLIT_SUPPORT_CONFLICTING
+
+    @property
+    def is_contested(self):
+        """
+        |True| if at least one tree supports and at least one tree conflicts
+        with the split.
+        """
+        return self.supported_count > 0 and self.conflicting_count > 0
+
+    @property
+    def is_supported(self):
+        return self.support_status == SPLIT_SUPPORT_SUPPORTED
+
+    @property
+    def is_unresolved(self):
+        return self.support_status == SPLIT_SUPPORT_UNRESOLVED
+
+    @property
+    def is_conflicting(self):
+        return self.support_status == SPLIT_SUPPORT_CONFLICTING
+
+    def is_supported_by_majority(self, min_freq=0.5):
+        """
+        Returns |True| if the split is resolved by at least one comparable
+        tree and its :attr:`support_frequency` is at least ``min_freq``.
+        """
+        if min_freq is None:
+            return self.informative_count > 0
+        frequency = self.support_frequency
+        return frequency is not None and frequency >= min_freq
+
+    def as_dict(self):
+        return {
+                "split_bitmask": self.split_bitmask,
+                "leafset_bitmask": self.leafset_bitmask,
+                "leafset_labels": self.leafset_labels,
+                "supported": self.supported_count,
+                "unresolved": self.unresolved_count,
+                "conflicting": self.conflicting_count,
+                "incomparable": self.incomparable_count,
+                "comparable": self.comparable_count,
+                "informative": self.informative_count,
+                "support_frequency": self.support_frequency,
+                "resolution_frequency": self.resolution_frequency,
+                "observed_frequency": self.observed_frequency,
+                "support_status": self.support_status,
+                "is_contested": self.is_contested,
+                "status_by_tree": dict(self._status_by_tree),
+                "incomparable_tree_indices": self.incomparable_tree_indices,
+                }
+
+
+class SplitSupportGroup(object):
+    """
+    Resolution-aware split support for all trees in a collection that share
+    exactly the same leaf set (and rooting state).
+    """
+
+    def __init__(self,
+            taxon_namespace,
+            trees,
+            tree_indices,
+            leafset,
+            is_rooted):
+        self.taxon_namespace = taxon_namespace
+        self.trees = tuple(trees)
+        self.tree_indices = tuple(tree_indices)
+        self.leafset = frozenset(leafset)
+        self.is_rooted = is_rooted
+        self.splits = collections.OrderedDict()
+        self.incomparable = []
+        self.incomparable_candidates = []
+        self.include_trivial = False
+        self.all_tree_count = len(self.trees)
+
+    def __len__(self):
+        return len(self.splits)
+
+    def __iter__(self):
+        return iter(self.splits.values())
+
+    def __getitem__(self, split_bitmask):
+        return self.splits[split_bitmask]
+
+    def get(self, split_bitmask, default=None):
+        return self.splits.get(split_bitmask, default)
+
+    @property
+    def leafset_key(self):
+        return tuple(sorted(
+            self.taxon_namespace.accession_index(taxon)
+            for taxon in self.leafset))
+
+    @property
+    def leafset_labels(self):
+        return tuple(sorted(taxon.label for taxon in self.leafset))
+
+    @property
+    def leafset_bitmask(self):
+        return self.taxon_namespace.taxa_bitmask(taxa=self.leafset)
+
+    @property
+    def num_trees(self):
+        return len(self.trees)
+
+    @property
+    def incomparable_tree_indices(self):
+        return tuple(scope.tree_index for scope in self.incomparable)
+
+    @property
+    def incomparable_count(self):
+        return len(self.incomparable)
+
+    @property
+    def supported_splits(self):
+        return tuple(split for split in self
+                if split.support_status == SPLIT_SUPPORT_SUPPORTED)
+
+    @property
+    def unresolved_splits(self):
+        return tuple(split for split in self
+                if split.support_status == SPLIT_SUPPORT_UNRESOLVED)
+
+    @property
+    def conflicting_splits(self):
+        return tuple(split for split in self
+                if split.support_status == SPLIT_SUPPORT_CONFLICTING)
+
+    @property
+    def contested_splits(self):
+        return tuple(split for split in self if split.is_contested)
+
+    def consensus_tree(self, min_freq=0.5):
+        """
+        Returns a consensus tree for this leaf set.
+
+        Splits are added in descending order of :attr:`support_frequency`,
+        with unresolved trees excluded from the denominator. Splits that are
+        not resolved by any comparable tree are never added (and therefore
+        remain collapsed).
+        """
+        from dendropy.datamodel.treemodel import Tree
+        included = [split for split in self
+                if split.is_supported_by_majority(min_freq=min_freq)
+                and split.support_status == SPLIT_SUPPORT_SUPPORTED]
+        included.sort(key=lambda split: (
+            -(split.support_frequency if split.support_frequency is not None else -1.0),
+            -split.supported_count,
+            split.leafset_bitmask))
+        tree = Tree.from_split_bitmasks(
+                split_bitmasks=[split.split_bitmask for split in included],
+                taxon_namespace=self.taxon_namespace,
+                is_rooted=self.is_rooted)
+        tree.retain_taxa(self.leafset)
+        return tree
+
+    def as_dict(self):
+        return {
+                "leafset_labels": self.leafset_labels,
+                "num_trees": self.num_trees,
+                "tree_indices": self.tree_indices,
+                "incomparable_tree_indices": self.incomparable_tree_indices,
+                "splits": [split.as_dict() for split in self],
+                }
+
+
+class SplitSupportAnalysis(object):
+    """
+    Resolution-aware split support across a collection of trees.
+
+    Trees are partitioned by exact leaf set (and rooting state), so that every
+    conclusion is made only among comparable trees. Trees with missing or
+    extra leaves are recorded in :attr:`incomparable` rather than being
+    silently treated as absent support.
+    """
+
+    def __init__(self, taxon_namespace, trees, is_rooted, groups):
+        self.taxon_namespace = taxon_namespace
+        self.trees = tuple(trees)
+        self.is_rooted = is_rooted
+        self.groups = groups
+
+    def __len__(self):
+        return len(self.groups)
+
+    def __iter__(self):
+        return iter(self.groups.values())
+
+    def __getitem__(self, leafset_key):
+        return self.groups[leafset_key]
+
+    @property
+    def num_groups(self):
+        return len(self.groups)
+
+    @property
+    def leafsets(self):
+        return tuple(self.groups.keys())
+
+    def get_group(self, labels=None, taxa=None, leafset_bitmask=None):
+        """
+        Returns the leaf-set group matching the given criteria, or |None|.
+        """
+        if leafset_bitmask is not None:
+            key = tuple(sorted(
+                self.taxon_namespace.accession_index(taxon)
+                for taxon in self.taxon_namespace.bitmask_taxa_list(leafset_bitmask)))
+            return self.groups.get(key)
+        if taxa is None:
+            taxa = self.taxon_namespace.get_taxa(labels=labels)
+        key = tuple(sorted(
+            self.taxon_namespace.accession_index(taxon)
+            for taxon in taxa))
+        return self.groups.get(key)
+
+    @property
+    def primary_group(self):
+        """
+        Group with the largest number of trees (ties broken by leaf-set key).
+        """
+        if not self.groups:
+            return None
+        return max(self.groups.values(),
+                key=lambda group: (group.num_trees, tuple(-i for i in group.leafset_key)))
+
+    @property
+    def incomparable(self):
+        """
+        Incomparable-tree records relative to :attr:`primary_group`.
+        """
+        group = self.primary_group
+        if group is None:
+            return tuple()
+        return tuple(group.incomparable)
+
+    @property
+    def incomparable_tree_indices(self):
+        return tuple(scope.tree_index for scope in self.incomparable)
+
+    @property
+    def incomparable_by_leafset(self):
+        return collections.OrderedDict(
+                (group.leafset_key, tuple(group.incomparable))
+                for group in self.groups.values())
+
+    def consensus_trees(self, min_freq=0.5):
+        """
+        Returns an ordered mapping of leaf-set key to consensus tree.
+        """
+        return collections.OrderedDict(
+                (group.leafset_key, group.consensus_tree(min_freq=min_freq))
+                for group in self.groups.values())
+
+    def all_splits(self):
+        """
+        Returns a flat tuple of all :class:`SplitSupport` records, grouped by
+        leaf set and then in each group's support order.
+        """
+        records = []
+        for group in self.groups.values():
+            records.extend(group)
+        return tuple(records)
+
+    def as_dict(self):
+        return {
+                "is_rooted": self.is_rooted,
+                "num_trees": len(self.trees),
+                "groups": [group.as_dict() for group in self.groups.values()],
+                "incomparable": [scope.as_dict() for scope in self.incomparable],
+                }
+
+
+def _is_candidate_taxon(obj):
+    from dendropy.datamodel.taxonmodel import Taxon
+    return isinstance(obj, Taxon)
+
+
+def _normalize_candidate_specifications(candidates=None, candidate_labels=None):
+    specs = []
+    if candidates is not None:
+        from dendropy.datamodel.treemodel import Bipartition
+        if isinstance(candidates, Bipartition) or isinstance(candidates, int) or _is_candidate_taxon(candidates):
+            specs.append(candidates)
+        else:
+            candidates = list(candidates)
+            if not candidates:
+                pass
+            elif all(isinstance(x, str) for x in candidates):
+                specs.append(candidates)
+            elif all(_is_candidate_taxon(x) for x in candidates):
+                specs.append(candidates)
+            else:
+                specs.extend(candidates)
+    if candidate_labels is not None:
+        if isinstance(candidate_labels, str):
+            specs.append([candidate_labels])
+        else:
+            candidate_labels = list(candidate_labels)
+            if candidate_labels and all(isinstance(x, str) for x in candidate_labels):
+                specs.append(candidate_labels)
+            else:
+                specs.extend(candidate_labels)
+    return specs
+
+
+def _candidate_leafset_bitmask(spec, taxon_namespace, group_leafset):
+    from dendropy.datamodel.treemodel import Bipartition
+    from dendropy.datamodel.taxonmodel import Taxon
+    if isinstance(spec, Bipartition):
+        if spec.tree_leafset_bitmask is not None:
+            group_mask = taxon_namespace.taxa_bitmask(taxa=group_leafset)
+            if (spec.tree_leafset_bitmask & group_mask) != spec.tree_leafset_bitmask:
+                return None, "candidate leaf set is not contained in group leaf set"
+        return spec.leafset_bitmask, None
+    if isinstance(spec, int):
+        return spec, None
+    if isinstance(spec, Taxon):
+        return taxon_namespace.taxon_bitmask(spec), None
+    taxa = []
+    for item in spec:
+        if isinstance(item, Taxon):
+            taxa.append(item)
+        else:
+            taxon = taxon_namespace.get_taxon(label=item)
+            if taxon is None:
+                return None, "taxon label not found in namespace: {}".format(item)
+            taxa.append(taxon)
+    return taxon_namespace.taxa_bitmask(taxa=taxa), None
+
+
+def summarize_split_support(trees,
+        candidates=None,
+        candidate_labels=None,
+        min_freq=0.5,
+        is_rooted=None,
+        is_bipartitions_updated=False,
+        include_trivial=False):
+    """
+    Summarizes split support across a collection of trees while treating
+    multifurcations as unresolved rather than as zero support.
+
+    For each exact leaf set (and rooting state), every candidate split is
+    evaluated against every tree in that group and classified as:
+
+    - ``"supported"``: the split is present on the tree.
+    - ``"unresolved"``: the split is absent, but the tree contains no split
+      incompatible with it (typically because of a polytomy).
+    - ``"conflicting"``: the tree contains at least one split incompatible
+      with the candidate.
+
+    :attr:`SplitSupport.support_frequency` uses only the informative
+    (supported plus conflicting) trees as its denominator. Unresolved trees
+    therefore do not depress support values. ``observed_frequency`` is also
+    available for callers that explicitly want the proportion over all
+    comparable trees.
+
+    Trees whose leaf sets differ from a group's leaf set are not compared
+    against that group's splits. They are recorded as
+    :class:`IncomparableTreeScope` objects, with the missing and extra taxa,
+    under ``group.incomparable`` and ``analysis.incomparable``.
+
+    Parameters
+    ----------
+    trees : iterable of |Tree| objects
+        Trees to summarize. They must share the same |TaxonNamespace| object
+        and rooting state. A |TreeList| is accepted directly.
+    candidates : iterable, optional
+        Candidate splits. Each candidate may be a |Bipartition|, a split
+        bitmask, an iterable of |Taxon| objects, or an iterable of taxon
+        labels. If |None|, all non-trivial splits observed on at least one
+        tree in each leaf-set group are used. Candidates that are not
+        contained within a group's leaf set are skipped for that group and
+        recorded in ``group.incomparable_candidates``.
+    candidate_labels : iterable of iterables of str, optional
+        Convenience form for candidates specified as label collections.
+    min_freq : float
+        Threshold used by :meth:`SplitSupport.is_supported_by_majority` and
+        by consensus-tree construction. This does not change the recorded
+        counts or ``support_frequency``.
+    is_rooted : bool, optional
+        Rooting state to assume. If |None|, the state of the first tree is
+        used and all trees must agree.
+    is_bipartitions_updated : bool
+        If |False| (default), bipartitions are recalculated on every tree.
+        If |True|, existing encodings are reused when present.
+    include_trivial : bool
+        If |False| (default), trivial splits (single leaf versus the rest)
+        are excluded.
+
+    Returns
+    -------
+    SplitSupportAnalysis
+        Grouped split-support results, including incomparable-tree scopes and
+        consensus-tree construction.
+    """
+    from dendropy.datamodel.treemodel import Bipartition
+
+    trees = list(trees)
+    if not trees:
+        raise ValueError("At least one tree is required")
+    taxon_namespace = trees[0].taxon_namespace
+    for tree in trees[1:]:
+        if tree.taxon_namespace is not taxon_namespace:
+            raise error.TaxonNamespaceIdentityError(trees[0], tree)
+    if is_rooted is None:
+        is_rooted = trees[0].is_rooted
+    for tree in trees:
+        if tree.is_rooted is not is_rooted:
+            raise error.MixedRootingError(
+                    "Cannot summarize split support across mixed rooting states")
+
+    tree_leafsets = []
+    for tree_index, tree in enumerate(trees):
+        if not is_bipartitions_updated:
+            tree.encode_bipartitions()
+        elif tree.bipartition_encoding is None:
+            tree.encode_bipartitions()
+        elif tree._has_unrooted_basal_bifurcation():
+            tree._warn_using_uncollapsed_bipartition_encoding()
+        leafset = frozenset(
+                node.taxon for node in tree.leaf_node_iter()
+                if node.taxon is not None)
+        if len(leafset) != len(tree.leaf_nodes()):
+            raise ValueError(
+                    "Tree at index {} has leaf nodes without associated taxa; "
+                    "split support requires every leaf to have a taxon".format(tree_index))
+        tree_leafsets.append(leafset)
+
+    groups_by_leafset = collections.OrderedDict()
+    for tree_index, leafset in enumerate(tree_leafsets):
+        groups_by_leafset.setdefault(leafset, []).append(tree_index)
+    sorted_leafsets = sorted(
+            groups_by_leafset,
+            key=lambda leafset: (
+                -len(groups_by_leafset[leafset]),
+                tuple(sorted(
+                    taxon_namespace.accession_index(taxon)
+                    for taxon in leafset))))
+
+    analysis_groups = collections.OrderedDict()
+    candidate_specs = _normalize_candidate_specifications(
+            candidates=candidates,
+            candidate_labels=candidate_labels)
+
+    for leafset in sorted_leafsets:
+        tree_indices = groups_by_leafset[leafset]
+        group_trees = [trees[idx] for idx in tree_indices]
+        group = SplitSupportGroup(
+                taxon_namespace=taxon_namespace,
+                trees=group_trees,
+                tree_indices=tree_indices,
+                leafset=leafset,
+                is_rooted=is_rooted)
+        group.all_tree_count = len(trees)
+        group.include_trivial = include_trivial
+        group_mask = group.leafset_bitmask
+        group_tree_splits = {}
+        for tree_index, tree in zip(tree_indices, group_trees):
+            group_tree_splits[tree_index] = [
+                    b.split_bitmask for b in tree.bipartition_encoding
+                    if include_trivial or not b.is_trivial()]
+
+        candidate_bipartitions = collections.OrderedDict()
+        if candidate_specs:
+            for spec in candidate_specs:
+                leafset_bitmask, reason = _candidate_leafset_bitmask(
+                        spec=spec,
+                        taxon_namespace=taxon_namespace,
+                        group_leafset=leafset)
+                if leafset_bitmask is None:
+                    group.incomparable_candidates.append({
+                        "candidate": spec,
+                        "reason": reason,
+                        })
+                    continue
+                if (leafset_bitmask & group_mask) != leafset_bitmask:
+                    group.incomparable_candidates.append({
+                        "candidate": spec,
+                        "reason": "candidate includes taxa outside group leaf set",
+                        })
+                    continue
+                leafset_bitmask &= group_mask
+                if leafset_bitmask == 0 or leafset_bitmask == group_mask:
+                    continue
+                bipartition = Bipartition(
+                        leafset_bitmask=leafset_bitmask,
+                        tree_leafset_bitmask=group_mask,
+                        is_rooted=is_rooted,
+                        compile_bipartition=True)
+                if bipartition.is_trivial() and not include_trivial:
+                    continue
+                candidate_bipartitions.setdefault(
+                        bipartition.split_bitmask, bipartition)
+        else:
+            for tree in group_trees:
+                for bipartition in tree.bipartition_encoding:
+                    if bipartition.split_bitmask in (0, group_mask):
+                        continue
+                    if bipartition.is_trivial() and not include_trivial:
+                        continue
+                    observed = Bipartition(
+                            bitmask=bipartition.split_bitmask,
+                            tree_leafset_bitmask=group_mask,
+                            is_rooted=is_rooted,
+                            compile_bipartition=True)
+                    candidate_bipartitions.setdefault(
+                            observed.split_bitmask, observed)
+
+        for bipartition in candidate_bipartitions.values():
+            candidate_split = bipartition.split_bitmask
+            status_by_tree = collections.OrderedDict()
+            for tree_index, tree in zip(tree_indices, group_trees):
+                tree_splits = group_tree_splits[tree_index]
+                if candidate_split in tree_splits:
+                    status = SPLIT_SUPPORT_SUPPORTED
+                elif any(not Bipartition.is_compatible_bitmasks(
+                        candidate_split, other_split, group_mask)
+                        for other_split in tree_splits):
+                    status = SPLIT_SUPPORT_CONFLICTING
+                else:
+                    status = SPLIT_SUPPORT_UNRESOLVED
+                status_by_tree[tree_index] = status
+            group.splits[candidate_split] = SplitSupport(
+                    group=group,
+                    bipartition=bipartition,
+                    status_by_tree=status_by_tree)
+
+        for tree_index, other_leafset in enumerate(tree_leafsets):
+            if other_leafset == leafset:
+                continue
+            group.incomparable.append(IncomparableTreeScope(
+                    tree=trees[tree_index],
+                    tree_index=tree_index,
+                    leafset=leafset,
+                    missing_taxa=leafset.difference(other_leafset),
+                    extra_taxa=other_leafset.difference(leafset)))
+
+        for split in group.splits.values():
+            split.incomparable_scopes = tuple(group.incomparable)
+            split.incomparable_tree_indices = tuple(
+                    scope.tree_index for scope in group.incomparable)
+
+        sorted_splits = sorted(
+                group.splits.values(),
+                key=lambda split: (
+                    -(split.support_frequency if split.support_frequency is not None else -1.0),
+                    -split.supported_count,
+                    split.conflicting_count,
+                    split.leafset_bitmask))
+        group.splits = collections.OrderedDict(
+                (split.split_bitmask, split) for split in sorted_splits)
+        analysis_groups[group.leafset_key] = group
+
+    return SplitSupportAnalysis(
+            taxon_namespace=taxon_namespace,
+            trees=trees,
+            is_rooted=is_rooted,
+            groups=analysis_groups)
+
+
+def split_support_summary(trees, *args, **kwargs):
+    """
+    Alias for :func:`summarize_split_support`.
+    """
+    return summarize_split_support(trees, *args, **kwargs)
+
+
+class SplitComparison(object):
+    """
+    Pairwise split comparison restricted to the leaf set shared by two trees.
+
+    Attributes
+    ----------
+    reference_tree, comparison_tree : |Tree|
+        The original trees.
+    shared_leafset : frozenset[|Taxon|]
+        Taxa present on both trees.
+    reference_only_taxa, comparison_only_taxa : tuple[|Taxon|]
+        Taxa absent from the other tree, recorded as incomparable scope.
+    group : SplitSupportGroup or None
+        Resolution-aware support for every non-trivial split observed on
+        either tree after restricting both to ``shared_leafset``. |None| if
+        the shared leaf set has fewer than four taxa (no non-trivial splits
+        are possible).
+    """
+
+    def __init__(self,
+            reference_tree,
+            comparison_tree,
+            shared_leafset,
+            reference_only_taxa,
+            comparison_only_taxa,
+            group):
+        self.reference_tree = reference_tree
+        self.comparison_tree = comparison_tree
+        self.shared_leafset = frozenset(shared_leafset)
+        self.reference_only_taxa = tuple(reference_only_taxa)
+        self.comparison_only_taxa = tuple(comparison_only_taxa)
+        self.group = group
+
+    def __repr__(self):
+        return "<SplitComparison shared={} reference_only={} comparison_only={}>".format(
+                len(self.shared_leafset),
+                len(self.reference_only_taxa),
+                len(self.comparison_only_taxa))
+
+    @property
+    def is_comparable(self):
+        return self.group is not None
+
+    @property
+    def reference_only_taxon_labels(self):
+        return tuple(t.label for t in self.reference_only_taxa)
+
+    @property
+    def comparison_only_taxon_labels(self):
+        return tuple(t.label for t in self.comparison_only_taxa)
+
+    def _splits(self):
+        return tuple(self.group) if self.group is not None else tuple()
+
+    @staticmethod
+    def _pairwise_status(split):
+        statuses = set(split.status_by_tree.values())
+        if SPLIT_SUPPORT_CONFLICTING in statuses:
+            return SPLIT_SUPPORT_CONFLICTING
+        if statuses == {SPLIT_SUPPORT_SUPPORTED}:
+            return SPLIT_SUPPORT_SUPPORTED
+        return SPLIT_SUPPORT_UNRESOLVED
+
+    @property
+    def splits(self):
+        """
+        Every non-trivial split observed on either restricted tree.
+        """
+        return self._splits()
+
+    @property
+    def status_by_split(self):
+        return collections.OrderedDict(
+                (split.split_bitmask, self._pairwise_status(split))
+                for split in self._splits())
+
+    @property
+    def supported(self):
+        """
+        Splits resolved identically by both trees.
+        """
+        return tuple(split for split in self._splits()
+                if self._pairwise_status(split) == SPLIT_SUPPORT_SUPPORTED)
+
+    @property
+    def unresolved(self):
+        """
+        Splits resolved by one tree but left unresolved by the other, with
+        no contradiction from either.
+        """
+        return tuple(split for split in self._splits()
+                if self._pairwise_status(split) == SPLIT_SUPPORT_UNRESOLVED)
+
+    @property
+    def conflicting(self):
+        """
+        Splits contradicted by at least one tree.
+        """
+        return tuple(split for split in self._splits()
+                if self._pairwise_status(split) == SPLIT_SUPPORT_CONFLICTING)
+
+    @property
+    def contested(self):
+        return tuple(split for split in self._splits()
+                if split.is_contested)
+
+    def as_dict(self):
+        return {
+                "shared_leafset_labels": tuple(sorted(
+                    taxon.label for taxon in self.shared_leafset)),
+                "reference_only_taxon_labels": self.reference_only_taxon_labels,
+                "comparison_only_taxon_labels": self.comparison_only_taxon_labels,
+                "comparable": self.is_comparable,
+                "splits": [
+                    dict(split.as_dict(),
+                        pairwise_status=self._pairwise_status(split))
+                    for split in self._splits()],
+                }
+
+
+def compare_splits(reference_tree,
+        comparison_tree,
+        is_bipartitions_updated=False):
+    """
+    Compares the splits of two trees on their shared leaf set.
+
+    Both trees are restricted to the taxa common to both before encoding
+    splits. This avoids reporting a split as conflicting merely because taxa
+    are missing from one tree. Taxa unique to either input are reported in
+    :attr:`SplitComparison.reference_only_taxa` and
+    :attr:`SplitComparison.comparison_only_taxa`.
+
+    For each non-trivial split observed on either (restricted) tree, the
+    result classifies it against the other tree as:
+
+    - ``"supported"``: both trees contain the split.
+    - ``"unresolved"``: one tree contains the split and the other leaves it
+      unresolved, without contradicting it (e.g., a polytomy there).
+    - ``"conflicting"``: at least one tree contains a split incompatible
+      with it.
+
+    Parameters
+    ----------
+    reference_tree, comparison_tree : |Tree|
+        Trees to compare. They must share the same |TaxonNamespace| reference
+        and rooting state.
+    is_bipartitions_updated : bool
+        Retained for API consistency. The restricted trees are always
+        freshly encoded.
+
+    Returns
+    -------
+    SplitComparison
+    """
+    if reference_tree.taxon_namespace is not comparison_tree.taxon_namespace:
+        raise error.TaxonNamespaceIdentityError(reference_tree, comparison_tree)
+    if reference_tree.is_rooted is not comparison_tree.is_rooted:
+        raise error.MixedRootingError(
+                "Cannot compare splits across mixed rooting states")
+
+    def leafset(tree):
+        return frozenset(
+                node.taxon for node in tree.leaf_node_iter()
+                if node.taxon is not None)
+
+    reference_leafset = leafset(reference_tree)
+    comparison_leafset = leafset(comparison_tree)
+    shared_leafset = reference_leafset.intersection(comparison_leafset)
+    reference_only = sorted(
+            reference_leafset.difference(comparison_leafset),
+            key=lambda t: (t.label or ""))
+    comparison_only = sorted(
+            comparison_leafset.difference(reference_leafset),
+            key=lambda t: (t.label or ""))
+
+    if len(shared_leafset) < 4:
+        return SplitComparison(
+                reference_tree=reference_tree,
+                comparison_tree=comparison_tree,
+                shared_leafset=shared_leafset,
+                reference_only_taxa=reference_only,
+                comparison_only_taxa=comparison_only,
+                group=None)
+    return SplitComparison(
+            reference_tree=reference_tree,
+            comparison_tree=comparison_tree,
+            shared_leafset=shared_leafset,
+            reference_only_taxa=reference_only,
+            comparison_only_taxa=comparison_only,
+            group=_compare_restricted_splits(
+                reference_tree=reference_tree,
+                comparison_tree=comparison_tree,
+                shared_leafset=shared_leafset))
+
+
+def _restrict_tree_to_leafset(tree, leafset):
+    """
+    Returns a copy of ``tree`` containing only ``leafset``, without modifying
+    the original; returns |None| if the restriction has fewer than four
+    leaves.
+    """
+    if len(leafset) < 4:
+        return None
+    return tree.extract_tree_with_taxa(taxa=leafset)
+
+
+def _compare_restricted_splits(reference_tree, comparison_tree, shared_leafset):
+    if len(shared_leafset) < 4:
+        return None
+    reference_restricted = _restrict_tree_to_leafset(
+            reference_tree, shared_leafset)
+    comparison_restricted = _restrict_tree_to_leafset(
+            comparison_tree, shared_leafset)
+    if reference_restricted is None or comparison_restricted is None:
+        return None
+    reference_restricted.encode_bipartitions()
+    comparison_restricted.encode_bipartitions()
+    candidate_splits = []
+    seen_split_bitmasks = set()
+    for tree in (reference_restricted, comparison_restricted):
+        for bipartition in tree.bipartition_encoding:
+            if not bipartition.split_bitmask or bipartition.is_trivial():
+                continue
+            if bipartition.split_bitmask in seen_split_bitmasks:
+                continue
+            seen_split_bitmasks.add(bipartition.split_bitmask)
+            candidate_splits.append(bipartition)
+    analysis = summarize_split_support(
+            trees=[reference_restricted, comparison_restricted],
+            candidates=candidate_splits,
+            is_bipartitions_updated=True)
+    return analysis.primary_group
+
+
+def classify_split_on_tree(tree,
+        bipartition,
+        is_bipartitions_updated=False):
+    """
+    Classifies a single candidate split against a single tree.
+
+    Parameters
+    ----------
+    tree : |Tree|
+        Tree against which the split is evaluated.
+    bipartition : |Bipartition|
+        Candidate split. Its ``tree_leafset_bitmask`` must cover the tree's
+        leaf set for the result to be meaningful.
+    is_bipartitions_updated : bool
+        If |False| (default), bipartitions are recalculated on ``tree``.
+
+    Returns
+    -------
+    str
+        ``"supported"`` if the split is present on the tree,
+        ``"unresolved"`` if the split is absent but no tree split conflicts
+        with it, or ``"conflicting"`` if at least one tree split is
+        incompatible with it.
+    """
+    from dendropy.datamodel.treemodel import Bipartition
+    if not is_bipartitions_updated:
+        tree.encode_bipartitions()
+    elif tree.bipartition_encoding is None:
+        tree.encode_bipartitions()
+    tree_leafset_mask = tree.seed_node.edge.bipartition.leafset_bitmask
+    if isinstance(bipartition, Bipartition):
+        candidate_leafset = bipartition.leafset_bitmask
+    else:
+        candidate_leafset = int(bipartition)
+    if (candidate_leafset & tree_leafset_mask) != candidate_leafset:
+        raise ValueError(
+                "Candidate split includes taxa outside the tree leaf set")
+    if candidate_leafset == 0 or candidate_leafset == tree_leafset_mask:
+        raise ValueError("Candidate split must be a non-trivial leafset")
+    bipartition = Bipartition(
+            leafset_bitmask=candidate_leafset,
+            tree_leafset_bitmask=tree_leafset_mask,
+            is_rooted=tree.is_rooted,
+            compile_bipartition=True)
+    candidate_split = bipartition.split_bitmask
+    tree_splits = [
+            b.split_bitmask for b in tree.bipartition_encoding
+            if not b.is_trivial()]
+    if candidate_split in tree_splits:
+        return SPLIT_SUPPORT_SUPPORTED
+    elif any(not Bipartition.is_compatible_bitmasks(
+            candidate_split, other_split, tree_leafset_mask)
+            for other_split in tree_splits):
+        return SPLIT_SUPPORT_CONFLICTING
+    return SPLIT_SUPPORT_UNRESOLVED
 
 ##############################################################################
 ### TreeshapeKernel

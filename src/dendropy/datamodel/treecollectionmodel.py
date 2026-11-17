@@ -1231,6 +1231,70 @@ class TreeList(
                 )
         return self.frequency_of_bipartition(**kwargs)
 
+    def split_support(self,
+            candidates=None,
+            candidate_labels=None,
+            reference_tree=None,
+            min_freq=constants.GREATER_THAN_HALF,
+            is_rooted=None,
+            is_bipartitions_updated=False,
+            include_trivial=False):
+        """
+        Returns a resolution-aware split-support analysis of the trees in
+        this collection.
+
+        Trees are partitioned by exact leaf set. Within each group, candidate
+        splits are classified as ``"supported"``, ``"unresolved"``, or
+        ``"conflicting"``. Unresolved trees (e.g., those with a polytomy at
+        the relevant node) are excluded from the support denominator instead
+        of being treated as zero-support observations. Trees with missing or
+        extra leaves relative to a group are recorded as incomparable, with
+        the missing and extra taxon labels.
+
+        Parameters
+        ----------
+        candidates : iterable, optional
+            Candidate splits, each given as a |Bipartition|, split bitmask,
+            iterable of |Taxon| objects, or iterable of labels. If |None| and
+            ``reference_tree`` is |None|, all non-trivial splits observed in
+            the collection are used.
+        candidate_labels : iterable of iterables of str, optional
+            Candidate splits given as collections of taxon labels.
+        reference_tree : |Tree|, optional
+            If given, its non-trivial bipartitions are used as candidates.
+        min_freq : float
+            Majority threshold for consensus-tree construction and
+            :meth:`SplitSupport.is_supported_by_majority`.
+        is_rooted : bool, optional
+            Rooting state. Defaults to that of the first tree.
+        is_bipartitions_updated : bool
+            If |False| (default), bipartitions are recalculated.
+        include_trivial : bool
+            If |False| (default), trivial splits are excluded.
+
+        Returns
+        -------
+        SplitSupportAnalysis
+        """
+        from dendropy.calculate import treecompare
+        if reference_tree is not None:
+            reference_tree.encode_bipartitions()
+            candidates = reference_tree.bipartition_encoding
+        return treecompare.summarize_split_support(
+                trees=self,
+                candidates=candidates,
+                candidate_labels=candidate_labels,
+                min_freq=min_freq,
+                is_rooted=is_rooted,
+                is_bipartitions_updated=is_bipartitions_updated,
+                include_trivial=include_trivial)
+
+    def summarize_split_support(self, *args, **kwargs):
+        """
+        Alias for :meth:`TreeList.split_support`.
+        """
+        return self.split_support(*args, **kwargs)
+
 ###############################################################################
 ### SplitDistribution
 

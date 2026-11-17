@@ -6,6 +6,12 @@ Release 4.5.2
 -   Faster birth-death tree generation (thanks @NicolaDM !)
 -   Storage of supplemental NEXUS blocks
 -   Fix type: "PhylogeneticIndependentConstrasts" => "PhylogeneticIndependentContrasts"
+-   Resolution-aware split support: ``TreeList.split_support()``,
+    ``treecompare.summarize_split_support()``, and
+    ``treecompare.compare_splits()`` distinguish supported, unresolved
+    (multifurcating), and conflicting splits, exclude unresolved trees from
+    the support denominator, group conclusions by exact leaf set, and record
+    missing/extra taxa as incomparable scope.
 
 Release 4.4.0
 -------------

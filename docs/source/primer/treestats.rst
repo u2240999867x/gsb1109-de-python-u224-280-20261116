@@ -136,6 +136,72 @@ The following example shows how to calculate the frequency of a split defined by
 
 .. literalinclude:: /examples/splitfreq.py
 
+Resolution-Aware Split Support
+------------------------------
+
+The :meth:`~dendropy.datamodel.treecollectionmodel.TreeList.split_support()` method
+compares a collection of trees without treating multifurcations as evidence of
+zero support.
+Trees are first partitioned by exact leaf set, and each candidate split is
+classified against every comparable tree as:
+
+- ``"supported"``: the tree contains the split.
+- ``"unresolved"``: the split is absent, but every split on the tree is
+  compatible with it (typically because the relevant node is a polytomy).
+- ``"conflicting"``: the tree contains at least one split incompatible with
+  the candidate.
+
+The ``support_frequency`` of a split uses only informative trees
+(``supported + conflicting``) as its denominator, so unresolved polytomies do not
+dilute support.
+The ``observed_frequency`` attribute is also available for the proportion over
+all comparable trees, but it should not be interpreted as support.
+
+Trees with missing or extra leaves are not counted as either support or
+conflict.
+They are listed in the group's ``incomparable`` records along with the missing
+and extra taxon labels, so the scope of each conclusion is explicit::
+
+    import dendropy
+
+    trees = dendropy.TreeList.get_from_string(
+            """[&U] ((A,B),(C,D));
+               [&U] (A,B,C,D);
+               [&U] ((A,C),(B,D));
+               [&U] ((A,B),(C,D),E);""",
+            schema="newick")
+
+    analysis = trees.split_support(candidates=[["A", "B"]])
+    group = analysis.primary_group
+    split = next(iter(group))
+    print(split.supported_count, split.unresolved_count, split.conflicting_count)
+    # 1 1 1
+    print(split.support_frequency)
+    # 0.5
+    print([scope.extra_taxon_labels for scope in group.incomparable])
+    # [('E',)]
+
+Consensus trees for each leaf set can be built from the same analysis with
+``analysis.consensus_trees()``; unresolved splits are never added to these
+trees, and a split is only added when its informative support reaches the
+requested threshold.
+
+For a direct two-tree comparison,
+:func:`~dendropy.calculate.treecompare.compare_splits` restricts both trees to
+their shared leaf set first, then classifies each non-trivial split of the
+reference tree against the comparison tree.
+Taxa unique to either tree are returned separately in
+``reference_only_taxa`` and ``comparison_only_taxa``, so a missing leaf is never
+mistaken for a conflict::
+
+    from dendropy.calculate import treecompare
+
+    result = treecompare.compare_splits(tree1, tree2)
+    print(result.reference_only_taxon_labels)
+    print(result.comparison_only_taxon_labels)
+    for split in result.group:
+        print(split.leafset_labels, split.support_status)
+
 The Maximum Clade Credibility Tree: The Tree that Maximizes the Product of Split Support
 ----------------------------------------------------------------------------------------
 
