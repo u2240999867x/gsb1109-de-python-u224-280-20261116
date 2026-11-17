@@ -453,6 +453,17 @@ tables) are absent, the output CIF files will conform to 1.0,1.1 and
 calling `CifFile.set_grammar` with the choices being `1.0`,`1.1`,`2.0` or
 `STAR2`.
 
+Text values are written losslessly.  The writer checks its own encoding
+before returning it, so leading and trailing line feeds, line-start
+semicolons and embedded quotes are preserved exactly.  The CIF1 line
+folding protocol is used to keep long lines within `maxoutlength`.  The
+CIF2 text-prefix protocol is used only for CIF2/STAR2 output; CIF1 has
+no equivalent escape for a semicolon at the start of a line.  When the
+selected grammar cannot represent a value without changing it, a
+`StarError` is raised rather than writing an approximate string.
+Lists and tables are CIF2-only and are therefore rejected for CIF1
+output.
+
 # Example programs
 
 A program which uses PyCIFRW for validation, `validate_cif.py`, is 

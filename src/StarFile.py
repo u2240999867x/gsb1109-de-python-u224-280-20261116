@@ -1687,39 +1687,45 @@ class StarBlock(object):
     # force quotation.  Note that non-delimited strings may not start with    
     # a reserved word ('data','save','global').                               
     #                                                                         
-    # The caller is allowed to request a particular delimiter, with 'None'    
-    # corresponding to no delimiter and the choices being apostrophe,         
-    # double quote, or semicolon.  CIF2-style triple quotes are not           
-    # currently supported.  The 'indent' argument allows the routine to       
-    # enforce indentation of multi-line strings by the specified amount.      
-    # Note that this will technically change the datavalue contents by        
-    # adding spaces, although for datavalues intended only for human          
-    # consumption this is irrelevant.                                         
-    #                                                                         
-    # 'lbprotocol' allows use of the line-breaking protocol from CIF1.1 to    
-    # express long lines, and 'pref_protocol' allows use of the CIF2          
-    # text-prefix protocol.                                                   
-    #                                                                         
-    #                                                                         
-    # <Format a string>=                                                      
+    # The caller is allowed to request a particular delimiter, with 'None'
+    # corresponding to no delimiter and the choices being apostrophe,
+    # double quote, or semicolon.  CIF2-style triple quotes are available
+    # when the output grammar provides them.  The encoding is always checked
+    # by decoding it again, and a StarError is raised if the value has no
+    # lossless representation in the selected grammar.
+    #
+    # The CIF1.1 line folding protocol is used for long lines.  The CIF2
+    # text-prefix protocol is used only when writing CIF2.
+    #
+    #
+    # <Format a string>=
     def _formatstring(self, instring, delimiter=None, standard='CIF1', indent=0, hints=None):
         if hints is None:
             hints = {}
         if hints.get("reformat",False) and "\n" in instring:
             instring = "\n"+self.do_wrapping(instring,hints["reformat_indent"])
+        cif2_output = "'''" in self.string_delimiters
         allowed_delimiters = set(self.string_delimiters)
         if len(instring)==0: allowed_delimiters.difference_update([None])
         if len(instring) > (self.maxoutlength-2) or '\n' in instring:
                 allowed_delimiters.intersection_update(["\n;","'''",'"""'])
-        [allowed_delimiters.difference_update([None]) for k in '[]{}\v\t ,' if k in instring]
+        [allowed_delimiters.difference_update([None]) for k in '[]{}\v\t ,\r' if k in instring]
         if len(instring)>0 and instring[0] in '_$#;(':
                 allowed_delimiters.difference_update([None])
-        if len(instring)>3 and (instring[:4].lower()=='data' or instring[:4].lower()=='save'):
-                allowed_delimiters.difference_update([None])
-        if len(instring)>5 and instring[:6].lower()=='global':
+        if re.match(r'(data|save|global|loop|stop)_',instring,re.I):
                 allowed_delimiters.difference_update([None])
         if '"' in instring: allowed_delimiters.difference_update(['"',None])
         if "'" in instring: allowed_delimiters.difference_update(["'",None])
+        # Quoted strings cannot contain a bare carriage return; only a
+        # semicolon or triple-quoted text field can carry one.
+        if '\r' in instring: allowed_delimiters.difference_update(['"',"'",None])
+        # A triple-quote delimiter may not occur inside the string that it
+        # delimits, and there is no escaping mechanism.  A value beginning or
+        # ending with the quote character would merge with the delimiter.
+        for triple in ("'''",'"""'):
+            if triple in instring: allowed_delimiters.difference_update([triple])
+            elif instring.startswith(triple[0]) or instring.endswith(triple[0]):
+                allowed_delimiters.difference_update([triple])
         out_delimiter = "\n;"  #default (most conservative)
         if delimiter in allowed_delimiters:
             out_delimiter = delimiter
@@ -1727,19 +1733,132 @@ class StarBlock(object):
         elif '"' in allowed_delimiters: out_delimiter = '"'
         if out_delimiter in ['"',"'",'"""',"'''"]: return out_delimiter + instring + out_delimiter
         elif out_delimiter is None: return instring
-        # we are left with semicolon strings
-        # use our protocols:
+        # We are left with semicolon strings.  In CIF1 this is the only
+        # multi-line representation, so anything that cannot be encoded
+        # without the CIF2 prefix protocol must be rejected rather than
+        # silently changed.
+        body = self._semicolon_body(instring,allow_prefix=cif2_output)
+        if body is not None:
+            return "\n;" + body + "\n;"
+        # CIF2 also has triple-quoted strings.  They preserve leading and
+        # trailing line feeds and allow embedded semicolons, so use one as a
+        # lossless fallback when the prefix protocol cannot be applied.
+        if cif2_output:
+            for triple in ("'''",'"""'):
+                if triple in allowed_delimiters and triple not in instring:
+                    return triple + instring + triple
+        raise StarError('Value cannot be represented losslessly in {} output: {!r}'.format(
+            'CIF2' if cif2_output else 'CIF1', instring))
+
+    def _first_line_folds(self,instring):
+        """Return True if the first line of `instring` would be mistaken for
+        a line-folding or line-prefix header by a CIF reader."""
+        if '\n' not in instring:
+            return False
+        first = instring.split('\n',1)[0]
+        if first.endswith('\r'):
+            first = first[:-1]
+        if re.match(r'^\\[ \t\v\f]*$',first):
+            return True
+        # A prefix header is any non-semicolon first line containing at
+        # least two characters before one or two backslashes and optional
+        # whitespace (the same pattern accepted by remove_line_prefix).
+        if re.match(r"^[^;\\\n][^\n\\]+\\{1,2}[ \t\v\f]*$",first):
+            return True
+        return False
+
+    def _line_start_semicolons(self,text):
+        """Return True if a line other than the first starts with a semicolon."""
+        return any(line.startswith(';') for line in re.split(r'\r\n|\r|\n',text)[1:])
+
+    def _line_start_hashes(self,text):
+        """Return True if a line other than the first starts with a hash.
+
+        The bundled standard scanner treats such a line inside semicolon
+        text as a comment, so emitting it unchanged would lose data on
+        read-back.  The CIF2 prefix protocol moves the hash away from the
+        line start; CIF1 has no equivalent escape."""
+        return any(line.startswith('#') for line in re.split(r'\r\n|\r|\n',text)[1:])
+
+    def _fold_text(self,instring,maxlinelength):
+        """Encode `instring` using the CIF line-folding protocol.
+
+        The returned string begins with the required backslash header line.
+        `None` is returned if the value cannot be represented (currently
+        values containing carriage returns when folding is required)."""
+        if '\r' in instring:
+            return None
+        lines = instring.split('\n')
+        limit = max(1,maxlinelength-1)
+        encoded = []
+        for lineno,line in enumerate(lines):
+            last_line = lineno == len(lines)-1
+            chunks = []
+            while len(line) > limit:
+                chunks.append(line[:limit])
+                line = line[limit:]
+            chunks.append(line)
+            for chunk_no,chunk in enumerate(chunks):
+                if chunk_no < len(chunks)-1:
+                    # The trailing backslash folds away the following line feed.
+                    encoded.append(chunk + '\\')
+                elif re.search(r'\\[ \t\v\f]*$',chunk):
+                    # A literal backslash at the end of a line would be eaten
+                    # by the unfolding operation, so double it.  The extra
+                    # empty line preserves the line feed for non-final lines.
+                    encoded.append(chunk + '\\')
+                    if not last_line:
+                        encoded.append('')
+                else:
+                    encoded.append(chunk)
+        return "\\\n" + '\n'.join(encoded)
+
+    def _apply_text_prefix(self,body,prefix,folded):
+        """Apply the CIF2 text-prefix protocol to an encoded semicolon body."""
+        if folded:
+            if not body.startswith("\\\n"):
+                return None
+            content = body[2:]
+            return prefix + "\\\\\n" + prefix + content.replace('\n','\n'+prefix)
+        return prefix + "\\\n" + prefix + body.replace('\n','\n'+prefix)
+
+    def _semicolon_body(self,instring,allow_prefix):
+        """Return a semicolon-delimited body that decodes to `instring`.
+
+        The encoding is checked by decoding it again before it is accepted,
+        so a caller never receives a merely approximate representation."""
         maxlinelength = max([len(a) for a in instring.split('\n')])
-        if maxlinelength > self.maxoutlength:
-            protocol_string = apply_line_folding(instring)
+        needs_folding = (maxlinelength > self.maxoutlength or
+                         self._first_line_folds(instring))
+        folded = False
+        if needs_folding:
+            body = self._fold_text(instring,self.maxoutlength)
+            if body is None:
+                return None
+            folded = True
         else:
-            protocol_string = instring
-        # now check for embedded delimiters
-        if "\n;" in protocol_string:
+            body = instring
+        if self._line_start_semicolons(body) or self._line_start_hashes(body):
+            # A semicolon at the beginning of a line terminates the text
+            # field, and the bundled standard scanner treats a line-start
+            # hash as a comment.  Only CIF2 has the prefix protocol that
+            # neutralises both.  That protocol only prefixes LF-separated
+            # lines, so a value with other line endings cannot be prefixed
+            # unambiguously.
+            if not allow_prefix or '\r' in body:
+                return None
             prefix = "CIF:"
-            while prefix in protocol_string: prefix = prefix + ":"
-            protocol_string = apply_line_prefix(protocol_string,prefix+"> ")
-        return "\n;" + protocol_string + "\n;"
+            while (prefix + "> ") in body:
+                prefix = prefix + ":"
+            prefix = prefix + "> "
+            body = self._apply_text_prefix(body,prefix,folded)
+            if body is None:
+                return None
+        if _decode_text_body(body) != instring:
+            return None
+        if max([len(a) for a in body.split('\n')]) > self.maxoutlength:
+            return None
+        return body
 
     # Formatting a data value. Data values may be stored as strings, numbers or compound values.  We call this routine recursively to format data values.  We use [[compound]] to flag that we are an embedded compound value, so that
     # we do not insert a line break before the top-level compound delimiter.  If hints is supplied, it is a dictionary
@@ -1759,6 +1878,8 @@ class StarBlock(object):
         if isinstance(itemvalue,unicode):  #need to sanitize
             stringsink.write(self._formatstring(itemvalue,delimiter=delimiter,hints=hints),canbreak = True,startcol=startcol)
         elif isinstance(itemvalue, list) or (hasattr(itemvalue, 'dtype') and hasattr(itemvalue, '__iter__')): #numpy
+           if "'''" not in self.string_delimiters:
+               raise StarError('List value cannot be represented in CIF1 output: {!r}'.format(itemvalue))
            stringsink.set_tab(0)
            stringsink.write('[',canbreak=True,newindent=True,mustbreak=compound,startcol=startcol)
            if len(itemvalue)>0:
@@ -1770,6 +1891,8 @@ class StarBlock(object):
                   self.format_value(listval,stringsink,compound=True)
            stringsink.write(']',unindent=True)
         elif isinstance(itemvalue,dict):
+           if "'''" not in self.string_delimiters:
+               raise StarError('Table value cannot be represented in CIF1 output: {!r}'.format(itemvalue))
            stringsink.set_tab(0)
            stringsink.write('{',newindent=True,mustbreak=compound,startcol=startcol)  #start a new line inside
            items = list(itemvalue.items())
@@ -3412,6 +3535,17 @@ def remove_line_prefix(instring):
             return outstring[1:]   #drop first line ending, no longer necessary
     else:
         return instring
+
+def _decode_text_body(body):
+    """Decode the contents of a semicolon-delimited value.
+
+    This mirrors the reader-side protocols (including the removal of a
+    trailing carriage return immediately before the closing semicolon) and is
+    used by the writer to verify that an encoding is lossless before
+    accepting it."""
+    if body.endswith('\r'):
+        body = body[:-1]
+    return remove_line_folding(remove_line_prefix(body))
 
 
 #  Listify - used to allow uniform treatment of datanames - otherwise sequence functions might
