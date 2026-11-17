@@ -13,6 +13,15 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 
 - Added `filter_glob` and `exclude_glob` parameters to `fs.walk.Walker`.
   Closes [#459](https://github.com/PyFilesystem/pyfilesystem2/issues/459).
+- Added `fs.multifs.MultiFS.write_plan` and `MultiFS.delete_plan` to report
+  the write backend and the effect of a deletion on layered filesystems.
+- Added `fs.enums.DeletionPolicy` with `retract` (removing a correction may
+  reveal the base) and `shadow` (removing a correction hides the base with a
+  tombstone). `MultiFS` defaults to `retract`, and the policy can be
+  overridden per call.
+- `MultiFS` writes now always target the writable layer, copying up base
+  contents when appending or updating; deletes never physically modify a
+  read-only layer.
 
 ### Fixed
 - Elaborated documentation of `filter_dirs` and `exclude_dirs` in `fs.walk.Walker`.

@@ -2,5 +2,5 @@ fs.enums
 ========
 
 .. automodule:: fs.enums
-   :members: ResourceType, Seek
+   :members: DeletionPolicy, ResourceType, Seek
    :member-order: bysource

@@ -4,7 +4,25 @@
 from __future__ import absolute_import, unicode_literals
 
 import os
-from enum import IntEnum, unique
+from enum import Enum, IntEnum, unique
+
+
+@unique
+class DeletionPolicy(Enum):
+    """Policies for removing resources from a layered filesystem.
+
+    A layered filesystem such as `~fs.multifs.MultiFS` may present a
+    resource from a lower (read-only) layer which can be overridden by a
+    resource in an upper (writable) layer.
+
+    """
+
+    #: Removing an upper-layer override reveals the lower-layer resource
+    #: again, if there is one.
+    retract = "retract"
+    #: Removing an upper-layer override also records a tombstone, so the
+    #: lower-layer resource stays hidden.
+    shadow = "shadow"
 
 
 @unique
