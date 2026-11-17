@@ -1368,6 +1368,16 @@ def test_pipeline_input_output():
     assert progress_event.record.StatusDescription == "description"
     assert progress_event.record.RecordType == ProgressRecordType.Processing
 
+    activity = client.progress_view.get(
+        client.runspace_pool_id,
+        c_pipeline.pipeline_id,
+        1,
+    )
+    assert activity is not None
+    assert activity.activity == "activity"
+    assert activity.status == psrpcore.ProgressStatus.UNKNOWN_PERCENT
+    assert client.progress_view.tree(client.runspace_pool_id, c_pipeline.pipeline_id).get(1) == activity
+
     state_event = client.next_event()
     assert isinstance(state_event, psrpcore.PipelineStateEvent)
     assert repr(state_event) == (

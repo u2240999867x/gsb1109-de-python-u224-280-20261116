@@ -89,6 +89,12 @@ class ClientRunspacePool(RunspacePool["_ClientPipeline"]):
         max_runspaces: The maximum number of Runspaces a pool can hold.
         runspace_pool_id: Manually set the Runspace Pool ID, used when
             reconnecting to an existing Runspace Pool.
+
+    Attributes:
+        progress_view: The :class:`psrpcore.ProgressView` updated with every
+            progress record received from the server.  Progress records are
+            grouped by source, pipeline and activity number, and old updates
+            do not replace newer ones.
     """
 
     def __init__(
@@ -371,7 +377,7 @@ class ClientRunspacePool(RunspacePool["_ClientPipeline"]):
         self,
         event: ProgressRecordEvent,
     ) -> None:
-        pass
+        self.progress_view.update_event(event)
 
     def _process_PublicKeyRequest(
         self,

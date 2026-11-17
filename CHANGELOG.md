@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+* Added `psrpcore.ProgressView` to track interleaved progress records by source, pipeline and activity.
+  * Unknown percentages, activities that have not reported, and explicitly completed records are distinct states.
+  * Activity number reuse can be separated by generation evidence, and out-of-order updates cannot replace a newer accepted view.
+  * Input weights are used only for a weighted overall percentage when coverage is sufficient; cycles and missing parents still allow the independently known activities to be viewed.
+* `ClientRunspacePool.progress_view` now records every received `ProgressRecordEvent`.
+
 ## 0.3.1 - 2024-11-11
 
 * Fixed CLIXML string pattern matching to only match valid hex sequences and not just any alphanumeric character

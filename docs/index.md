@@ -18,6 +18,7 @@ brief and will be expanded upon in the future.
    scenarios
    transport
    types
+   progress
 
 .. toctree::
    :maxdepth: 1

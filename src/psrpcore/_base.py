@@ -24,6 +24,7 @@ from psrpcore._payload import (
     unpack_fragment,
     unpack_message,
 )
+from psrpcore._progress import ProgressView
 from psrpcore.types import (
     ApartmentState,
     EndOfPipelineInput,
@@ -82,6 +83,8 @@ class RunspacePool(typing.Generic[T1]):
             invocation.
         pipeline_table: A dictionary that contains associated pipelines with
             this Runspace Pool.
+        progress_view: A :class:`psrpcore.ProgressView` that tracks
+            interleaved progress records by source, pipeline and activity.
     """
 
     def __new__(
@@ -126,6 +129,7 @@ class RunspacePool(typing.Generic[T1]):
         self.apartment_state = ApartmentState.Unknown
         self.thread_options = PSThreadOptions.Default
         self.pipeline_table: typing.Dict[uuid.UUID, T1] = {}
+        self.progress_view = ProgressView()
 
         self._is_client = True
         self._ci_handlers: typing.Dict[int, typing.Optional[typing.Callable[[PSRPEvent], None]]] = {}

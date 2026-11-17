@@ -62,6 +62,15 @@ from psrpcore._exceptions import (
 from psrpcore._host import ClientHostResponder, ServerHostRequestor
 from psrpcore._payload import PSRPPayload, StreamType
 from psrpcore._pipeline import GetMetadata, PowerShell
+from psrpcore._progress import (
+    ProgressActivity,
+    ProgressCoverage,
+    ProgressKey,
+    ProgressStatus,
+    ProgressTracker,
+    ProgressTree,
+    ProgressView,
+)
 from psrpcore._server import ServerPipeline, ServerRunspacePool
 
 __all__ = [
@@ -98,7 +107,14 @@ __all__ = [
     "PipelineOutputEvent",
     "PipelineStateEvent",
     "PowerShell",
+    "ProgressActivity",
+    "ProgressCoverage",
+    "ProgressKey",
     "ProgressRecordEvent",
+    "ProgressStatus",
+    "ProgressTracker",
+    "ProgressTree",
+    "ProgressView",
     "PublicKeyEvent",
     "PublicKeyRequestEvent",
     "PSRemotingCrypto",
