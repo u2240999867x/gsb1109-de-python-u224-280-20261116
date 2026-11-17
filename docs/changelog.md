@@ -1,6 +1,17 @@
 Changelog
 =========
 
+Unreleased
+==========
+
+variable_view
+-------------
+- Added `cdflib.variable_view.VariableView`, a traceable tensor view that maps logical
+  indices back to CDF records and majority-aware in-record physical offsets.  Non-varying
+  axes are broadcast for display without inflating the measurement count, slicing and
+  transposition preserve the backtrace, contradictory data raises
+  `StructureConflictError`, and empty variables keep their declared logical shape.
+
 1.3.13
 ======
 
