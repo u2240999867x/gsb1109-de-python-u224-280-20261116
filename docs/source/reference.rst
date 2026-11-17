@@ -13,6 +13,7 @@ Reference
    reference/info_objects.rst
    reference/filesize.rst
    reference/mirror.rst
+   reference/migration.rst
    reference/move.rst
    reference/mode.rst
    reference/opener.rst

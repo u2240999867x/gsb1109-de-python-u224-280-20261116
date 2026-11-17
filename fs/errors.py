@@ -17,7 +17,7 @@ import six
 from six import text_type
 
 if typing.TYPE_CHECKING:
-    from typing import Optional, Text
+    from typing import List, Optional, Text
 
 
 __all__ = [
@@ -36,6 +36,8 @@ __all__ = [
     "InsufficientStorage",
     "InvalidCharsInPath",
     "InvalidPath",
+    "MigrationConflict",
+    "MigrationIncomplete",
     "MissingInfoNamespace",
     "NoSysPath",
     "NoURL",
@@ -300,6 +302,63 @@ class DestinationExists(ResourceError):
     """Target destination already exists."""
 
     default_message = "destination '{path}' exists"
+
+
+class MigrationConflict(ResourceError):
+    """A migration target exists with different contents.
+
+    Raised when a file with the same path as a migration resource already
+    exists on the destination, but its checksum does not match the source.
+    The conflicting resource is left untouched and must be resolved manually
+    before the migration can proceed.
+    """
+
+    default_message = "conflicting destination '{path}' (different contents)"
+
+    def __init__(self, path, src_hash=None, dst_hash=None, exc=None, msg=None):
+        # type: (
+        #     Text, Optional[Text], Optional[Text],
+        #     Optional[Exception], Optional[Text],
+        # ) -> None
+        self.src_hash = src_hash
+        self.dst_hash = dst_hash
+        super(MigrationConflict, self).__init__(path, exc=exc, msg=msg)
+
+    def __reduce__(self):
+        return type(self), (
+            self.path,
+            self.src_hash,
+            self.dst_hash,
+            self.exc,
+            self._msg,
+        )
+
+
+class MigrationIncomplete(FSError):
+    """A migration could not be run to completion.
+
+    Raised when a journaled migration ends with resources that are not in the
+    completed state, for instance because one or more resources were skipped
+    due to conflicts. The journal itself is preserved so the migration can be
+    resumed after the issues are resolved.
+    """
+
+    default_message = "migration incomplete, {pending} resource(s) pending"
+
+    def __init__(self, journal_path=None, pending=0, conflicts=None, msg=None):
+        # type: (Optional[Text], int, Optional[List[Text]], Optional[Text]) -> None
+        self.journal_path = journal_path
+        self.pending = pending
+        self.conflicts = list(conflicts or [])
+        super(MigrationIncomplete, self).__init__(msg=msg)
+
+    def __reduce__(self):
+        return type(self), (
+            self.journal_path,
+            self.pending,
+            self.conflicts,
+            self._msg,
+        )
 
 
 class DirectoryExists(ResourceError):

@@ -13,6 +13,15 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 
 - Added `filter_glob` and `exclude_glob` parameters to `fs.walk.Walker`.
   Closes [#459](https://github.com/PyFilesystem/pyfilesystem2/issues/459).
+- Added the `fs.migration` module for resumable, journaled migration of
+  resources between filesystems. Each resource is tracked through
+  `pending`, `copied`, `verified`, `deletable` and `completed` states in a
+  JSON journal, same-name destinations with different contents raise
+  `fs.errors.MigrationConflict`, shared sources are protected from
+  premature deletion through `fs.migration.ShareRegistry`, and replays
+  truncate partial side-car copies instead of appending to destinations.
+- Added `fs.errors.MigrationConflict` and `fs.errors.MigrationIncomplete`
+  exceptions.
 
 ### Fixed
 - Elaborated documentation of `filter_dirs` and `exclude_dirs` in `fs.walk.Walker`.
