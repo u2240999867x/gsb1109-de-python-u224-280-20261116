@@ -12,6 +12,8 @@ Test the core class and factory function.
 import hashlib
 import os
 import re
+import threading
+import time
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -687,3 +689,251 @@ def test_wrong_load_registry_from_doi():
     msg = "only implemented for DOIs"
     with pytest.raises(ValueError, match=msg):
         pup.load_registry_from_doi()
+
+
+def _blocking_downloader(content, download_started, release_download, calls=None):
+    """
+    Make a downloader that blocks until released so downloads stay in flight.
+    """
+
+    def downloader(url, output_file, pup):
+        if calls is not None:
+            calls.append(url)
+        download_started.set()
+        assert release_download.wait(timeout=30)
+        with open(output_file, "wb") as output:
+            output.write(content)
+
+    return downloader
+
+
+def _wait_for_shared_consumers(pup, count, timeout=10):
+    "Wait until the shared in-flight download has the given consumer count."
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        with pup._inflight_lock:
+            inflight = list(pup._inflight.values())
+        if inflight and inflight[0].consumers == count:
+            return
+        time.sleep(0.01)
+
+
+def test_pooch_fetch_shared_download(monkeypatch):
+    "Concurrent fetches of the same file share a single verified download"
+    content = b"some shared data\n"
+    known_hash = hashlib.sha256(content).hexdigest()
+    download_started = threading.Event()
+    release_download = threading.Event()
+    download_calls = []
+    strict_checks = []
+    real_hash_matches = core.hash_matches
+
+    def counting_hash_matches(*args, **kwargs):
+        "Count the hash verifications of downloaded files"
+        if kwargs.get("strict"):
+            strict_checks.append(args[0])
+        return real_hash_matches(*args, **kwargs)
+
+    monkeypatch.setattr(core, "hash_matches", counting_hash_matches)
+    downloader = _blocking_downloader(
+        content, download_started, release_download, calls=download_calls
+    )
+    with TemporaryDirectory() as local_store:
+        pup = Pooch(
+            path=Path(local_store),
+            base_url="http://example.com/",
+            registry={"data.txt": known_hash},
+        )
+        results, errors = {}, {}
+        processor_calls = {"a": [], "b": []}
+
+        def make_processor(name):
+            def processor(fname, action, pup):
+                "Record the call and return a consumer-specific result"
+                processor_calls[name].append(action)
+                return name, fname
+
+            return processor
+
+        def consumer(name):
+            try:
+                results[name] = pup.fetch(
+                    "data.txt", processor=make_processor(name), downloader=downloader
+                )
+            except Exception as error:  # noqa: BLE001
+                errors[name] = error
+
+        threads = [
+            threading.Thread(target=consumer, args=(name,)) for name in ("a", "b")
+        ]
+        for thread in threads:
+            thread.start()
+        # Only release the download once both consumers attached to it
+        assert download_started.wait(timeout=30)
+        _wait_for_shared_consumers(pup, count=2)
+        release_download.set()
+        for thread in threads:
+            thread.join(timeout=30)
+        # Both consumers succeeded with their own processor results
+        assert errors == {}
+        true_path = str(Path(local_store) / "data.txt")
+        assert results["a"] == ("a", true_path)
+        assert results["b"] == ("b", true_path)
+        # The download and the hash verification only happened once
+        assert len(download_calls) == 1
+        assert len(strict_checks) == 1
+        # Each consumer applied its own processor to the downloaded file
+        assert processor_calls == {"a": ["download"], "b": ["download"]}
+        assert file_hash(true_path) == known_hash
+        assert pup._inflight == {}
+
+
+def test_pooch_fetch_shared_download_processor_failure():
+    "A failing processor doesn't affect other consumers of the download"
+    content = b"shared data with a failing processor\n"
+    known_hash = hashlib.sha256(content).hexdigest()
+    download_started = threading.Event()
+    release_download = threading.Event()
+    downloader = _blocking_downloader(content, download_started, release_download)
+    with TemporaryDirectory() as local_store:
+        pup = Pooch(
+            path=Path(local_store),
+            base_url="http://example.com/",
+            registry={"data.txt": known_hash},
+        )
+        results, errors = {}, {}
+
+        def failing_processor(fname, action, pup):
+            raise RuntimeError("processor boom")
+
+        def good_processor(fname, action, pup):
+            return fname
+
+        def consumer(name, processor):
+            try:
+                results[name] = pup.fetch(
+                    "data.txt", processor=processor, downloader=downloader
+                )
+            except Exception as error:  # noqa: BLE001
+                errors[name] = error
+
+        threads = [
+            threading.Thread(target=consumer, args=("a", failing_processor)),
+            threading.Thread(target=consumer, args=("b", good_processor)),
+        ]
+        for thread in threads:
+            thread.start()
+        assert download_started.wait(timeout=30)
+        _wait_for_shared_consumers(pup, count=2)
+        release_download.set()
+        for thread in threads:
+            thread.join(timeout=30)
+        # The failing processor only fails its own consumer
+        assert isinstance(errors.get("a"), RuntimeError)
+        assert "b" not in errors
+        # The verified file is still valid for the other consumer
+        true_path = str(Path(local_store) / "data.txt")
+        assert results["b"] == true_path
+        assert file_hash(true_path) == known_hash
+        # A later fetch uses the verified file without downloading again
+        assert pup.fetch("data.txt") == true_path
+
+
+def test_pooch_fetch_shared_download_failure():
+    "All consumers of a failed shared download receive the failure"
+    download_started = threading.Event()
+    release_download = threading.Event()
+    download_calls = []
+
+    def downloader(url, output_file, pup):
+        download_calls.append(url)
+        download_started.set()
+        assert release_download.wait(timeout=30)
+        raise ValueError("download boom")
+
+    with TemporaryDirectory() as local_store:
+        pup = Pooch(
+            path=Path(local_store),
+            base_url="http://example.com/",
+            registry={"data.txt": "somehash"},
+        )
+        errors = {}
+
+        def consumer(name):
+            try:
+                pup.fetch("data.txt", downloader=downloader)
+            except ValueError as error:
+                errors[name] = error
+
+        threads = [
+            threading.Thread(target=consumer, args=(name,)) for name in ("a", "b")
+        ]
+        for thread in threads:
+            thread.start()
+        assert download_started.wait(timeout=30)
+        _wait_for_shared_consumers(pup, count=2)
+        release_download.set()
+        for thread in threads:
+            thread.join(timeout=30)
+        # Both consumers got the download failure independently
+        assert set(errors) == {"a", "b"}
+        assert all("download boom" in str(error) for error in errors.values())
+        # The failed download is cleaned up so a later fetch starts fresh
+        assert pup._inflight == {}
+        with pytest.raises(ValueError, match="download boom"):
+            pup.fetch("data.txt", downloader=downloader)
+        assert len(download_calls) == 2
+
+
+def test_pooch_shared_download_last_consumer_cancels():
+    "The in-flight download is cancelled only when its last consumer gives up"
+    pup = Pooch(path="", base_url="", registry={})
+    shared = core._InflightDownload("download")
+    key = "some-file.txt"
+    pup._inflight[key] = shared
+    shared.consumers = 2
+    # One consumer giving up keeps the download going
+    pup._detach_consumer(key, shared)
+    assert not shared.cancel.is_set()
+    assert pup._inflight[key] is shared
+    # The last consumer giving up cancels the download
+    pup._detach_consumer(key, shared)
+    assert shared.cancel.is_set()
+    assert key not in pup._inflight
+
+
+def test_stream_download_cancel_event():
+    "stream_download aborts and stops retrying once the cancel event is set"
+    cancel = threading.Event()
+    download_calls = []
+
+    def failing_downloader(url, output_file, pup):
+        # Fail and cancel the download at the same time
+        download_calls.append(url)
+        cancel.set()
+        raise ValueError("hash mismatch")
+
+    with TemporaryDirectory() as local_store:
+        destination = Path(local_store) / "data.txt"
+        with pytest.raises(core._DownloadCancelled):
+            stream_download(
+                "http://example.com/data.txt",
+                destination,
+                None,
+                failing_downloader,
+                retry_if_failed=5,
+                cancel_event=cancel,
+            )
+        # The cancelled download stopped instead of retrying
+        assert len(download_calls) == 1
+        assert not destination.exists()
+        # Already cancelled before the first attempt: downloader never runs
+        with pytest.raises(core._DownloadCancelled):
+            stream_download(
+                "http://example.com/data.txt",
+                destination,
+                None,
+                failing_downloader,
+                cancel_event=cancel,
+            )
+        assert len(download_calls) == 1

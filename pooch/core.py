@@ -12,6 +12,7 @@ import contextlib
 import os
 import shlex
 import shutil
+import threading
 import time
 from pathlib import Path
 from typing import Any, Optional, Union
@@ -438,6 +439,30 @@ def create(
     return pup
 
 
+class _DownloadCancelled(Exception):
+    """
+    A shared download was abandoned because all of its consumers gave up.
+    """
+
+
+class _InflightDownload:
+    """
+    Track a single download shared by multiple concurrent consumers.
+
+    The download itself runs in a dedicated worker thread so that all
+    consumers are equal: any of them can give up or fail without affecting
+    the others. The download is only cancelled once its last remaining
+    consumer detaches.
+    """
+
+    def __init__(self, action: Action) -> None:
+        self.action = action
+        self.done = threading.Event()
+        self.cancel = threading.Event()
+        self.error: Optional[BaseException] = None
+        self.consumers = 0
+
+
 class Pooch:
     """
     Manager for a local data storage that can fetch from a remote source.
@@ -498,6 +523,10 @@ class Pooch:
         self.urls = dict(urls)
         self.retry_if_failed = retry_if_failed
         self.allow_updates = allow_updates
+        # Downloads currently in flight, shared between concurrent fetch
+        # calls and keyed by the absolute path of the file being downloaded.
+        self._inflight: dict[str, _InflightDownload] = {}
+        self._inflight_lock = threading.Lock()
 
     @property
     def abspath(self) -> Path:
@@ -539,6 +568,16 @@ class Pooch:
         authentication (username and password), use a downloader that support
         these features. Downloaders can also be used to print custom messages
         (like a progress bar), etc. See :ref:`downloaders` for details.
+
+        .. note::
+
+            Concurrent calls to this method for the same file share a single
+            download: the file is downloaded and its hash verified only once,
+            and each call then applies its own *processor* independently. The
+            *downloader* of the first call is used for the shared download.
+            Interrupting one of the calls, or a failure of its processor,
+            doesn't affect the others; the download is only abandoned once
+            all of its consumers have given up.
 
         Parameters
         ----------
@@ -593,6 +632,71 @@ class Pooch:
             if downloader is None:
                 downloader = choose_downloader(url, progressbar=progressbar)
 
+            action = self._download_shared(
+                url, full_path, known_hash, downloader, action
+            )
+
+        if processor is not None:
+            return processor(str(full_path), action, self)
+
+        return str(full_path)
+
+    def _download_shared(
+        self,
+        url: str,
+        full_path: Path,
+        known_hash: Optional[str],
+        downloader: Downloader,
+        action: Action,
+    ) -> Action:
+        """
+        Download a file, sharing a single download between concurrent calls.
+
+        If another thread is already downloading the same file, wait for that
+        download instead of starting a new one. The downloaded file is
+        verified only once, by the shared download. Each caller then applies
+        its own processor independently, so a failure or interruption of one
+        caller doesn't affect the others. The in-flight download is only
+        abandoned once its last remaining consumer gives up.
+        """
+        key = str(full_path)
+        with self._inflight_lock:
+            shared = self._inflight.get(key)
+            if shared is None:
+                shared = _InflightDownload(action)
+                self._inflight[key] = shared
+                worker = threading.Thread(
+                    target=self._download_worker,
+                    args=(shared, key, url, full_path, known_hash, downloader),
+                    daemon=True,
+                )
+                worker.start()
+            shared.consumers += 1
+        try:
+            shared.done.wait()
+        except BaseException:
+            # This consumer is giving up (e.g. through a KeyboardInterrupt)
+            # while the download is still in flight. Detach it and only
+            # cancel the download if it was the last remaining consumer.
+            self._detach_consumer(key, shared)
+            raise
+        if shared.error is not None:
+            raise shared.error
+        return shared.action
+
+    def _download_worker(
+        self,
+        shared: _InflightDownload,
+        key: str,
+        url: str,
+        full_path: Path,
+        known_hash: Optional[str],
+        downloader: Downloader,
+    ) -> None:
+        """
+        Run a shared download in a dedicated thread and publish its result.
+        """
+        try:
             stream_download(
                 url,
                 full_path,
@@ -600,12 +704,31 @@ class Pooch:
                 downloader,
                 pooch=self,
                 retry_if_failed=self.retry_if_failed,
+                cancel_event=shared.cancel,
             )
+        except BaseException as error:  # noqa: BLE001
+            shared.error = error
+        finally:
+            with self._inflight_lock:
+                if self._inflight.get(key) is shared:
+                    del self._inflight[key]
+            shared.done.set()
 
-        if processor is not None:
-            return processor(str(full_path), action, self)
+    def _detach_consumer(self, key: str, shared: _InflightDownload) -> None:
+        """
+        Remove a consumer that gave up waiting for a shared download.
 
-        return str(full_path)
+        The in-flight download keeps going while it still has consumers and
+        is cancelled only once the last one gives up.
+        """
+        with self._inflight_lock:
+            shared.consumers -= 1
+            if shared.consumers == 0 and not shared.done.is_set():
+                shared.cancel.set()
+                # Drop the cancelled download so that future calls start a
+                # fresh one instead of waiting on an abandoned entry.
+                if self._inflight.get(key) is shared:
+                    del self._inflight[key]
 
     def _assert_file_in_registry(self, fname: str) -> None:
         """
@@ -794,6 +917,7 @@ def stream_download(
     downloader: Downloader,
     pooch: Optional[Pooch] = None,
     retry_if_failed: int = 0,
+    cancel_event: "Optional[threading.Event]" = None,
 ) -> None:
     """
     Stream the file and check that its hash matches the known one.
@@ -805,6 +929,10 @@ def stream_download(
     If the download fails for either a bad connection or a hash mismatch, we
     will retry the download the specified number of times in case the failure
     was due to a network error.
+
+    If *cancel_event* is given and becomes set, abort the download (stopping
+    any further retries) by raising :class:`_DownloadCancelled`. Used to stop
+    a shared download once its last consumer has given up.
     """
     # Lazy import requests to speed up import time
     import requests.exceptions  # noqa: PLC0415
@@ -816,6 +944,10 @@ def stream_download(
     download_attempts = 1 + retry_if_failed
     max_wait = 10
     for i in range(download_attempts):
+        if cancel_event is not None and cancel_event.is_set():
+            raise _DownloadCancelled(
+                f"Download of '{fname.name}' was cancelled by its consumers."
+            )
         try:
             # Stream the file to a temporary so that we can safely check its
             # hash before overwriting the original.
@@ -824,7 +956,11 @@ def stream_download(
                 hash_matches(tmp, known_hash, strict=True, source=str(fname.name))
                 shutil.move(tmp, str(fname))
             break
-        except (ValueError, requests.exceptions.RequestException):
+        except (ValueError, requests.exceptions.RequestException) as error:
+            if cancel_event is not None and cancel_event.is_set():
+                raise _DownloadCancelled(
+                    f"Download of '{fname.name}' was cancelled by its consumers."
+                ) from error
             if i == download_attempts - 1:
                 raise
             retries_left = download_attempts - (i + 1)
