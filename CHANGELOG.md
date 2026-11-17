@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 
 - Added `filter_glob` and `exclude_glob` parameters to `fs.walk.Walker`.
   Closes [#459](https://github.com/PyFilesystem/pyfilesystem2/issues/459).
+- Added `fs.catalog`, a cost-aware collector for resource catalog metadata.
+  It plans the cheapest backend/batch combination, honors cache entries only
+  when they are version compatible, replans paths whose version changes
+  during execution, and returns a manifest tracing every field to its
+  request and version basis.
 
 ### Fixed
 - Elaborated documentation of `filter_dirs` and `exclude_dirs` in `fs.walk.Walker`.

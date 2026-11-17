@@ -16,6 +16,7 @@ Contents:
 
    concepts.rst
    info.rst
+   catalog.rst
    openers.rst
    walking.rst
    globbing.rst
