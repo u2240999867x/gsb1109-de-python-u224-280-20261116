@@ -15,6 +15,7 @@ import yaml
 
 from LnkParse3.extra_data import ExtraData
 from LnkParse3.info_factory import InfoFactory
+from LnkParse3.launch_plan import LaunchPlan
 from LnkParse3.lnk_header import LnkHeader
 from LnkParse3.lnk_info import LnkInfo
 from LnkParse3.lnk_targets import LnkTargets
@@ -169,6 +170,11 @@ class LnkFile:
             out.append(self.string_data.command_line_arguments())
 
         return " ".join(out)
+
+    def launch_plan(self, argument_rule=None, machine_config=None):
+        """Preview the launch action (target, working directory, arguments)
+        without executing anything. See LnkParse3.launch_plan.LaunchPlan."""
+        return LaunchPlan.from_lnk(self, argument_rule=argument_rule, machine_config=machine_config)
 
     def print_shortcut_target(self, pjson=False):
         out = self.lnk_command

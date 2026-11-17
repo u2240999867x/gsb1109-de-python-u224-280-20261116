@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html) since v1.0.0.
 
 ## [Unreleased]
+### Added
+- Add `LnkParse3.launch_plan.LaunchPlan` for read-only preview of the shortcut launch action (target, working directory, ordered arguments) without executing it. Arguments are split only with a caller-declared Windows rule (`command_line_to_argv_w` or `msvcrt`); otherwise the raw argument string is preserved. Drive-relative working directories are resolved only when a machine configuration is supplied. Plans round-trip through `to_dict`/`from_dict` and keep unknown extension fields verbatim.
 
 ## [1.6.0] - 2026-02-27
 ### Added
