@@ -9,6 +9,7 @@ Full documentation
    attributes
    css
    pseudo_classes
+   partial_dom
    manipulating
    traversing
    api
