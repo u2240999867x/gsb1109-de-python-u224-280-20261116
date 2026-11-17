@@ -46,6 +46,7 @@ nav:
     - Time Conversions: cdfepoch.md
     - dataclasses: dataclasses.md
     - xarray: xarray.md
+    - Merging CDF Batches: cdf_merge.md
   - XArray Tools: xarray.md
   - Changelog: changelog.md
   - Development: development.md
