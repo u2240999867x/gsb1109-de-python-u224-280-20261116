@@ -63,10 +63,10 @@ class TreeSummarizer(object):
         """
         taxon_namespace = split_distribution.taxon_namespace
         taxa_mask = taxon_namespace.all_taxa_bitmask()
-        if self.weighted_splits:
-            split_freqs = split_distribution.weighted_split_frequencies
-        else:
-            split_freqs = split_distribution.split_frequencies
+        # Split frequencies are already normalized against the accumulated
+        # tree weights (or raw tree counts when weights are not used), so the
+        # same mapping serves both weighted and unweighted summarization.
+        split_freqs = split_distribution.split_frequencies
         if rooted is None:
             if split_distribution.is_all_counted_trees_rooted():
                 rooted = True
@@ -157,10 +157,9 @@ class TreeSummarizer(object):
 
     def map_split_support_to_tree(self, tree, split_distribution):
         "Maps splits support to the given tree."
-        if self.weighted_splits:
-            split_freqs = split_distribution.weighted_split_frequencies
-        else:
-            split_freqs = split_distribution.split_frequencies
+        # 'split_frequencies' is normalized by accumulated tree weights when
+        # tree weights are in use, so it covers the weighted case directly.
+        split_freqs = split_distribution.split_frequencies
         tree.reindex_taxa(taxon_namespace=split_distribution.taxon_namespace)
         assert tree.taxon_namespace is split_distribution.taxon_namespace
         tree.encode_bipartitions()
