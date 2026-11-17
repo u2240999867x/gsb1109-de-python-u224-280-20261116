@@ -1287,6 +1287,29 @@ class TestTranslateSearch(BaseTestCase):
                 ],
             ),
             param(
+                # The same date written in two sentences keeps two spans, and
+                # the second one no longer reaches back over the sentence in
+                # between or loses the day marker of its date.
+                text="会议在2024年3月15日召开。会议在2024年3月15日召开。",
+                languages=["zh"],
+                settings={"RELATIVE_BASE": datetime.datetime(2020, 6, 15, 12)},
+                expected=[
+                    ("在2024年3月15日", datetime.datetime(2024, 3, 15)),
+                    ("在2024年3月15日", datetime.datetime(2024, 3, 15)),
+                ],
+            ),
+            param(
+                # Every occurrence of the date in its own sentence is reported.
+                text="于2024年1月1日开始。又在2024年1月1日复核。最后2024年1月1日归档。",
+                languages=["zh"],
+                settings={"RELATIVE_BASE": datetime.datetime(2020, 6, 15, 12)},
+                expected=[
+                    ("2024年1月1日", datetime.datetime(2024, 1, 1)),
+                    ("在2024年1月1日", datetime.datetime(2024, 1, 1)),
+                    ("2024年1月1日", datetime.datetime(2024, 1, 1)),
+                ],
+            ),
+            param(
                 text="最後更新於3小時前",
                 languages=["zh-Hant"],
                 settings={"RELATIVE_BASE": datetime.datetime(2020, 6, 15, 12)},
@@ -1349,6 +1372,32 @@ class TestTranslateSearch(BaseTestCase):
     ) -> None:
         result = search_dates(text, languages=languages, settings=settings)
         self.assertEqual(result, expected)
+
+    def test_repeated_date_keeps_distinct_multibyte_spans(self) -> None:
+        # The two identical dates must point at their own occurrences: locating
+        # each returned substring in turn has to advance past the first one, so
+        # neither result can be resolved back to the first occurrence, even with
+        # the multibyte characters and full-width punctuation around them.
+        text = "会议在2024年3月15日召开。会议在2024年3月15日召开。"
+        result = search_dates(text, languages=["zh"])
+        self.assertEqual(
+            result,
+            [
+                ("在2024年3月15日", datetime.datetime(2024, 3, 15)),
+                ("在2024年3月15日", datetime.datetime(2024, 3, 15)),
+            ],
+        )
+        positions = []
+        start = 0
+        for substring, _ in result:
+            position = text.find(substring, start)
+            self.assertNotEqual(position, -1, substring)
+            positions.append((position, position + len(substring)))
+            start = position + len(substring)
+        self.assertEqual(len(positions), len(set(positions)))
+        self.assertEqual(text[positions[0][0] : positions[0][1]], "在2024年3月15日")
+        self.assertEqual(text[positions[1][0] : positions[1][1]], "在2024年3月15日")
+        self.assertGreater(positions[1][0], positions[0][1])
 
     @parameterized.expand(
         [

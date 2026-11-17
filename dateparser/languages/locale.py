@@ -26,6 +26,20 @@ _T = TypeVar("_T")
 NUMERAL_PATTERN = re.compile(r"(\d+)", re.U)
 _MAX_TRANSLATIONS = 16
 
+# Punctuation that ends a sentence in the languages written without spaces
+# between words (see the Japanese and Chinese sentence splitter group). The
+# full stop that closes the last sentence is consumed by the sentence split,
+# so a re-anchor at the final token is treated as a sentence boundary too.
+_SENTENCE_ENDING_PUNCTUATION = "。…‥.!?？！;"
+
+
+def _token_closes_sentence(token: str, is_last: bool) -> bool:
+    """Whether *token* holds, or is the final token right after, a sentence
+    boundary."""
+    return is_last or any(
+        char in _SENTENCE_ENDING_PUNCTUATION for char in token
+    )
+
 # Arabic and Persian text is often typed with the yeh and kaf of the other
 # language, so both the language data and the input of these languages use the
 # Arabic letters, which are also what Unicode normalization turns ئ into.
@@ -670,7 +684,7 @@ class Locale:
 
         return filter(None, sentences)
 
-    def _simplify_split_align(  # noqa: PLR0912
+    def _simplify_split_align(
         self, original: str, settings: "Settings | None"
     ) -> tuple[list[str], list[str]]:
         # TODO: Switch to new split method.
@@ -684,45 +698,116 @@ class Locale:
         if len(original_tokens) == len(simplified_tokens):
             return original_tokens, simplified_tokens
 
-        if len(original_tokens) < len(simplified_tokens):
-            # Inserting empty tokens moves the same original token along, so
-            # it can be compared at every step.
-            @cache
-            def normalize(token: str) -> str:
-                return normalize_unicode(token.lower())
+        if "no_word_spacing" in self.info:
+            self._align_no_word_spacing_tokens(original_tokens, simplified_tokens)
+        elif len(original_tokens) < len(simplified_tokens):
+            self._pad_with_empty_original_tokens(
+                original_tokens, simplified_tokens
+            )
+        else:
+            self._pad_with_empty_simplified_tokens(original_tokens, simplified_tokens)
 
-            add_empty = False
-            for i, token in enumerate(simplified_tokens):
-                if i < len(original_tokens):
-                    if token == normalize(original_tokens[i]):
-                        add_empty = False
-                    elif not add_empty:
-                        add_empty = True
-                        continue
-                    else:
-                        original_tokens.insert(i, "")
+        self._equalize_aligned_tokens(original_tokens, simplified_tokens)
+        return original_tokens, simplified_tokens
+
+    def _align_no_word_spacing_tokens(
+        self, original_tokens: list[str], simplified_tokens: list[str]
+    ) -> None:
+        """Line up the two tokenizations of a language written without spaces.
+
+        The tokenization is otherwise aligned with the alternating
+        insert/skip logic used for every language. That logic loses its place
+        when a token disappears, e.g. the day marker "日", and a later token is
+        identical to the one the simplification left in its place: after a
+        sentence boundary the identical token belongs to the next sentence, so
+        pairing the two would make the next date reach back over the sentence
+        that separates two occurrences of the same date. Such a token is then
+        explicitly treated as deleted, which keeps each occurrence in its own
+        span. Within a sentence the original alternating logic is unchanged.
+        """
+        if len(original_tokens) < len(simplified_tokens):
+            self._pad_with_empty_original_tokens(
+                original_tokens, simplified_tokens
+            )
+        else:
+            self._pad_with_empty_simplified_tokens(
+                original_tokens, simplified_tokens, sentence_reanchor=True
+            )
+
+    @staticmethod
+    def _pad_with_empty_original_tokens(
+        original_tokens: list[str], simplified_tokens: list[str]
+    ) -> None:
+        # Inserting empty tokens moves the same original token along, so it
+        # can be compared at every step.
+        @cache
+        def normalize(token: str) -> str:
+            return normalize_unicode(token.lower())
+
+        add_empty = False
+        for i, token in enumerate(simplified_tokens):
+            if i < len(original_tokens):
+                if token == normalize(original_tokens[i]):
+                    add_empty = False
+                elif not add_empty:
+                    add_empty = True
+                    continue
                 else:
                     original_tokens.insert(i, "")
-        else:
-            add_empty = False
-            for i, token in enumerate(original_tokens):
-                if i < len(simplified_tokens):
-                    if normalize_unicode(token.lower()) == simplified_tokens[i]:
-                        add_empty = False
-                    elif not add_empty:
-                        add_empty = True
-                        continue
-                    else:
-                        simplified_tokens.insert(i, "")
-                else:
-                    simplified_tokens.insert(i, "")
+            else:
+                original_tokens.insert(i, "")
 
+    @staticmethod
+    def _pad_with_empty_simplified_tokens(
+        original_tokens: list[str],
+        simplified_tokens: list[str],
+        sentence_reanchor: bool = False,
+    ) -> None:
+        last_index = len(original_tokens) - 1
+        add_empty = False
+        for i, token in enumerate(original_tokens):
+            if i >= len(simplified_tokens):
+                simplified_tokens.insert(i, "")
+                continue
+            if normalize_unicode(token.lower()) == simplified_tokens[i]:
+                add_empty = False
+            elif (
+                sentence_reanchor
+                and i + 1 < len(original_tokens)
+                and normalize_unicode(original_tokens[i + 1].lower())
+                == simplified_tokens[i]
+                and _token_closes_sentence(
+                    original_tokens[i + 1], i + 1 == last_index
+                )
+            ):
+                # The original token was deleted and the token that matches
+                # the simplified one starts another sentence: give the deleted
+                # token an empty slot instead of letting the following sentence
+                # drift into its place.
+                simplified_tokens.insert(i, "")
+                add_empty = False
+            elif not add_empty:
+                add_empty = True
+                continue
+            else:
+                simplified_tokens.insert(i, "")
+
+    @staticmethod
+    def _equalize_aligned_tokens(
+        original_tokens: list[str], simplified_tokens: list[str]
+    ) -> None:
+        """Pad, or drop empty slots from, the shorter tokenization until both
+        have the same length."""
         while len(original_tokens) != len(simplified_tokens):
             if len(original_tokens) > len(simplified_tokens):
-                original_tokens.remove("")
-            else:
+                if "" in original_tokens:
+                    original_tokens.remove("")
+                else:
+                    simplified_tokens.append("")
+            elif "" in simplified_tokens:
                 simplified_tokens.remove("")
-        return original_tokens, simplified_tokens
+            else:
+                original_tokens.append("")
 
     def _get_split_dictionary(
         self, settings: "Settings | None"
