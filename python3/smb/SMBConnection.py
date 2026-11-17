@@ -119,6 +119,14 @@ class SMBConnection(SMB):
         else:
             self.sock = socket.create_connection(( ip, port ), timeout = timeout)
 
+        # A reconnect starts a fresh SMB2 identity generation. Pending requests
+        # from the previous connection are aborted and release their credits,
+        # and old MessageIds can no longer claim replies on this connection.
+        self.is_using_smb2 = False
+        self._setupSMB1Methods()
+        self.smb_message = self._klassSMBMessage()
+        self._beginRequestGeneration()
+
         self.is_busy = True
         try:
             if not self.is_direct_tcp:
@@ -139,6 +147,35 @@ class SMBConnection(SMB):
         if self.sock:
             self.sock.close()
             self.sock = None
+
+    def _cleanupPendingRequests(self):
+        """
+        Timeout any pending/async SMB2 requests after their individual deadlines.
+
+        Only the timed-out request is affected. Its MessageId range and credits
+        are released once, and a late completion can no longer claim it.
+        """
+        now = time.time()
+
+        for mid, req in list(self.pending_requests.items()):
+            if req.expiry_time < now:
+                self.pending_requests.pop(mid, None)
+                if getattr(req, 'ledger_record', None) is not None:
+                    self.request_ledger.timeout(req.ledger_record)
+                try:
+                    req.errback(SMBTimeout())
+                except Exception:
+                    pass
+
+        for async_id, req in list(self.async_requests.items()):
+            if req.expiry_time < now:
+                self.async_requests.pop(async_id, None)
+                if getattr(req, 'ledger_record', None) is not None:
+                    self.request_ledger.timeout(req.ledger_record)
+                try:
+                    req.errback(SMBTimeout())
+                except Exception:
+                    pass
 
     def listShares(self, timeout = 30):
         """
@@ -351,11 +388,12 @@ class SMBConnection(SMB):
             raise failure
 
         self.is_busy = True
-        
+
         try:
             self._retrieveFileFromOffset(service_name, path, file_obj, cb, eb, offset, max_length, timeout = timeout, show_progress=show_progress, tqdm_kwargs=tqdm_kwargs)
             while self.is_busy:
                 self._pollForNetBIOSPacket(timeout)
+                self._cleanupPendingRequests()
         finally:
             self.is_busy = False
 

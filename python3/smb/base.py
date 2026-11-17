@@ -7,6 +7,10 @@ from .smb_constants import *
 from .smb2_constants import *
 from .smb_structs import *
 from .smb2_structs import *
+from .request_ledger import (SMB2RequestLedger, RequestRecord, RequestStatus,
+                             MessageIdAllocator, MessageIdRangeConflict,
+                             InsufficientCredits, credit_charge_for_message,
+                             credit_charge_for_size, STATUS_PENDING)
 from .security_descriptors import SecurityDescriptor
 from nmb.base import NMBSession
 from .utils import convertFILETIMEtoEpoch, convertEpochToFILETIME
@@ -64,8 +68,6 @@ class SMB(NMBSession):
         self.use_ntlm_v2 = use_ntlm_v2 #: Similar to LMAuthenticationPolicy and NTAuthenticationPolicy as described in [MS-CIFS] 3.2.1.1
         self.smb_message = SMBMessage()
         self.is_using_smb2 = False   #: Are we communicating using SMB2 protocol? self.smb_message will be a SMB2Message instance if this flag is True
-        self.async_requests = { }    #: AsyncID mapped to _PendingRequest instance
-        self.pending_requests = { }  #: MID mapped to _PendingRequest instance
         self.connected_trees = { }   #: Share name mapped to TID
         self.next_rpc_call_id = 1    #: Next RPC callID value. Not used directly in SMB message. Usually encapsulated in sub-commands under SMB_COM_TRANSACTION or SMB_COM_TRANSACTION2 messages
 
@@ -77,6 +79,20 @@ class SMB(NMBSession):
         self.mid = 0
         self.uid = 0
         self.next_signing_id = 2     #: Similar to ClientNextSendSequenceNumber as described in [MS-CIFS] 3.2.1.2
+
+        # SMB2 request identity ledger. Tracks the actual MessageId range
+        # occupied by each request (CreditCharge can span multiple MIDs),
+        # credits, session and async id, with a replayable event log.
+        self.request_ledger = SMB2RequestLedger(initial_credits=64, enforce_budget=False)
+        self.smb2_requests = self.request_ledger
+        self.ledger = self.request_ledger
+        self._smb2_generation = self.request_ledger.generation
+        self._mid_allocations = { }
+
+        # Compatibility projections of the ledger. pending_requests is keyed by
+        # the first MessageId of a request; async_requests by its AsyncId.
+        self.pending_requests = _PendingRequestMap(self)
+        self.async_requests = _PendingRequestMap(self, async_keyed = True)
 
         # SMB1 and SMB2 attributes
         # Note that the interpretations of the values may differ between SMB1 and SMB2 protocols
@@ -131,6 +147,7 @@ class SMB(NMBSession):
                 self.is_using_smb2 = True
                 self.mid = 0  # Must reset messageID counter, or else remote SMB2 server will disconnect
                 self._setupSMB2Methods()
+                self._setSMB2Generation()
                 self.smb_message = self._klassSMBMessage()
                 i = self.smb_message.decode(data)
 
@@ -227,11 +244,17 @@ class SMB(NMBSession):
     #
 
     def _sendSMBMessage_SMB2(self, smb_message):
+        credit_charge = credit_charge_for_message(smb_message)
         if smb_message.mid == 0:
-            smb_message.mid = self._getNextMID_SMB2()
+            smb_message.mid = self._allocateSMB2MID(credit_charge)
+        else:
+            self._reserveSMB2MID(smb_message.mid, credit_charge)
+        smb_message.credit_charge = credit_charge
 
         if smb_message.command != SMB2_COM_NEGOTIATE:
             smb_message.session_id = self.session_id
+
+        self._registerSMB2Request(smb_message, credit_charge, mid_already_reserved = True)
 
         if self.is_signing_active:
             smb_message.flags |= SMB2_FLAGS_SIGNED
@@ -244,9 +267,138 @@ class SMB(NMBSession):
             smb_message.raw_data = smb_message.encode()
         self.sendNMBMessage(smb_message.raw_data)
 
-    def _getNextMID_SMB2(self):
-        self.mid += 1
-        return self.mid
+    def _allocateSMB2MID(self, credit_charge = 1):
+        generation = self._smb2_generation
+        mid = self.request_ledger.allocator.allocate(credit_charge, generation = generation)
+        self.mid = max(self.mid, mid + credit_charge - 1)
+        return mid
+
+    def _reserveSMB2MID(self, mid, credit_charge = 1):
+        generation = self._smb2_generation
+        if not self.request_ledger.allocator.is_free(mid, credit_charge):
+            raise MessageIdRangeConflict('MessageId range %d..%d is already in use' %
+                                         ( mid, mid + credit_charge - 1 ))
+        self.request_ledger.allocator.reserve(mid, credit_charge, generation = generation)
+        self.mid = max(self.mid, mid + credit_charge - 1)
+
+    def _registerSMB2Request(self, smb_message, credit_charge, mid_already_reserved = False):
+        generation = self._smb2_generation
+        return self.request_ledger.register(command = smb_message.command,
+                                            credit_charge = credit_charge,
+                                            session_id = smb_message.session_id,
+                                            mid = smb_message.mid,
+                                            generation = generation,
+                                            mid_already_reserved = mid_already_reserved)
+
+    def _getNextMID_SMB2(self, credit_charge = 1):
+        return self._allocateSMB2MID(credit_charge)
+
+    def _beginRequestGeneration(self, reset_mid = True):
+        """Start a fresh SMB2 identity generation (new connection/session)."""
+        self._smb2_generation = self.request_ledger.begin_generation(reset_mid = reset_mid,
+                                                                     abort_active = True)
+        self.pending_requests.clear()
+        self.async_requests.clear()
+        self.mid = 0
+        return self._smb2_generation
+
+    def _setSMB2Generation(self):
+        """Switch the SMB2 MessageId namespace to a fresh generation."""
+        return self._beginRequestGeneration(reset_mid = True)
+
+    def getRequestLedger(self):
+        return self.request_ledger
+
+    get_request_ledger = getRequestLedger
+
+    def dumpRequestLedger(self):
+        return self.request_ledger.snapshot()
+
+    dump_request_ledger = dumpRequestLedger
+
+    def replayRequestLedger(self, since = 0):
+        return self.request_ledger.replay(since)
+
+    replay_request_ledger = replayRequestLedger
+
+    def findRequest(self, request_id = None, mid = None, message_id = None, async_id = None):
+        return self.request_ledger.find(request_id = request_id, mid = mid,
+                                        message_id = message_id,
+                                        async_id = async_id)
+
+    find_request = findRequest
+
+    @property
+    def requestCreditBalance(self):
+        return self.request_ledger.available_credits
+
+    @property
+    def creditBalance(self):
+        return self.request_ledger.available_credits
+
+    @property
+    def available_credits(self):
+        return self.request_ledger.available_credits
+
+    @property
+    def requestHistory(self):
+        return self.request_ledger.records
+
+    @property
+    def request_records(self):
+        return self.request_ledger.records
+
+    def cancelSMB2Request(self, request_id = None, mid = None, async_id = None):
+        record = self.request_ledger.cancel(request_id = request_id, mid = mid,
+                                            async_id = async_id,
+                                            generation = self._smb2_generation)
+        if record is not None:
+            self._discardPendingRequest(record)
+        return record
+
+    cancel_request = cancelSMB2Request
+    cancelRequest = cancelSMB2Request
+
+    def timeoutSMB2Request(self, request_id = None, mid = None, async_id = None):
+        record = self.request_ledger.timeout(request_id = request_id, mid = mid,
+                                             async_id = async_id,
+                                             generation = self._smb2_generation)
+        if record is not None:
+            self._discardPendingRequest(record)
+        return record
+
+    timeout_request = timeoutSMB2Request
+    timeoutRequest = timeoutSMB2Request
+
+    def _discardPendingRequest(self, record):
+        req = getattr(record, 'pending_request', None)
+        if req is None:
+            return
+        for key, value in list(self.pending_requests.items()):
+            if value is req:
+                self.pending_requests.pop(key, None)
+        for key, value in list(self.async_requests.items()):
+            if value is req:
+                self.async_requests.pop(key, None)
+
+
+
+    def _handleLedgerMessage(self, message):
+        delivered_bytes = None
+        payload = getattr(message, 'payload', None)
+        command = getattr(message, 'command', None)
+        if getattr(message, 'status', 1) == 0 and payload is not None:
+            if command == SMB2_COM_READ:
+                delivered_bytes = getattr(payload, 'data_length', None)
+                if delivered_bytes is None:
+                    delivered_bytes = len(getattr(payload, 'data', b''))
+            elif command == SMB2_COM_WRITE:
+                delivered_bytes = getattr(payload, 'count', None)
+
+        return self.request_ledger.handle_message(message,
+                                                  generation = self._smb2_generation,
+                                                  delivered_bytes = delivered_bytes)
+
 
     def _updateState_SMB2(self, message):
         if message.isReply:
@@ -331,21 +483,85 @@ class SMB(NMBSession):
                                         message.raw_data, message)
 
             if message.isAsync:
-                if message.status == 0x00000103:  # STATUS_PENDING
-                    req = self.pending_requests.pop(message.mid, None)
+                if message.status == STATUS_PENDING:  # STATUS_PENDING
+                    record = self.request_ledger.mark_pending(mid = message.mid,
+                                                              async_id = message.async_id,
+                                                              session_id = message.session_id,
+                                                              generation = self._smb2_generation,
+                                                              request_id = self._pendingRequestIdForMid(message.mid))
+                    req = self._popPendingRequest(message.mid, message.async_id)
+                    if req is None and record is not None:
+                        req = getattr(record, 'pending_request', None)
+                    if record is None and not self._legacyPendingRequest(req):
+                        self.log.debug('Ignoring unmatched/late STATUS_PENDING for MID %d (AsyncId %d)',
+                                       message.mid, message.async_id)
+                        return False
                     if req:
+                        req.generation = self._smb2_generation
+                        req.async_id = message.async_id
                         self.async_requests[message.async_id] = req
                 else: # All other status including SUCCESS
-                    req = self.async_requests.pop(message.async_id, None)
+                    record = self._handleLedgerMessage(message)
+                    if record is not None:
+                        req = self._popPendingRequest(message.mid, message.async_id)
+                        if req is None:
+                            req = getattr(record, 'pending_request', None)
+                    else:
+                        # Never detach a request that belongs to the current
+                        # generation unless the ledger actually matched it.
+                        candidate = self.async_requests.get(message.async_id)
+                        if not self._legacyPendingRequest(candidate):
+                            candidate = self.pending_requests.get(message.mid)
+                        req = candidate
+                        if not self._legacyPendingRequest(req):
+                            self.log.debug('Ignoring unmatched/late SMB2 response for MID %d (AsyncId %d)',
+                                           message.mid, message.async_id)
+                            return False
+                        self._popPendingRequest(message.mid, message.async_id)
                     if req:
                         req.callback(message, **req.kwargs)
                         return True
             else:
-                req = self.pending_requests.pop(message.mid, None)
+                record = self._handleLedgerMessage(message)
+                if record is not None:
+                    req = self._popPendingRequest(message.mid)
+                    if req is None:
+                        req = getattr(record, 'pending_request', None)
+                else:
+                    req = self.pending_requests.get(message.mid)
+                    if not self._legacyPendingRequest(req):
+                        self.log.debug('Ignoring unmatched/late SMB2 response for MID %d', message.mid)
+                        return False
+                    self._popPendingRequest(message.mid)
                 if req:
                     req.callback(message, **req.kwargs)
                     return True
 
+    def _popPendingRequest(self, mid = None, async_id = None):
+        req = None
+        if async_id is not None:
+            req = self.async_requests.pop(async_id, None)
+        if mid is not None:
+            pending = self.pending_requests.pop(mid, None)
+            if req is None:
+                req = pending
+        return req
+
+    def _legacyPendingRequest(self, req):
+        """
+        True if *req* may be matched without a ledger identity.
+
+        Requests bound to a previous connection generation are never eligible.
+        """
+        if req is None:
+            return False
+        generation = getattr(req, 'generation', None)
+        return generation is None or generation == self._smb2_generation
+
+    def _pendingRequestIdForMid(self, mid):
+        record = self.request_ledger.find(mid = mid, generation = self._smb2_generation,
+                                          active_only = True)
+        return record.request_id if record is not None else None
 
     def _updateServerInfo_SMB2(self, payload):
         self.capabilities = payload.capabilities
@@ -3209,3 +3425,78 @@ class _PendingRequest:
         self.callback = callback
         self.errback = errback
         self.kwargs = kwargs
+        self.generation = None
+        self.ledger_record = None
+        self.async_id = 0
+
+    def __repr__(self):
+        return ('_PendingRequest(mid=%r, generation=%r, async_id=%r, record=%r)' %
+                ( self.mid, self.generation, self.async_id, getattr(self.ledger_record, 'request_id', None) ))
+
+
+class _PendingRequestMap(dict):
+    """
+    A dict-like projection onto the SMB2 request ledger.
+
+    Existing code stores pending requests with ``self.pending_requests[mid] = req``
+    after sending the message.  This mapping attaches the request's ledger identity
+    (generation, MessageId range, session) at that point and ignores stale writes
+    from a previous connection generation.
+    """
+
+    def __init__(self, smb, async_keyed = False):
+        dict.__init__(self)
+        self.smb = smb
+        self.async_keyed = async_keyed
+
+    def _bind(self, key, req):
+        if not self.smb.is_using_smb2:
+            return req
+
+        ledger = self.smb.request_ledger
+        generation = self.smb._smb2_generation
+
+        if self.async_keyed:
+            record = ledger.find(async_id = key, generation = generation, active_only = True)
+        else:
+            record = ledger.find(mid = key, generation = generation, active_only = True)
+
+        request_generation = getattr(req, 'generation', None)
+        if request_generation is not None and request_generation != generation:
+            # A late write from a stale/closed connection must not resurrect an
+            # old identity or claim a MessageId in the new generation.
+            return None
+
+        req.generation = generation
+
+        if record is None:
+            # No ledger identity (e.g. direct use of the legacy dictionaries).
+            # Keep the request usable; response matching will simply find no
+            # ledger record and apply the legacy fallback.
+            return req
+
+        req.ledger_record = record
+        req.mid = record.mid
+        if self.async_keyed:
+            req.async_id = key
+        record.pending_request = req
+        return req
+
+    def __setitem__(self, key, req):
+        if self._bind(key, req) is None:
+            return
+        dict.__setitem__(self, key, req)
+
+    def setdefault(self, key, default = None):
+        if default is not None:
+            self._bind(key, default)
+        return dict.setdefault(self, key, default)
+
+    def pop(self, key, *args):
+        value = dict.pop(self, key, *args)
+        if value is not None and getattr(value, 'ledger_record', None) is not None:
+            value.ledger_record.pending_request = None
+        return value
+
+    def clear(self):
+        dict.clear(self)

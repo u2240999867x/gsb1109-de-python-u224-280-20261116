@@ -20,6 +20,7 @@ class SMBProtocol(Protocol, SMB):
 
     def connectionMade(self):
         self.factory.instance = self
+        self._beginRequestGeneration()
         if not self.is_direct_tcp:
             self.requestNMBSession()
         else:
@@ -59,16 +60,24 @@ class SMBProtocol(Protocol, SMB):
     def _cleanupPendingRequests(self):
         if self.factory.instance == self:
             now = time.time()
-            to_remove = []
-            for mid, r in self.pending_requests.items():
+            for mid, r in list(self.pending_requests.items()):
                 if r.expiry_time < now:
+                    self.pending_requests.pop(mid, None)
+                    if getattr(r, 'ledger_record', None) is not None:
+                        self.request_ledger.timeout(r.ledger_record)
                     try:
                         r.errback(SMBTimeout())
                     except Exception: pass
-                    to_remove.append(mid)
 
-            for mid in to_remove:
-                del self.pending_requests[mid]
+            # Async requests are keyed by AsyncId, not MID.
+            for async_id, r in list(self.async_requests.items()):
+                if r.expiry_time < now:
+                    self.async_requests.pop(async_id, None)
+                    if getattr(r, 'ledger_record', None) is not None:
+                        self.request_ledger.timeout(r.ledger_record)
+                    try:
+                        r.errback(SMBTimeout())
+                    except Exception: pass
 
             reactor.callLater(1, self._cleanupPendingRequests)
 
