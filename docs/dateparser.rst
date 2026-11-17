@@ -8,6 +8,7 @@ Subpackages
 
     dateparser.languages
     dateparser.calendars
+    dateparser.retention
 
 Submodules
 ----------

@@ -65,6 +65,13 @@ Security fixes:
 
 New features:
 
+- Add ``dateparser.retention``, which plans auditable reclaim windows from a
+  declarative retention policy: month-end and calendar-day rules are kept as
+  calendar dates rather than 24-hour spans, settlement rules count business
+  days on a supplied business calendar and stay pending without a settlement
+  anchor, and a shared original is only reclaimable once the requirements of
+  every project and dependent material are released. Policy corrections report
+  affected materials without rewriting recorded collection times
 - Add a ``STRICT_DATE_ORDER`` setting that turns an explicit ``DATE_ORDER``
   from a preference into a requirement: ``"year"`` reads a two-digit year
   only from the position ``DATE_ORDER`` gives it, and ``"all"`` also keeps

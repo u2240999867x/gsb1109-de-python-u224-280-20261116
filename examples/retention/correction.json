@@ -1,0 +1,28 @@
+{
+  "reason": "结清后第三个工作日 clarified to the fourth business day",
+  "rules": [
+    {
+      "id": "R1",
+      "raw_text": "次月月底",
+      "kind": "next_month_end"
+    },
+    {
+      "id": "R2",
+      "raw_text": "采集后30天",
+      "kind": "calendar_days",
+      "days": 30
+    },
+    {
+      "id": "R3",
+      "raw_text": "结清后第四个工作日",
+      "kind": "settlement_business_days",
+      "days": 4
+    }
+  ],
+  "materials": [
+    {
+      "id": "orig-1002",
+      "rule_ids": ["R1", "R2"]
+    }
+  ]
+}

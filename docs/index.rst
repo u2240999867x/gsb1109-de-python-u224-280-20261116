@@ -17,6 +17,7 @@ Contents:
    installation
    usage
    settings
+   retention
    custom_language_detection
    performance
    supported_locales

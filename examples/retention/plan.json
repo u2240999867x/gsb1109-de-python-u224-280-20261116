@@ -1,0 +1,90 @@
+{
+  "calendar": {
+    "id": "apac-ops-2026",
+    "timezone": "Asia/Shanghai",
+    "working_weekdays": ["monday", "tuesday", "wednesday", "thursday", "friday"],
+    "holidays": {
+      "2026-10-01": "National Day",
+      "2026-10-02": "National Day",
+      "2026-10-05": "National Day holiday",
+      "2026-10-06": "National Day holiday",
+      "2026-10-07": "National Day holiday"
+    },
+    "working_days": {
+      "2026-10-10": "adjusted working Saturday"
+    }
+  },
+  "policy": {
+    "rules": [
+      {
+        "id": "R1",
+        "raw_text": "次月月底",
+        "kind": "next_month_end"
+      },
+      {
+        "id": "R2",
+        "raw_text": "采集后30天",
+        "kind": "calendar_days",
+        "days": 30
+      },
+      {
+        "id": "R3",
+        "raw_text": "结清后第三个工作日",
+        "kind": "settlement_business_days",
+        "days": 3
+      }
+    ]
+  },
+  "projects": [
+    {
+      "id": "retail",
+      "name": "零售风控",
+      "rule_ids": ["R1", "R2", "R3"]
+    },
+    {
+      "id": "audit",
+      "name": "内审取证",
+      "rule_ids": ["R1", "R3"]
+    },
+    {
+      "id": "analytics",
+      "name": "模型分析",
+      "rule_ids": ["R2"]
+    }
+  ],
+  "materials": [
+    {
+      "id": "orig-1001",
+      "kind": "original",
+      "project": "retail",
+      "label": "采集原件 A",
+      "collected_at": "2026-09-29T14:20:00+08:00",
+      "settlement_at": "2026-11-13T17:40:00+08:00",
+      "shared_with": ["audit", "analytics"]
+    },
+    {
+      "id": "derived-1001-doc",
+      "kind": "derived",
+      "project": "retail",
+      "label": "结构化入库文档",
+      "collected_at": "2026-09-30T09:05:00+08:00",
+      "depends_on": ["orig-1001"]
+    },
+    {
+      "id": "orig-1002",
+      "kind": "original",
+      "project": "audit",
+      "label": "采集原件 B",
+      "collected_at": "2026-10-02T08:10:00+08:00"
+    },
+    {
+      "id": "derived-1002-report",
+      "kind": "derived",
+      "project": "retail",
+      "label": "证据摘录件",
+      "collected_at": "2026-10-03T11:30:00+08:00",
+      "depends_on": ["orig-1002"],
+      "rule_ids": ["R2"]
+    }
+  ]
+}
