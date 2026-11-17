@@ -45,6 +45,7 @@ Calculations, Statistics, and Metrics
 
     treemeasure.rst
     treecompare.rst
+    treerooting.rst
     treescore.rst
     popgenstat.rst
     probability.rst
