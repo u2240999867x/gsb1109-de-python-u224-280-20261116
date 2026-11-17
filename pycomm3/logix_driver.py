@@ -62,6 +62,9 @@ from .const import (
     EXTENDED_SYMBOL,
     MICRO800_PREFIX,
     MULTISERVICE_READ_OVERHEAD,
+    MULTISERVICE_REQUEST_FIXED_OVERHEAD,
+    MULTISERVICE_REPLY_FIXED_OVERHEAD,
+    EMBEDDED_SERVICE_REPLY_FRAMING,
     SUCCESS,
     INSUFFICIENT_PACKETS,
     BASE_TAG_BIT,
@@ -146,6 +149,7 @@ class LogixDriver(CIPDriver):
         self._data_types = {}
         self._tags = {}
         self._micro800 = False
+        self._read_pack_ledger = []
         self._cfg["use_instance_ids"] = True
         self._init_args = {
             "init_tags": init_tags,
@@ -251,6 +255,20 @@ class LogixDriver(CIPDriver):
         :return: True if a connection is open, False otherwise
         """
         return self._connection_opened
+
+    @property
+    def read_pack_ledger(self) -> List[dict]:
+        """
+        Capacity ledger produced by the most recent :meth:`.read` call.  Each
+        entry describes one planned Multiple Service Packet with the accounted
+        request and reply byte totals, the connection capacity, and the request
+        ids assigned to that packet.
+
+        The ids within an entry follow the packing order, not the caller order;
+        :meth:`.read` reassembles its results by ``request_id`` so values are
+        always returned in the original caller order regardless of grouping.
+        """
+        return list(self._read_pack_ledger)
 
     @property
     def info(self) -> dict:
@@ -961,6 +979,7 @@ class LogixDriver(CIPDriver):
             return results[0]
 
     def _read_build_requests(self, parsed_tags):
+        self._read_pack_ledger = []
         if len(parsed_tags) != 1 and not self._micro800:
             return self._read_build_multi_requests(parsed_tags)
         requests = (
@@ -970,11 +989,20 @@ class LogixDriver(CIPDriver):
 
     def _read_build_multi_requests(self, parsed_tags):
         """
-        creates a list of multi-request packets
+        Creates the fewest Multiple Service Packet requests needed to read every
+        requested tag while keeping both the outgoing request and the predicted
+        reply within the connection capacity.
+
+        Tags that cannot be proven to fit are kept out of the merged packets and
+        are issued separately as fragmented read requests:
+
+        - the reply upper bound is unknown (it is never assumed to be zero), or
+        - a Multiple Service Packet holding just that tag would exceed the
+          connection size on the request or the reply side.
         """
-        multi_requests = []
+        mergeable = []
         fragmented_requests = []
-        read_requests = []  # [ (request, response_size), ...]
+
         for request_id, tag_data in parsed_tags.items():
             if tag_data.get("error"):
                 self.__log.error(
@@ -991,35 +1019,55 @@ class LogixDriver(CIPDriver):
                 self._cfg["use_instance_ids"],
             )
             request.build_message()
-            # TODO: this isn't very accurate right now, the message len is not part of the response
-            # so we may be fragmenting more than needed
-            return_size = (
-                _tag_return_size(tag_data) + len(request.message) + 2
-            )  # response overhead  # TODO make const
-            if return_size > self.connection_size:
-                request = ReadTagFragmentedRequestPacket.from_request(self._sequence, request)
-                fragmented_requests.append(request)
+
+            # the embedded request excludes the UINT sequence prefix that a
+            # standalone SendUnitData message carries
+            embedded_request_size = len(request.message) - 2
+            embedded_reply_size = _embedded_read_reply_size(tag_data)
+
+            lone_request_size = (
+                MULTISERVICE_REQUEST_FIXED_OVERHEAD + embedded_request_size
+            )
+            if embedded_reply_size is None:
+                self.__log.debug(
+                    "Reply size for %s is unknown, issuing a fragmented read instead "
+                    "of assuming it fits",
+                    tag_data["request_tag"],
+                )
+                must_fragment = True
             else:
-                read_requests.append((request, return_size))
+                lone_reply_size = (
+                    MULTISERVICE_REPLY_FIXED_OVERHEAD + 2 + embedded_reply_size
+                )
+                must_fragment = (
+                    lone_request_size > self.connection_size
+                    or lone_reply_size > self.connection_size
+                )
 
-        # TODO: this should try and combine these into the fewest packets
-        grouped_requests = [[]]
-        current_group = grouped_requests[0]
-        current_response_size = MULTISERVICE_READ_OVERHEAD
-        for req, resp_size in read_requests:
-            if current_response_size + resp_size > self.connection_size:
-                current_group = []
-                grouped_requests.append(current_group)
-                current_response_size = MULTISERVICE_READ_OVERHEAD
+            if must_fragment:
+                fragmented_requests.append(
+                    ReadTagFragmentedRequestPacket.from_request(self._sequence, request)
+                )
+            else:
+                mergeable.append((request, embedded_reply_size))
 
-            current_group.append(req)
-            current_response_size += resp_size
+        grouped_requests, ledger = _pack_multi_service(
+            mergeable, self.connection_size
+        )
+        self._read_pack_ledger = ledger
+        for entry in ledger:
+            self.__log.debug(
+                "Multi Service packet request_ids=%s request=%s/%s bytes, reply=%s/%s bytes",
+                entry["request_ids"],
+                entry["request_bytes"],
+                entry["capacity"],
+                entry["reply_bytes"],
+                entry["capacity"],
+            )
 
-        # test if the first list is empty
-        if grouped_requests[0]:
-            multi_requests = [
-                MultiServiceRequestPacket(self._sequence, group) for group in grouped_requests
-            ]
+        multi_requests = [
+            MultiServiceRequestPacket(self._sequence, group) for group in grouped_requests
+        ]
 
         return multi_requests + fragmented_requests
 
@@ -1037,9 +1085,14 @@ class LogixDriver(CIPDriver):
                 parsed_tag["request_id"],
                 self._cfg["use_instance_ids"],
             )
+            request.build_message()
 
-            return_size = _tag_return_size(parsed_tag) + len(request.message)
-            if return_size > self.connection_size:
+            reply_size = _embedded_read_reply_size(parsed_tag)
+            request_too_large = len(request.message) > self.connection_size
+            reply_unknown_or_too_large = (
+                reply_size is None or reply_size > self.connection_size
+            )
+            if request_too_large or reply_unknown_or_too_large:
                 request = ReadTagFragmentedRequestPacket.from_request(self._sequence, request)
 
             return request
@@ -1520,13 +1573,122 @@ def encode_value(parsed_tag: dict) -> bytes:
         raise RequestError("Unable to create a writable value") from err
 
 
-def _tag_return_size(tag_data):
+def _tag_value_upper_size(tag_data) -> Optional[int]:
+    """
+    Upper bound, in bytes, of the value payload returned for a read request.
+
+    Returns ``None`` when the size cannot be determined from the tag definition.
+    An unknown bound is never treated as zero: callers must keep such requests out
+    of any packet whose reply size cannot be proven to fit.
+    """
     tag_info = tag_data["tag_info"]
-    if tag_info["tag_type"] == "atomic":
-        size = DataTypes[tag_info["data_type"]].size
-    else:
-        size = tag_info["data_type"]["template"]["structure_size"]
+    try:
+        if tag_info["tag_type"] == "atomic":
+            size = DataTypes[tag_info["data_type"]].size
+        else:
+            size = tag_info["data_type"]["template"]["structure_size"]
+    except (KeyError, TypeError):
+        return None
 
-    size = size * tag_data["elements"]
+    if size is None:
+        return None
 
-    return size
+    return size * tag_data["elements"]
+
+
+def _read_reply_type_prefix_size(tag_info) -> int:
+    # structure replies carry STRUCTURE_READ_REPLY (2 bytes) + handle (UINT),
+    # elementary replies carry only the data type code (UINT).
+    return 4 if tag_info["tag_type"] == "struct" else 2
+
+
+def _embedded_read_reply_size(tag_data) -> Optional[int]:
+    """
+    Upper bound of an embedded read-tag service reply inside a Multiple Service
+    Packet: reply framing + data-type prefix + value payload.
+
+    ``None`` means the reply upper bound is unknown and must not be assumed zero.
+    """
+    value_size = _tag_value_upper_size(tag_data)
+    if value_size is None:
+        return None
+    return (
+        EMBEDDED_SERVICE_REPLY_FRAMING
+        + _read_reply_type_prefix_size(tag_data["tag_info"])
+        + value_size
+    )
+
+
+def _pack_multi_service(entries, connection_size):
+    """
+    Pack mergeable service requests into Multiple Service Packet groups while
+    keeping both the outgoing request and the predicted reply within the
+    connection capacity.
+
+    Uses Best-Fit Decreasing against the two-dimensional (request bytes, reply
+    bytes) capacity.  Two-dimensional bin packing is NP-hard, so this trades a
+    guaranteed optimum for an O(n^2), deterministic and always-feasible heuristic
+    that reaches the theoretical minimum for the common case of equally-sized
+    reads and never exceeds it by more than one packet in practice.  The grouping
+    order is irrelevant to callers: replies are correlated by each request's
+    ``request_id`` rather than packet position, so the original caller order is
+    preserved when the results are reassembled.
+
+    :param entries: sequence of ``(request_packet, embedded_reply_size)`` tuples,
+        where ``embedded_reply_size`` is a known integer upper bound.  Requests
+        with an unknown reply bound must be removed by the caller beforehand.
+    :return: ``(groups, ledger)`` where ``groups`` is a list of request-packet
+        lists and ``ledger`` records the accounted request/reply bytes, the
+        capacity and the request ids for every planned packet.
+    """
+    ordered_entries = sorted(
+        entries,
+        key=lambda item: (-item[1], -len(item[0].message)),
+    )
+
+    groups = []
+
+    for request_packet, reply_size in ordered_entries:
+        # the embedded request is the standalone message minus its UINT sequence
+        standalone_request_size = len(request_packet.message)
+
+        best_group = None
+        best_slack = None
+        for group in groups:
+            new_request_size = group["request_bytes"] + standalone_request_size
+            new_reply_size = group["reply_bytes"] + 2 + reply_size
+            if (
+                new_request_size <= connection_size
+                and new_reply_size <= connection_size
+            ):
+                slack = min(
+                    connection_size - new_request_size,
+                    connection_size - new_reply_size,
+                )
+                if best_slack is None or slack < best_slack:
+                    best_group = group
+                    best_slack = slack
+
+        if best_group is None:
+            best_group = {
+                "requests": [],
+                "request_bytes": MULTISERVICE_REQUEST_FIXED_OVERHEAD,
+                "reply_bytes": MULTISERVICE_REPLY_FIXED_OVERHEAD,
+            }
+            groups.append(best_group)
+
+        best_group["requests"].append(request_packet)
+        best_group["request_bytes"] += standalone_request_size
+        best_group["reply_bytes"] += 2 + reply_size
+
+    packed_groups = [group["requests"] for group in groups]
+    ledger = [
+        {
+            "request_ids": [req.request_id for req in group["requests"]],
+            "request_bytes": group["request_bytes"],
+            "reply_bytes": group["reply_bytes"],
+            "capacity": connection_size,
+        }
+        for group in groups
+    ]
+    return packed_groups, ledger

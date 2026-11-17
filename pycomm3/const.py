@@ -36,6 +36,22 @@ MSG_ROUTER_PATH = [
 # used to estimate packet size  and determine when to start a new packet
 MULTISERVICE_READ_OVERHEAD = 10
 
+# Fixed framing of a Multiple Service Packet (0x0A) request before the offset
+# table and the embedded service requests:
+# sequence (UINT, 2) + service code (USINT, 1) + message-router request path
+# (5) + service count (UINT, 2).
+MULTISERVICE_REQUEST_FIXED_OVERHEAD = 10
+
+# Fixed framing of a Multiple Service Packet reply: the reply count (UINT, 2).
+# Every embedded service additionally contributes a 2-byte offset table entry
+# and its own embedded service reply.
+MULTISERVICE_REPLY_FIXED_OVERHEAD = 2
+
+# Framing bytes that prefix every embedded service reply before the data type
+# and value payload: service code + reserved + general status + additional
+# status size.
+EMBEDDED_SERVICE_REPLY_FRAMING = 4
+
 MIN_VER_INSTANCE_IDS = 21  # using Symbol Instance Addressing not supported below version 21
 MIN_VER_LARGE_CONNECTIONS = 20  # >500 byte connections not supported below logix v20
 MIN_VER_EXTERNAL_ACCESS = 18  # ExternalAccess attributed added in v18
