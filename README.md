@@ -112,6 +112,36 @@ Windows Shortcut Information:
 }
 ```
 
+## Comparing parser versions
+
+When the same batch of LNK files is re-parsed after a parser upgrade,
+`LnkParse3.parser_diff` classifies every difference so that "the parser now
+recognizes more" is not misreported as "the file was modified":
+
+```
+python -m LnkParse3.parser_diff OLD_REPORT.json NEW_REPORT.json [-o OUT.json]
+```
+
+Both inputs are JSON reports over the same batch; each file entry carries its
+batch-relative `path`, an optional `sha256`/`size` for identity checking, and
+a flat list of `fields` with `name`, `value` and the byte range
+(`offset`/`size`) the field occupies in the original file. Differences are
+classified into four categories:
+
+- `newly_recognized` – ranges the old parser never covered, or one coarse old
+  field refined into several new fields (1:N mapping is allowed)
+- `reinterpreted` – the same range interpreted differently; both the old and
+  the new claim are kept, even if the new value is a parser default
+- `original_changed` – the original file itself differs (hash/size mismatch);
+  field-level comparison is skipped for such files
+- `insufficient_evidence` – differences that cannot be located or attributed
+  (missing byte ranges, partial range overlap, coverage lost by one version,
+  files present in only one report)
+
+Field renames and output-order changes are not business changes and are
+listed separately under `non_business`. The two reports do not need to share
+a field-tree shape; matching is done on byte ranges and values.
+
 # Extracted data
 
 List of data in LNK structure and their current status of implementation.

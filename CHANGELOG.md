@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html) since v1.0.0.
 
 ## [Unreleased]
+### Added
+- Add `LnkParse3.parser_diff` module and CLI to compare two parser-version
+  reports over the same batch of LNK files. Differences are classified as
+  `newly_recognized`, `reinterpreted`, `original_changed` or
+  `insufficient_evidence`, so a parser upgrade is not misreported as a file
+  modification.
 
 ## [1.6.0] - 2026-02-27
 ### Added
