@@ -210,6 +210,12 @@ underlying DWORD element.  This means the list of values must be in multiples of
 be multiples of 32, e.g. ``'bools{32}'``, ``'bools[32]{64}'``.  There is no limitation on reading multiple elements
 or reading and writing a single element.
 
+When reading, only the DWORDs that actually contain the requested BOOLs are read and each BOOL is taken from its own
+word and bit, so ranges that start in the middle of a word or cross word boundaries return exactly the requested
+BOOLs and never include neighboring bits that happened to be read along with them.  Requests for the same DWORD range
+are only sent to the PLC once and each request still gets its own BOOLs from the shared reply.  If the PLC does not
+return a word, only the BOOLs that depend on that word are returned as ``None``.
+
 Reading Tags
 ------------
 

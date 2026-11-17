@@ -36,6 +36,7 @@ from ..cip import (
     StringDataType,
     ArrayType,
     UDINT,
+    DWORD,
     BitArrayType,
     LogicalSegment,
     PADDED_EPATH,
@@ -199,10 +200,17 @@ def parse_read_reply(data, data_type, elements):
     is_struct = data[:2] == STRUCTURE_READ_REPLY
     stream = BytesIO(data[4:] if is_struct else data[2:])
     if issubclass(_type, ArrayType):
-        _value = _type.decode(stream, length=elements)
+        if dt_name == "DWORD" and issubclass(_type.element_type, BitArrayType):
+            # BOOL arrays are returned as groups of DWORDs.  If a word is
+            # missing from the reply, decode as many whole words as are
+            # present so the caller can mark only the BOOLs backed by the
+            # missing word(s) as unknown.
+            _value = _decode_partial_dword_array(stream, elements)
+        else:
+            _value = _type.decode(stream, length=elements)
 
-        if elements == 1 and not issubclass(_type.element_type, BitArrayType):
-            _value = _value[0]
+            if elements == 1 and not issubclass(_type.element_type, BitArrayType):
+                _value = _value[0]
     else:
         _value = _type.decode(stream)
         if is_struct and not issubclass(_type, StringDataType):
@@ -217,6 +225,21 @@ def parse_read_reply(data, data_type, elements):
         dt_name = f"{dt_name}[{elements}]"
 
     return _value, dt_name
+
+
+def _decode_partial_dword_array(stream, elements):
+    """
+    Decode up to ``elements`` DWORDs from ``stream`` as a flat list of bools.
+    Stops at the last complete DWORD instead of failing when the reply is short.
+    """
+    bools = []
+    for _ in range(elements):
+        remaining = len(stream.getbuffer()) - stream.tell()
+        if remaining < 4:
+            break
+        bools.extend(DWORD.decode(stream))
+
+    return bools
 
 
 def dword_to_bool_array(dword: Union[bytes, int]):

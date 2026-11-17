@@ -924,8 +924,18 @@ class LogixDriver(CIPDriver):
                     results.append(Tag(tag, None, None, request_data["error"]))
                     continue
 
-                result = read_results[i]
-                bool_elements = request_data["bool_elements"]
+                if request_data.get("no_read"):
+                    results.append(self._bool_result(request_data, []))
+                    continue
+
+                result_id = request_data.get("_result_id", i)
+                result = read_results.get(result_id)
+                if result is None:
+                    results.append(
+                        Tag(request_data["user_tag"], None, None, "No response received")
+                    )
+                    continue
+
                 if result:
                     bit = request_data.get("bit")
 
@@ -937,15 +947,9 @@ class LogixDriver(CIPDriver):
                                 "BOOL",
                                 result.error,
                             )
-                    else:
-                        bit = bit or 0
-                        if bool_elements is not None:
-                            bools = result.value[bit : bit + bool_elements]
-                            data_type = f"BOOL[{bool_elements}]"
-                            result = Tag(request_data["user_tag"], bools, data_type, result.error)
-                        else:
-                            val = result.value[bit]
-                            result = Tag(request_data["user_tag"], val, "BOOL", result.error)
+                    elif request_data.get("bool_request"):
+                        results.append(self._bool_result(request_data, result.value))
+                        continue
                 else:
                     result = Tag(request_data["user_tag"], None, None, result.error)
 
@@ -963,10 +967,27 @@ class LogixDriver(CIPDriver):
     def _read_build_requests(self, parsed_tags):
         if len(parsed_tags) != 1 and not self._micro800:
             return self._read_build_multi_requests(parsed_tags)
-        requests = (
-            self._read_build_single_request(parsed_tags[request_id]) for request_id in parsed_tags
-        )
-        return [r for r in requests if r is not None]
+
+        requests = []
+        shared_requests = {}
+        for request_id in parsed_tags:
+            tag_data = parsed_tags[request_id]
+            if tag_data.get("no_read"):
+                continue
+
+            request_key = _read_request_key(tag_data)
+            if request_key is not None and request_key in shared_requests:
+                tag_data["_result_id"] = shared_requests[request_key]
+                continue
+
+            if request_key is not None:
+                shared_requests[request_key] = request_id
+
+            request = self._read_build_single_request(tag_data)
+            if request is not None:
+                requests.append(request)
+
+        return requests
 
     def _read_build_multi_requests(self, parsed_tags):
         """
@@ -975,12 +996,26 @@ class LogixDriver(CIPDriver):
         multi_requests = []
         fragmented_requests = []
         read_requests = []  # [ (request, response_size), ...]
+        shared_requests = {}  # {request key: request_id of the request that will be sent}
         for request_id, tag_data in parsed_tags.items():
             if tag_data.get("error"):
                 self.__log.error(
                     f'Skipping making request for {tag_data["request_tag"]}, error: {tag_data.get("error")}'
                 )
                 continue
+
+            if tag_data.get("no_read"):
+                continue
+
+            request_key = _read_request_key(tag_data)
+            if request_key is not None and request_key in shared_requests:
+                # Requests reading the exact same words share one read, they
+                # will each pick their own BOOLs out of the shared raw value.
+                tag_data["_result_id"] = shared_requests[request_key]
+                continue
+
+            if request_key is not None:
+                shared_requests[request_key] = request_id
 
             request = ReadTagRequestPacket(
                 self._sequence,
@@ -1327,12 +1362,87 @@ class LogixDriver(CIPDriver):
 
             if tag_info["data_type"] == "DWORD":
                 _tag, idx = util.get_array_index(tag)
-                if idx is not None:
-                    tag = f"{_tag}[0]" if rw == "r" else f"{_tag}[{idx // 32}]"
+                bit_access = bit
                 bit = idx
                 bool_elements = None if implicit_element or elements == 1 else elements
-                total_size = (bit or 0) + elements
-                elements = (total_size // 32) + (1 if total_size % 32 else 0)
+
+                if rw == "w":
+                    # writes are always aligned to the start of the DWORD containing the bit
+                    if idx is not None:
+                        tag = f"{_tag}[{idx // 32}]"
+                    total_size = (bit or 0) + elements
+                    elements = (total_size // 32) + (1 if total_size % 32 else 0)
+                else:
+                    # BOOL arrays are stored as DWORDs, only fetch the words that
+                    # actually contain the requested bits.  Keep the requested
+                    # logical index, the fetched word range, and each bit's
+                    # source so the requested bits can be picked out of the
+                    # returned words without including any neighbor bits.
+                    catalog_bit = int(tag_info.get("bit") or 0)
+                    array_words = _array_word_count(tag_info)
+                    is_array = array_words is not None
+
+                    if idx is not None:
+                        bool_index = catalog_bit + idx
+                        is_array = True
+                    elif bit_access is not None:
+                        # bit access to a single integer, e.g. 'timer.CTL.5'
+                        bool_index = catalog_bit + bit_access
+                    elif bool_elements is None and array_words is None:
+                        # a plain DWORD read, the reply is already the list of
+                        # the 32 BOOLs of the word, leave it unchanged
+                        return {
+                            "user_tag": request_tag,
+                            "plc_tag": tag,
+                            "bit": None,
+                            "elements": elements,
+                            "tag_info": tag_info,
+                            "bool_elements": None,
+                        }
+                    else:
+                        bool_index = catalog_bit
+                        if bool_elements is not None:
+                            # multiple BOOLs requested from a DWORD-like tag
+                            is_array = True
+
+                    bool_count = bool_elements if bool_elements is not None else 1
+
+                    if is_array:
+                        first_word = bool_index // 32
+                        last_word = (bool_index + bool_count - 1) // 32
+                        if array_words is not None:
+                            last_word = min(last_word, array_words - 1)
+
+                        if last_word < first_word:
+                            # the entire requested range is outside the array
+                            word_count = 0
+                        else:
+                            word_count = last_word - first_word + 1
+
+                        if idx is not None or first_word:
+                            tag = f"{_tag}[{first_word}]"
+                        elements = word_count
+                    else:
+                        first_word = 0
+                        word_count = 1
+                        elements = 1
+
+                    return {
+                        "user_tag": request_tag,  # tag name from user, without element request
+                        "plc_tag": tag,  # name of the word in the plc the request will be using
+                        "bit": bool_index,
+                        "elements": elements,
+                        "tag_info": tag_info,
+                        "bool_elements": bool_elements,
+                        "bool_request": True,
+                        "bool_index": bool_index,
+                        "bool_count": bool_count,
+                        "bit_sources": _bool_bit_sources(bool_index, bool_count),
+                        "word_start": first_word,
+                        "word_count": word_count,
+                        "array_words": array_words,
+                        "no_read": word_count == 0,
+                    }
 
             return {
                 "user_tag": request_tag,  # tag name from user, without element request
@@ -1346,6 +1456,42 @@ class LogixDriver(CIPDriver):
             raise
         except Exception as err:
             raise RequestError("Failed to parse tag request", tag) from err
+
+    @staticmethod
+    def _bool_result(request_data, bits):
+        """
+        Build the ``Tag`` for a BOOL or BOOL array request from the decoded
+        BOOLs of the DWORDs that were read.  Each requested BOOL is resolved
+        from the specific word and bit that holds it, so BOOLs crossing word
+        boundaries and BOOLs not starting on a word boundary are handled
+        correctly and the neighboring bits that were read along with them are
+        never included.
+        """
+        user_tag = request_data["user_tag"]
+        bool_elements = request_data["bool_elements"]
+        bit_index = request_data.get("bool_index", request_data.get("bit") or 0)
+        bit_count = request_data.get("bool_count", 1 if bool_elements is None else bool_elements)
+        word_start = request_data.get("word_start", bit_index // 32)
+
+        sources = request_data.get("bit_sources")
+        if sources is None:
+            sources = _bool_bit_sources(bit_index, bit_count)
+
+        # ``bits`` is the flat BOOL list of the returned DWORDs (32 per word).
+        # Only BOOLs whose backing word was actually returned can be known.
+        # If a word is missing, only the BOOLs that depend on it are unknown.
+        values = []
+        for word, bit in sources:
+            index = (word - word_start) * 32 + bit
+            if 0 <= index < len(bits):
+                value = bits[index]
+                values.append(None if value is None else bool(value))
+            else:
+                values.append(None)
+
+        if bool_elements is not None:
+            return Tag(user_tag, values, f"BOOL[{bool_elements}]", None)
+        return Tag(user_tag, values[0] if values else None, "BOOL", None)
 
     def _send_requests(self, requests):
         results = {}
@@ -1518,6 +1664,58 @@ def encode_value(parsed_tag: dict) -> bytes:
 
     except Exception as err:
         raise RequestError("Unable to create a writable value") from err
+
+
+def _read_request_key(tag_data):
+    """
+    Identifies a BOOL read by the words it actually reads, so identical word
+    ranges can share a single request/response and still have each original
+    request map its own logical indexes out of the shared result.
+    """
+    if not tag_data.get("bool_request") or tag_data.get("error") or tag_data.get("no_read"):
+        return None
+
+    tag_info = tag_data["tag_info"]
+
+    # use the resolved word range instead of the raw tag text, so
+    # 'arr{32}' and 'arr[0]{32}' (or slices of the same words) are
+    # recognized as the same read.
+    base_tag = tag_data["plc_tag"].rsplit("[", 1)[0]
+    return (
+        base_tag,
+        tag_data.get("word_start", 0),
+        tag_data.get("word_count", tag_data["elements"]),
+        tag_info.get("instance_id"),
+        tag_info.get("data_type"),
+        tag_info.get("offset"),
+    )
+
+
+def _array_word_count(tag_info):
+    """
+    Returns the number of DWORDs backing a BOOL array, or None if the tag is
+    not an array.  BOOL arrays in a UDT are exposed as a DWORD array member
+    (``array`` is the DWORD count), while top-level tags use their dimensions.
+    """
+    if isinstance(tag_info, dict):
+        array_len = tag_info.get("array")
+        if array_len:
+            return int(array_len)
+
+        dim = tag_info.get("dim")
+        if dim:
+            dimensions = tag_info.get("dimensions") or ()
+            return reduce(operator.mul, dimensions[:dim], 1)
+
+    return None
+
+
+def _bool_bit_sources(bit_index, bit_count):
+    """
+    The ``(word, bit)`` source for each requested BOOL.  ``word`` is absolute,
+    i.e. the index of the DWORD in the BOOL array that holds the bit.
+    """
+    return [((bit_index + offset) // 32, (bit_index + offset) % 32) for offset in range(bit_count)]
 
 
 def _tag_return_size(tag_data):
