@@ -89,6 +89,7 @@ from .packets import (
     MultiServiceRequestPacket,
     ReadModifyWriteRequestPacket,
 )
+from .read_plan import ReadPlan, SampleCounter
 from .tag import Tag
 
 AtomicValueType = Union[int, float, bool, str]
@@ -959,6 +960,20 @@ class LogixDriver(CIPDriver):
             return results
         else:
             return results[0]
+
+    def read_plan(self, counter: Optional[SampleCounter] = None) -> ReadPlan:
+        """
+        Create a :class:`ReadPlan` bound to this driver for verifying that a group of
+        tags belongs to the same controller scan cycle.  Provide a ``counter``
+        (:class:`SampleCounter`) describing the controller-provided sample counter so
+        the plan can certify each group read as consistent, conflicting, or unprovable.
+        Without a counter convention, group reads are delivered as independent
+        observations with an unprovable status.
+
+        :param counter: optional sample counter convention used as evidence
+        :return: a ``ReadPlan`` bound to this driver
+        """
+        return ReadPlan(self, counter)
 
     def _read_build_requests(self, parsed_tags):
         if len(parsed_tags) != 1 and not self._micro800:

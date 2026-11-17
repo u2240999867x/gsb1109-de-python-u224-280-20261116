@@ -248,6 +248,38 @@ Verify all reads were successful
 All tags read successfully
 
 
+Scan-Cycle Consistent Group Reads
+---------------------------------
+
+A group of measurement points often needs to belong to the same controller scan cycle.  Packing tags into a single
+multi-service packet is **not** an atomic snapshot, so :class:`ReadPlan` verifies the group against controller
+evidence instead: a sample counter tag that the controller increments once per scan, plus the maximum rate at which
+that counter can advance.  Describe this input convention with :class:`SampleCounter` and create a plan with
+:meth:`LogixDriver.read_plan`:
+
+>>> from pycomm3 import SampleCounter
+>>> counter = SampleCounter(tag='ScanCounter', modulus=2 ** 32, max_rate=1000.0)
+>>> plan = plc.read_plan(counter)
+>>> result = plan.read_group('tag_1', 'tag_2', 'tag_3')
+>>> result.status
+<GroupConsistency.CONSISTENT: 'consistent'>
+
+Each group read is bracketed by two samples of the counter, so every request the read is split into (multi-service
+packets and fragmented reads alike) falls within the same proof window.  The returned :class:`GroupReadResult`
+reports one of three statuses:
+
+- ``GroupConsistency.CONSISTENT`` — the counter did not change and the read window was too short for the counter to
+  have wrapped, so the group is proven to come from a single scan cycle.
+- ``GroupConsistency.CONFLICTING`` — the counter changed, so the group spans a scan cycle boundary.
+- ``GroupConsistency.UNPROVABLE`` — the counter did not change but the window was long enough to span a wraparound,
+  or no counter evidence was available.
+
+Only treat ``result.results`` as a same-scan group when the status is ``CONSISTENT`` (the result itself is truthy in
+that case).  Otherwise the values are independent observations.  Plans created without a counter convention — or
+sources that cannot provide one — still deliver the tag values, but always with an ``UNPROVABLE`` status; same-scan
+values are never fabricated.
+
+
 Writing Tags
 ------------
 

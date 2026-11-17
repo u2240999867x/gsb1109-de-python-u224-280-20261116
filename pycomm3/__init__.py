@@ -26,6 +26,7 @@ from ._version import __version__, __version_info__
 from .logger import *
 from .const import *
 from .tag import Tag
+from .read_plan import *
 from .exceptions import *
 from .cip import *
 from .custom_types import *
