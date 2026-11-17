@@ -44,6 +44,7 @@ nav:
     - Reading CDFs: cdfread.md
     - Writing CDFs: cdfwrite.md
     - Time Conversions: cdfepoch.md
+    - Resampling: resample.md
     - dataclasses: dataclasses.md
     - xarray: xarray.md
   - XArray Tools: xarray.md
