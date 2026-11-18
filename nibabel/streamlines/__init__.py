@@ -9,6 +9,7 @@ from .tck import TckFile
 from .tractogram import LazyTractogram, Tractogram
 from .tractogram_file import ExtensionWarning
 from .trk import TrkFile
+from .utils import clip_tractogram
 
 # List of all supported formats
 FORMATS = {
