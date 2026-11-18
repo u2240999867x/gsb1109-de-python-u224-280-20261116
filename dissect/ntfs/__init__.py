@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dissect.ntfs.assetdb import AccessCheckPolicy, AccessDecision, AccessResult, AssetDatabase, DaclState, Token
 from dissect.ntfs.attr import Attribute, AttributeHeader, AttributeRecord
 from dissect.ntfs.c_ntfs import ATTRIBUTE_TYPE_CODE, NTFS_SIGNATURE
 from dissect.ntfs.index import Index, IndexEntry
@@ -14,15 +15,21 @@ __all__ = [
     "ATTRIBUTE_TYPE_CODE",
     "NTFS",
     "NTFS_SIGNATURE",
+    "AccessCheckPolicy",
+    "AccessDecision",
+    "AccessResult",
+    "AssetDatabase",
     "Attribute",
     "AttributeHeader",
     "AttributeRecord",
+    "DaclState",
     "Index",
     "IndexEntry",
     "Mft",
     "MftRecord",
     "Secure",
     "SecurityDescriptor",
+    "Token",
     "UsnJrnl",
     "UsnRecord",
 ]
