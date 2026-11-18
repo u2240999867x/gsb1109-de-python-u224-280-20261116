@@ -763,7 +763,7 @@ class CDF:
 
         # Get pad value
         pad = var_spec.get("Pad", None)
-        if hasattr(pad, "__len__"):
+        if pad is not None and not isinstance(pad, (str, bytes)) and hasattr(pad, "__len__"):
             pad = pad[0]
 
         if name in self.zvars or name in self.rvars:
@@ -809,7 +809,11 @@ class CDF:
 
                     # Format data into: [[recstart1, recend1, data1],
                     #                   [recstart2,recend2,data2], ...]
-                    var_data = self._make_sparse_blocks(var_spec, var_data[0], var_data[1])
+                    sparse_spec = dict(var_spec)
+                    sparse_spec["Dim_Sizes"] = list(dimSizes)
+                    sparse_spec["Dim_Vary"] = list(dimVary)
+                    sparse_spec["Num_Dims"] = numDims
+                    var_data = self._make_sparse_blocks(sparse_spec, var_data[0], var_data[1])
 
                     for block in var_data:
                         varMaxRec = self._write_var_data_sparse(f, zVar, varNum, dataType, numElems, recVary, block)
@@ -1008,6 +1012,8 @@ class CDF:
                     f"Data for variable {var} must be castable to a 128-bit complex number when data type is CDF_EPOCH16."
                 ) from e
 
+        indata = self._majority_order(indata, self._record_dimensions(zVar, var))
+
         # Convert to byte stream
         recs, data = self._convert_data(dataType, numElems, numValues, indata)
 
@@ -1140,6 +1146,8 @@ class CDF:
         rec_end = oneblock[1]
         indata = oneblock[2]
         numValues = self._num_values(zVar, var)
+
+        indata = self._majority_order(indata, self._record_dimensions(zVar, var))
 
         # Convert oneblock[2] into a byte stream
         _, data = self._convert_data(dataType, numElems, numValues, indata)
@@ -1892,12 +1900,10 @@ class CDF:
         # Determine pad value
         if pad is not None:
             if dataType == 51 or dataType == 52:
-                # pad needs to be the correct number of elements
-                if len(pad) < numElems:
-                    pad += "\0" * (numElems - len(pad))
-                elif len(pad) > numElems:
-                    pad = pad[:numElems]
-                pad_bytes = pad.encode()
+                # PadValue is exactly NumElems bytes, regardless of the input
+                # string's character count.
+                raw_pad = pad if isinstance(pad, bytes) else str(pad).encode()
+                pad_bytes = raw_pad[:numElems].ljust(numElems, b"\0")
             else:
                 dummy, pad_bytes = self._convert_data(dataType, numElems, 1, pad)
         else:
@@ -2452,6 +2458,44 @@ class CDF:
                 except struct.error:
                     raise ValueError("Unable to convert data to CDF format, data object cannot be of type string.")
 
+    def _record_dimensions(self, zVar: bool, var: int) -> List[int]:
+        """
+        Returns the dimensions that are physically stored in a variable record.
+        """
+        if zVar:
+            num_dims = self.zvarsinfo[var][2]
+            dim_sizes = self.zvarsinfo[var][3]
+            return list(dim_sizes[:num_dims])
+        num_dims = self.rvarsinfo[var][2]
+        dim_sizes = self.rvarsinfo[var][3]
+        dim_vary = self.rvarsinfo[var][4]
+        return [dim_sizes[x] for x in range(num_dims) if dim_vary[x] != 0]
+
+    def _majority_order(self, indata: Any, dims: List[int]) -> Any:
+        """
+        Reorders record values from the conceptual (row-major) layout used by
+        callers into the physical layout required by the CDF majority.
+        """
+        if self.majority != self.COLUMN_MAJOR or len(dims) < 2 or indata is None:
+            return indata
+        if isinstance(indata, (bytes, str, list, tuple)):
+            return indata
+
+        values = np.asarray(indata)
+        values_per_record = int(np.prod(dims))
+        if values.size == values_per_record:
+            values = values.reshape(tuple(dims))
+            return np.transpose(values, axes=list(range(values.ndim - 1, -1, -1)))
+        if values.ndim == len(dims) + 1 and tuple(values.shape[1:]) == tuple(dims):
+            pass
+        elif values.size % values_per_record == 0:
+            values = values.reshape((-1,) + tuple(dims))
+        else:
+            return indata
+
+        axes = [0] + list(range(values.ndim - 1, 0, -1))
+        return np.transpose(values, axes=axes)
+
     def _num_values(self, zVar: bool, varNum: int) -> int:
         """
         Determines the number of values in a record.
@@ -2689,6 +2733,55 @@ class CDF:
 
         return sparse_blocks
 
+    def _sparse_record_dimensions(self, variable) -> List[int]:  # type: ignore[no-untyped-def]
+        """
+        Returns the physically stored dimension sizes for sparse data.
+        """
+        num_dims = variable["Num_Dims"]
+        dim_vary = variable.get("Dim_Vary", [True] * num_dims)
+        return [variable["Dim_Sizes"][x] for x in range(num_dims) if dim_vary[x] != 0]
+
+    @staticmethod
+    def _numpy_dtype(data_type: int):
+        dtypes = {
+            1: np.int8,
+            2: np.int16,
+            4: np.int32,
+            8: np.int64,
+            11: np.uint8,
+            12: np.uint16,
+            14: np.uint32,
+            21: np.float32,
+            22: np.float64,
+            31: np.float64,
+            32: np.complex128,
+            33: np.int64,
+            41: np.int8,
+            44: np.float32,
+            45: np.float64,
+        }
+        return dtypes.get(data_type)
+
+    def _bytes_to_records(self, variable, data: bytes) -> np.ndarray:  # type: ignore[no-untyped-def]
+        """
+        Converts a raw byte buffer of sparse data into an array of records.
+        """
+        dims = self._sparse_record_dimensions(variable)
+        num_elems = variable["Num_Elements"]
+        if variable["Data_Type"] in (51, 52):
+            strings = []
+            for offset in range(0, len(data), num_elems):
+                strings.append(data[offset : offset + num_elems].decode("utf-8", errors="ignore").replace("\x00", ""))
+            return np.array(strings).reshape((-1,) + tuple(dims))
+        dtype = self._numpy_dtype(variable["Data_Type"])
+        if dtype is None:
+            raise ValueError(f"Cannot interpret bytes for CDF data type {variable['Data_Type']}")
+        dtype = np.dtype(dtype)
+        count = len(data) // (dtype.itemsize * num_elems)
+        # Match the non-sparse path: bytes are interpreted in native order and
+        # re-encoded for the file when the records are written.
+        return np.frombuffer(data, dtype=dtype, count=count * num_elems).reshape((-1,) + tuple(dims))
+
     def _make_sparse_blocks(self, variable, records, data: List[Tuple[int, int, np.ndarray]]):  # type: ignore[no-untyped-def]
         """
         Handles the data for the variable with sparse records.
@@ -2727,23 +2820,13 @@ class CDF:
             except Exception:
                 logger.warning("Unknown dictionary.... Skip")
                 return None
+        if isinstance(data, bytes):
+            data = self._bytes_to_records(variable, data)
         if isinstance(data, np.ndarray):
             if len(records) == len(data):
                 # All are physical data
                 return self._make_sparse_blocks_with_physical(variable, records, data)
             elif len(records) < len(data):
-                # There are some virtual data
-                return self._make_sparse_blocks_with_virtual(variable, records, data)
-            else:
-                logger.warning("Invalid sparse data... " "Less data than the specified records... Skip")
-        elif isinstance(data, bytes):
-            record_length = len(records)
-            for z in range(0, variable["Num_Dims"]):
-                record_length = record_length * variable["Dim_Sizes"][z]
-            if record_length == len(data):
-                # All are physical data
-                return self._make_sparse_blocks_with_physical(variable, records, data)
-            elif record_length < len(data):
                 # There are some virtual data
                 return self._make_sparse_blocks_with_virtual(variable, records, data)
             else:
@@ -2800,22 +2883,21 @@ class CDF:
             return sparse_data
         elif isinstance(data, bytes):
             y = 1
+            dim_vary = variable.get("Dim_Vary", [True] * variable["Num_Dims"])
             for z in range(0, variable["Num_Dims"]):
-                y = y * variable["Dim_Sizes"][z]
+                if dim_vary[z] != 0:
+                    y = y * variable["Dim_Sizes"][z]
             y = y * self._datatype_size(variable["Data_Type"], variable["Num_Elements"])
-            for x in sparse_blocks:
+            for sblock in sparse_blocks:
                 # each block in this list: [starting_rec#, ending_rec#, data]
                 starting = sblock[0] * y
                 ending = (sblock[1] + 1) * y
                 sparse_data.append((sblock[0], sblock[1], np.array(data[starting:ending])))
             return sparse_data
         elif isinstance(data, list):
-            for x in sparse_blocks:
+            for sblock in sparse_blocks:
                 # each block in this list: [starting_rec#, ending_rec#, data]
-                asparse = []
-                asparse.append(sblock[0])
-                asparse.append(sblock[1])
-                records = x[1] - x[0] + 1
+                records = sblock[1] - sblock[0] + 1
                 datax = []
                 ist = sblock[0]
                 for z in range(0, records):
@@ -2838,8 +2920,8 @@ class CDF:
 
         # Determine dimension information
         numDims = len(variable["Dim_Sizes"])
+        numValues = 1
         if zVar:
-            numValues = 1
             for x in range(0, numDims):
                 numValues = numValues * variable["Dim_Sizes"][x]
         else:

@@ -1211,9 +1211,11 @@ class CDF:
             for x in range(0, self._rvariables_num_dims):
                 ioff = 332 + 4 * x
                 dim_varys.append(int.from_bytes(vdr[ioff : ioff + 4], "big", signed=True))
+            # rVariables share the GDR's dimension sizes. Keep every size so that
+            # Dim_Sizes stays index-aligned with Dim_Vary; readers only use the
+            # entries whose variance is non-zero.
             for x in range(0, self._rvariables_num_dims):
-                if dim_varys[x] != 0:
-                    dim_sizes.append(self._rvariables_dim_sizes[x])
+                dim_sizes.append(self._rvariables_dim_sizes[x])
             num_dims = len(dim_sizes)
             coff = 332 + 4 * self._rvariables_num_dims
         # Only set if pad value is in the flags
@@ -1390,8 +1392,18 @@ class CDF:
         return name, next_vdr
 
     def _read_vxrs(
-        self, byte_loc: int, vvr_offsets: List[int] = [], vvr_start: List[int] = [], vvr_end: List[int] = []
+        self,
+        byte_loc: int,
+        vvr_offsets: Optional[List[int]] = None,
+        vvr_start: Optional[List[int]] = None,
+        vvr_end: Optional[List[int]] = None,
     ) -> Tuple[List[int], List[int], List[int]]:
+        if vvr_offsets is None:
+            vvr_offsets = []
+        if vvr_start is None:
+            vvr_start = []
+        if vvr_end is None:
+            vvr_end = []
         self._f.seek(byte_loc, 0)
         block_size = int.from_bytes(self._f.read(8), "big", signed=True)  # Block Size
         vxrs = self._f.read(block_size - 8)
@@ -1427,8 +1439,18 @@ class CDF:
         return vvr_offsets, vvr_start, vvr_end
 
     def _read_vxrs2(
-        self, byte_loc: int, vvr_offsets: List[int] = [], vvr_start: List[int] = [], vvr_end: List[int] = []
+        self,
+        byte_loc: int,
+        vvr_offsets: Optional[List[int]] = None,
+        vvr_start: Optional[List[int]] = None,
+        vvr_end: Optional[List[int]] = None,
     ) -> Tuple[List[int], List[int], List[int]]:
+        if vvr_offsets is None:
+            vvr_offsets = []
+        if vvr_start is None:
+            vvr_start = []
+        if vvr_end is None:
+            vvr_end = []
         self._f.seek(byte_loc, 0)
         block_size = int.from_bytes(self._f.read(4), "big", signed=True)
         vxrs = self._f.read(block_size - 4)
@@ -1959,12 +1981,16 @@ class CDF:
         elif (data_type == 21) or (data_type == 44):
             pad_value = struct.pack(order + "f", -1.0e30)
             dt_string = "f"
-        elif (data_type == 22) or (data_type == 45) or (data_type == 31):
+        elif (data_type == 22) or (data_type == 45):
             pad_value = struct.pack(order + "d", -1.0e30)
             dt_string = "d"
+        elif data_type == 31:
+            # CDF_EPOCH default PadValue is 0.0, unlike REAL8.
+            pad_value = struct.pack(order + "d", 0.0)
+            dt_string = "d"
         else:
-            # (data_type == 32):
-            pad_value = struct.pack(order + "2d", *[-1.0e30, -1.0e30])
+            # (data_type == 32): CDF_EPOCH16 default PadValue is (0.0, 0.0).
+            pad_value = struct.pack(order + "2d", *[0.0, 0.0])
             dt_string = "c16"
 
         dt = np.dtype(dt_string)
@@ -1986,9 +2012,19 @@ class CDF:
             else:
                 return data.ljust(num_elems, "\x00").encode(self.string_encoding)
         elif isinstance(data, np.ndarray):
-            data_stream = data.real.tobytes()
-            data_stream += data.imag.tobytes()
-            return data_stream
+            # Pad values are stored in the file's byte order, which may differ
+            # from the native order of the array returned by _read_data.
+            order = self._convert_option()
+            if data.dtype.kind == "c":
+                real = data.real
+                imag = data.imag
+                if order != "=":
+                    real = real.astype(real.dtype.newbyteorder(order))
+                    imag = imag.astype(imag.dtype.newbyteorder(order))
+                return real.tobytes() + imag.tobytes()
+            if order != "=":
+                data = data.astype(data.dtype.newbyteorder(order))
+            return data.tobytes()
         else:
             return data.tobytes()
 
