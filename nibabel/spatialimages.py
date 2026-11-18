@@ -388,7 +388,17 @@ class SpatialFirstSlicer(ty.Generic[SpatialImgT]):
             raise IndexError('Empty slice requested')
 
         affine = self.slice_affine(slicer)
-        return self.img.__class__(dataobj.copy(), affine, self.img.header)
+        img = self.img.__class__(dataobj.copy(), affine, self.img.header)
+        # Carry any per-slice timing through the crop.  Headers that cannot
+        # represent the timing (or that have none) are left untouched.
+        slice_time_mapper = getattr(self.img.header, '_slice_times_after_slicer', None)
+        if slice_time_mapper is not None:
+            slice_times = slice_time_mapper(slicer, self.img.shape)
+            if slice_times is not None:
+                setter = getattr(img.header, '_set_slice_times_from_image_op', None)
+                if setter is not None:
+                    setter(slice_times)
+        return img
 
     def check_slicing(
         self,

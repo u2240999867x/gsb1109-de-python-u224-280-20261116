@@ -847,13 +847,20 @@ class Nifti1Header(SpmAnalyzeHeader):
         """Initialize header from binary data block and extensions"""
         super().__init__(binaryblock, endianness, check)
         self.extensions = self.exts_klass(extensions)
+        # Explicit slice times, in the header's time units, aligned to the
+        # current slice axis.  ``None`` means: derive them from the C-struct
+        # fields.  This is used by image operations (cropping, reorientation)
+        # that cannot be represented by ``slice_code`` alone.
+        self._slice_times = None
 
     def copy(self):
         """Return copy of header
 
         Take reference to extensions as well as copy of header contents
         """
-        return self.__class__(self.binaryblock, self.endianness, False, self.extensions)
+        hdr = self.__class__(self.binaryblock, self.endianness, False, self.extensions)
+        hdr._slice_times = self._slice_times
+        return hdr
 
     @classmethod
     def from_fileobj(klass, fileobj, endianness=None, check=True):
@@ -941,6 +948,7 @@ class Nifti1Header(SpmAnalyzeHeader):
         new_hdr = super().from_header(header, check)
         if isinstance(header, Nifti1Header):
             new_hdr.extensions[:] = header.extensions[:]
+            new_hdr._slice_times = header._slice_times
         return new_hdr
 
     def get_data_shape(self):
@@ -1638,13 +1646,20 @@ class Nifti1Header(SpmAnalyzeHeader):
         for i, param in enumerate(all_params, start=1):
             hdr[f'intent_p{i}'] = param
 
-    def get_slice_duration(self):
+    def get_slice_duration(self, unit=None):
         """Get slice duration
+
+        Parameters
+        ----------
+        unit : {None, 'sec', 'msec', 'usec'}, optional
+            Time unit for the returned duration.  If None (the default), the
+            duration is returned in the header time unit (``xyzt_units``).
 
         Returns
         -------
         slice_duration : float
-            time to acquire one slice
+            time to acquire one slice, in the time units recorded in the
+            header ``xyzt_units`` field (or in `unit`, if given)
 
         Examples
         --------
@@ -1662,7 +1677,14 @@ class Nifti1Header(SpmAnalyzeHeader):
         _, _, slice_dim = self.get_dim_info()
         if slice_dim is None:
             raise HeaderDataError('Slice dimension must be set for duration to be valid')
-        return float(self._structarr['slice_duration'])
+        duration = float(self._structarr['slice_duration'])
+        if unit is None:
+            return duration
+        to_unit = self._normalize_time_unit(unit)
+        from_unit = self._time_unit()
+        if from_unit == 'unknown':
+            raise HeaderDataError('Cannot convert slice duration: header time units are unknown')
+        return duration * self._time_unit_factor(from_unit, to_unit)
 
     def set_slice_duration(self, duration):
         """Set slice duration
@@ -1670,7 +1692,8 @@ class Nifti1Header(SpmAnalyzeHeader):
         Parameters
         ----------
         duration : scalar
-            time to acquire one slice
+            time to acquire one slice, in the time units recorded in the
+            header ``xyzt_units`` field
 
         Examples
         --------
@@ -1686,27 +1709,124 @@ class Nifti1Header(SpmAnalyzeHeader):
         _, _, slice_dim = self.get_dim_info()
         if slice_dim is None:
             raise HeaderDataError('Slice dimension not set in header dim_info')
-        shape = self.get_data_shape()
+        return self._get_n_slices_for_shape(self.get_data_shape(), slice_dim)
+
+    @staticmethod
+    def _get_n_slices_for_shape(shape, slice_dim):
         try:
-            slice_len = shape[slice_dim]
+            return int(shape[slice_dim])
         except IndexError:
             raise HeaderDataError(
                 f'Slice dimension index ({slice_dim}) outside shape tuple ({shape})'
             )
-        return slice_len
 
-    def get_slice_times(self):
+    def _time_unit(self):
+        """Return the time unit label from ``xyzt_units``"""
+        return self.get_xyzt_units()[1]
+
+    @staticmethod
+    def _time_unit_factor(from_unit, to_unit):
+        """Factor converting values in `from_unit` to `to_unit`"""
+        scales = {'sec': 1.0, 'msec': 1e-3, 'usec': 1e-6}
+        if from_unit not in scales:
+            raise HeaderDataError(f'Cannot convert slice times from time unit "{from_unit}"')
+        if to_unit not in scales:
+            raise HeaderDataError(f'Cannot convert slice times to time unit "{to_unit}"')
+        return scales[from_unit] / scales[to_unit]
+
+    @staticmethod
+    def _normalize_time_unit(unit):
+        """Normalize common time unit spellings"""
+        if unit is None:
+            return None
+        aliases = {
+            's': 'sec',
+            'sec': 'sec',
+            'secs': 'sec',
+            'second': 'sec',
+            'seconds': 'sec',
+            'ms': 'msec',
+            'msec': 'msec',
+            'msecs': 'msec',
+            'millisecond': 'msec',
+            'milliseconds': 'msec',
+            'us': 'usec',
+            'usec': 'usec',
+            'usecs': 'usec',
+            'microsecond': 'usec',
+            'microseconds': 'usec',
+        }
+        try:
+            return aliases[unit.lower()] if isinstance(unit, str) else unit
+        except KeyError:
+            raise HeaderDataError(f'Unknown time unit "{unit}"') from None
+
+    def _declared_slice_times(self, slice_len):
+        """Return slice times declared by the C-struct fields
+
+        ``slice_len`` is the length of the slice axis.  Slices outside the
+        declared ``slice_start .. slice_end`` acquisition range have no
+        defined time and are returned as ``None``.
+        """
+        duration = float(self._structarr['slice_duration'])
+        if not np.isfinite(duration) or duration <= 0:
+            raise HeaderDataError(
+                'slice_duration must be positive and finite to determine slice times'
+            )
+        slabel = self.get_value_label('slice_code')
+        if slabel == 'unknown':
+            raise HeaderDataError('Cannot get slice times when slice code is "unknown"')
+        slice_start = int(self._structarr['slice_start'])
+        slice_end = int(self._structarr['slice_end'])
+        if slice_start < 0:
+            raise HeaderDataError('slice_start should be >= 0')
+        if slice_end == 0:
+            # NIfTI uses 0 to mean "unset"; for these values to be meaningful
+            # the acquisition range must fit within the slice axis.
+            slice_end = slice_len - 1
+        if slice_end < slice_start:
+            raise HeaderDataError('slice_end should be > slice_start')
+        if slice_end >= slice_len:
+            raise HeaderDataError(
+                f'slice_end ({slice_end}) is outside the slice axis of length {slice_len}'
+            )
+        n_timed = slice_end - slice_start + 1
+        st_order = self._slice_time_order(slabel, n_timed)
+        times = tuple(float(time) for time in st_order * duration)
+        return (None,) * slice_start + times + (None,) * (slice_len - slice_end - 1)
+
+    def _get_slice_times(self):
+        """Return slice times, explicit values taking precedence"""
+        return self._get_slice_times_for_length(self.get_n_slices())
+
+    def get_slice_times(self, unit=None):
         """Get slice times from slice timing information
+
+        Parameters
+        ----------
+        unit : {None, 'sec', 'msec', 'usec'}, optional
+            Time unit for the returned times.  If None (the default), times
+            are returned in the header time unit (``xyzt_units``).  If the
+            header time unit is unknown, times are returned as stored in the
+            header, without conversion.
 
         Returns
         -------
         slice_times : tuple
-            Times of acquisition of slices, where 0 is the beginning of
-            the acquisition, ordered by position in file.  nifti allows
-            slices at the top and bottom of the volume to be excluded from
-            the standard slice timing specification, and calls these
-            "padding slices".  We give padding slices ``None`` as a time
-            of acquisition
+            Times of acquisition of slices, ordered by position in file.
+            Times are relative to the first slice acquisition, so the first
+            acquired slice has time 0.  NIfTI allows slices at the top and
+            bottom of the volume to be excluded from the standard slice
+            timing specification, and calls these "padding slices".  Padding
+            slices, and any slices outside the declared ``slice_start`` to
+            ``slice_end`` range, have ``None`` as their time of acquisition.
+
+        Raises
+        ------
+        HeaderDataError
+            If the slice dimension, slice code, or a positive slice duration
+            is missing, or if the declared acquisition range is invalid.
+            Slice times are never filled in by guessing or averaging.
 
         Examples
         --------
@@ -1718,26 +1838,135 @@ class Nifti1Header(SpmAnalyzeHeader):
         >>> slice_times = hdr.get_slice_times()
         >>> np.allclose(slice_times, [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6])
         True
+        >>> hdr.set_xyzt_units('mm', 'sec')
+        >>> np.allclose(hdr.get_slice_times(unit='msec'), [0, 100, 200, 300, 400, 500, 600])
+        True
         """
-        hdr = self._structarr
-        slice_len = self.get_n_slices()
-        duration = self.get_slice_duration()
-        slabel = self.get_value_label('slice_code')
-        if slabel == 'unknown':
-            raise HeaderDataError('Cannot get slice times when slice code is "unknown"')
-        slice_start, slice_end = (int(hdr['slice_start']), int(hdr['slice_end']))
-        if slice_start < 0:
-            raise HeaderDataError('slice_start should be >= 0')
-        if slice_end == 0:
-            slice_end = slice_len - 1
-        n_timed = slice_end - slice_start + 1
-        if n_timed < 1:
-            raise HeaderDataError('slice_end should be > slice_start')
-        st_order = self._slice_time_order(slabel, n_timed)
-        times = st_order * duration
-        return (None,) * slice_start + tuple(times) + (None,) * (slice_len - slice_end - 1)
+        times = self._get_slice_times()
+        if unit is None:
+            return times
+        to_unit = self._normalize_time_unit(unit)
+        from_unit = self._time_unit()
+        if from_unit == 'unknown':
+            raise HeaderDataError('Cannot convert slice times: header time units are unknown')
+        factor = self._time_unit_factor(from_unit, to_unit)
+        return tuple(None if time is None else float(time * factor) for time in times)
 
-    def set_slice_times(self, slice_times):
+    def _slice_times_after_slicer(self, slicer, old_shape):
+        """Return slice times after applying `slicer` to an image
+
+        Returns ``None`` when the header carries no usable slice timing.
+        """
+        _, _, slice_dim = self.get_dim_info()
+        if slice_dim is None:
+            return None
+        old_n = self._get_n_slices_for_shape(old_shape, slice_dim)
+        try:
+            times = self._get_slice_times_for_length(old_n)
+        except HeaderDataError:
+            return None
+        subslicer = slicer[slice_dim]
+        if isinstance(subslicer, slice):
+            indices = range(*subslicer.indices(old_n))
+        else:
+            indices = (int(subslicer),)
+        return tuple(times[index] for index in indices)
+
+    def _get_slice_times_for_length(self, slice_len):
+        """Slice times for an axis of length `slice_len`"""
+        if self._slice_times is not None:
+            if len(self._slice_times) != slice_len:
+                raise HeaderDataError('Explicit slice times do not match the number of slices')
+            return tuple(self._slice_times)
+        return self._declared_slice_times(slice_len)
+
+    def _slice_times_after_reorientation(self, ornt):
+        """Return slice times after applying orientation `ornt`"""
+        _, _, slice_dim = self.get_dim_info()
+        if slice_dim is None:
+            return None
+        ornt = np.asarray(ornt)
+        try:
+            times = self._get_slice_times_for_length(self.get_data_shape()[slice_dim])
+        except HeaderDataError:
+            return None
+        # ``ornt[axis] == [new_axis, flip]``; a flip reverses the slice order
+        flip = int(ornt[slice_dim, 1])
+        return tuple(times[::-1] if flip == -1 else times)
+
+    def _encode_slice_times(self):
+        """Try to express explicit slice times with the NIfTI C-struct fields
+
+        Only possible when the defined times form a contiguous range starting
+        at time 0 with a single positive step.  Cropped acquisitions that
+        begin at a nonzero time are deliberately left explicit, so the first
+        remaining slice does not masquerade as time zero.
+
+        Returns
+        -------
+        encoded : bool
+            True if the C-struct now describes the explicit times.
+        """
+        if self._slice_times is None:
+            return False
+        slice_len = self.get_n_slices()
+        times = self._slice_times
+        if len(times) != slice_len:
+            return False
+        defined = [i for i, time in enumerate(times) if time is not None]
+        if not defined:
+            return False
+        start, end = defined[0], defined[-1]
+        if any(time is None for time in times[start : end + 1]):
+            return False
+        timed = np.asarray(times[start : end + 1], dtype=float)
+        if timed.size < 2:
+            return False
+        offsets = np.diff(np.sort(timed))
+        if offsets.size == 0 or not np.allclose(offsets, offsets[0]):
+            return False
+        duration = float(offsets[0])
+        if not np.isfinite(duration) or duration <= 0:
+            return False
+        if not np.isclose(timed.min(), 0, atol=duration * 1e-6):
+            return False
+        order = np.round(timed / duration).astype(int)
+        labels = [label for label in slice_order_codes.value_set('label') if label != 'unknown']
+        matches = [
+            label
+            for label in labels
+            if np.array_equal(self._slice_time_order(label, len(timed)), order)
+        ]
+        if not matches:
+            return False
+        self._structarr['slice_start'] = start
+        self._structarr['slice_end'] = end
+        self._structarr['slice_duration'] = duration
+        self._structarr['slice_code'] = slice_order_codes.code[matches[0]]
+        return True
+
+    def _set_slice_times_from_image_op(self, slice_times):
+        """Store times propagated from an image operation
+
+        Keeps the declared C-struct fields consistent with the new slice axis.
+        If the times cannot be expressed by a slice code (for example, a crop
+        starting at a nonzero time), the code is set to unknown so that the
+        raw fields do not make a false claim; the exact times remain available
+        through :meth:`get_slice_times`.
+        """
+        self._slice_times = None if slice_times is None else tuple(slice_times)
+        if self._slice_times is None:
+            return
+        if self._encode_slice_times():
+            return
+        # Not representable: clear the stale declared fields, but keep the
+        # exact times for :meth:`get_slice_times`.
+        self._structarr['slice_code'] = slice_order_codes.code['unknown']
+        self._structarr['slice_start'] = 0
+        self._structarr['slice_end'] = 0
+        self._structarr['slice_duration'] = 0
+
+    def set_slice_times(self, slice_times, unit=None):
         """Set slice times into *hdr*
 
         Parameters
@@ -1745,6 +1974,9 @@ class Nifti1Header(SpmAnalyzeHeader):
         slice_times : tuple
             tuple of slice times, one value per slice
             tuple can include None to indicate no slice time for that slice
+        unit : {None, 'sec', 'msec', 'usec'}, optional
+            Time unit of `slice_times`.  If None, values are interpreted in
+            the header time unit (``xyzt_units``).
 
         Examples
         --------
@@ -1766,6 +1998,13 @@ class Nifti1Header(SpmAnalyzeHeader):
         slice_len = self.get_n_slices()
         if slice_len != len(slice_times):
             raise HeaderDataError('Number of slice times does not match number of slices')
+        if unit is not None:
+            to_unit = self._normalize_time_unit(unit)
+            from_unit = self._time_unit()
+            if from_unit == 'unknown':
+                raise HeaderDataError('Cannot convert slice times: header time units are unknown')
+            factor = self._time_unit_factor(to_unit, from_unit)
+            slice_times = [None if time is None else float(time) * factor for time in slice_times]
         # Extract Nones at beginning and end.  Check for others
         for ind, time in enumerate(slice_times):
             if time is not None:
@@ -1782,11 +2021,17 @@ class Nifti1Header(SpmAnalyzeHeader):
             if time is None:
                 raise HeaderDataError('Cannot have None in middle of slice time vector')
         # Find slice duration, check times are compatible with single
-        # duration
+        # duration.  A missing or ambiguous duration is an error; it is never
+        # filled in with an average.
         tdiffs = np.diff(np.sort(timed))
-        if not np.allclose(np.diff(tdiffs), 0):
-            raise HeaderDataError('Slice times not compatible with single slice duration')
-        duration = np.mean(tdiffs)
+        if tdiffs.size == 0:
+            duration = self.get_slice_duration()
+            if not np.isfinite(duration) or duration <= 0:
+                raise HeaderDataError('Slice duration must be set for a single timed slice')
+        else:
+            if not np.allclose(tdiffs, tdiffs[0]):
+                raise HeaderDataError('Slice times not compatible with single slice duration')
+            duration = float(tdiffs[0])
         # To slice time order
         st_order = np.round(np.array(timed) / duration)
         # Check if slice times fit known schemes
@@ -1812,6 +2057,7 @@ class Nifti1Header(SpmAnalyzeHeader):
         hdr['slice_end'] = slice_end
         hdr['slice_duration'] = duration
         hdr['slice_code'] = slice_order_codes.code[label]
+        self._slice_times = None
 
     def _slice_time_order(self, slabel, n_slices):
         """Supporting function to give time order of slices from label"""
@@ -2398,13 +2644,16 @@ class Nifti1Pair(analyze.AnalyzeImage):
         if img is self:
             return img
 
+        slice_times = self.header._slice_times_after_reorientation(ornt)
+
         # Also apply the transform to the dim_info fields
         new_dim = [
-            None if orig_dim is None else int(ornt[orig_dim, 0])
-            for orig_dim in img.header.get_dim_info()
+            None if orig_dim is None else int(np.asarray(ornt)[orig_dim, 0])
+            for orig_dim in self.header.get_dim_info()
         ]
 
         img.header.set_dim_info(*new_dim)
+        img.header._set_slice_times_from_image_op(slice_times)
 
         # Reorienting the affine will set the qform and sform to the new affine,
         # with codes 0 and 2, respectively.

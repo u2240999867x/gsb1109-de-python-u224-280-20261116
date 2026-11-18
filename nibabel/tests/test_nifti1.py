@@ -579,6 +579,43 @@ class TestNifti1PairHeader(tana.TestAnalyzeHeader, tspm.HeaderScalingMixin):
         assert print_me(hdr.get_slice_times()) == [None, '0.2', '0.0', '0.3', '0.1', '0.4', None]
         hdr['slice_code'] = slice_order_codes['alternating decreasing 2']
         assert print_me(hdr.get_slice_times()) == [None, '0.4', '0.1', '0.3', '0.0', '0.2', None]
+        # Slice times are returned in declared (acquisition) order, not in
+        # array storage order, for interleaved and decreasing schemes.
+        hdr['slice_start'] = 0
+        hdr['slice_end'] = 6
+        hdr['slice_code'] = slice_order_codes['alternating decreasing']
+        times = hdr.get_slice_times()
+        assert times[6] == pytest.approx(0.0)
+        assert times[0] == pytest.approx(0.3)
+        assert sorted(times) == pytest.approx(np.arange(7) * 0.1)
+        # A non-zero duration is required; a missing one is never averaged in.
+        hdr['slice_duration'] = 0
+        with pytest.raises(HeaderDataError):
+            hdr.get_slice_times()
+        hdr['slice_duration'] = 0.1
+        # slice_end=0 means "last slice"
+        hdr['slice_start'] = 1
+        hdr['slice_end'] = 0
+        assert hdr.get_slice_times()[0] is None
+        hdr['slice_start'] = 0
+        hdr['slice_end'] = 6
+        # Padding slices outside the declared range keep an undefined time
+        hdr['slice_start'] = 2
+        hdr['slice_end'] = 4
+        assert hdr.get_slice_times()[:2] == (None, None)
+        assert hdr.get_slice_times()[5:] == (None, None)
+        # Time units are honoured for both duration and times
+        hdr.set_xyzt_units('mm', 'msec')
+        assert hdr.get_slice_duration(unit='sec') == pytest.approx(0.0001)
+        sec_times = hdr.get_slice_times(unit='sec')
+        for got, want in zip(sorted(sec_times[2:5]), np.arange(3) * 0.0001):
+            assert got == pytest.approx(want)
+        assert sec_times[:2] == (None, None)
+        with pytest.raises(HeaderDataError):
+            hdr.get_slice_times(unit='parsec')
+        hdr.set_xyzt_units('mm', 'unknown')
+        with pytest.raises(HeaderDataError):
+            hdr.get_slice_times(unit='sec')
         # test set
         hdr = self.header_class()
         hdr.set_dim_info(slice=2)
@@ -712,6 +749,22 @@ class TestNifti1PairHeader(tana.TestAnalyzeHeader, tspm.HeaderScalingMixin):
         times = [None, 4, 1, 3, 0, 2, None]
         hdr.set_slice_times(times)
         assert hdr['slice_code'] == 6
+        # Setting times in an explicit unit writes values in the header unit
+        hdr = self.header_class()
+        hdr.set_dim_info(slice=2)
+        hdr.set_data_shape([1, 1, 7])
+        hdr.set_xyzt_units('mm', 'msec')
+        hdr.set_slice_times([0, 100, 200, 300, 400, 500, 600], unit='msec')
+        assert hdr.get_value_label('slice_code') == 'sequential increasing'
+        assert np.allclose(hdr['slice_duration'], 100)
+        assert np.allclose(hdr.get_slice_times(unit='sec'), np.arange(7) / 10)
+        # A single timed slice cannot derive a duration; it is not guessed
+        hdr = self.header_class()
+        hdr.set_dim_info(slice=2)
+        hdr.set_data_shape([1, 1, 7])
+        hdr['slice_duration'] = 0
+        with pytest.raises(HeaderDataError):
+            hdr.set_slice_times([None, None, None, 0.0, None, None, None])
 
     def test_xyzt_units(self):
         hdr = self.header_class()
@@ -1679,6 +1732,62 @@ class TestNifti1General:
                 new_pdir = dirs[new_phas] if new_phas is not None else None
                 new_sdir = dirs[new_slic] if new_slic is not None else None
                 assert (new_fdir, new_pdir, new_sdir) == (fdir, pdir, sdir)
+
+    def test_slice_times_preserved_by_image_ops(self):
+        # The time of an original slice must remain recoverable after
+        # reordering or cropping the slice axis; cropping must not reset the
+        # first remaining slice to time zero.
+        arr = np.zeros((2, 2, 7, 3), dtype='f4')
+        img = self.single_class(arr, np.eye(4))
+        hdr = img.header
+        hdr.set_dim_info(slice=2)
+        hdr.set_slice_duration(0.1)
+        hdr.set_xyzt_units('mm', 'sec')
+        hdr['slice_code'] = slice_order_codes['alternating increasing']
+        base = tuple(float(time) for time in hdr.get_slice_times())
+
+        # Cropping keeps the original times for the retained slices
+        cropped = img.slicer[:, :, 2:6]
+        cropped_times = cropped.header.get_slice_times()
+        assert cropped_times == pytest.approx(base[2:6])
+        assert cropped_times[0] == pytest.approx(base[2])
+        assert cropped_times[0] != pytest.approx(0.0)
+
+        # Cropping from the first slice still encodes the same acquisition
+        first = img.slicer[:, :, :3]
+        assert first.header.get_slice_times() == pytest.approx(base[:3])
+
+        # Flipping the slice axis reverses the associated times
+        flipped = img.as_reoriented([[0, 1], [1, 1], [2, -1]])
+        assert flipped.header.get_slice_times() == pytest.approx(base[::-1])
+
+        # A transpose leaves the slice times attached to the same voxels
+        transposed = img.as_reoriented([[2, 1], [1, 1], [0, 1]])
+        assert transposed.header.get_dim_info()[2] == 0
+        assert transposed.header.get_slice_times() == pytest.approx(base)
+
+        # Cropping then flipping still refers to the original slices
+        crop_flip = cropped.as_reoriented([[0, 1], [1, 1], [2, -1]])
+        assert crop_flip.header.get_slice_times() == pytest.approx(base[2:6][::-1])
+
+        # Undefined padding slices stay undefined through the operations
+        hdr['slice_start'] = 1
+        hdr['slice_end'] = 5
+        padded = self.single_class(arr, np.eye(4))
+        padded.header.set_dim_info(slice=2)
+        padded.header.set_slice_duration(0.1)
+        padded.header['slice_code'] = slice_order_codes['sequential increasing']
+        padded.header['slice_start'] = 1
+        padded.header['slice_end'] = 5
+        none_idx = 0
+        padded_crop = padded.slicer[:, :, none_idx : none_idx + 1]
+        assert padded_crop.header.get_slice_times() == (None,)
+        padded_crop2 = padded.slicer[:, :, 2:4]
+        assert padded_crop2.header.get_slice_times() == pytest.approx((0.1, 0.2))
+        flipped_padded = padded.as_reoriented([[0, 1], [1, 1], [2, -1]])
+        fl = flipped_padded.header.get_slice_times()
+        assert fl[0] is None
+        assert fl[-1] is None
 
 
 @runif_extra_has('slow')
