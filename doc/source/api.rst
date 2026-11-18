@@ -49,6 +49,7 @@ Image Utilities
    orientations
    quaternions
    spatialimages
+   statcontracts
    volumeutils
 
 

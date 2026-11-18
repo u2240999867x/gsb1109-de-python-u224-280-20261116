@@ -12,7 +12,7 @@ from typing import Any
 
 # module imports
 from nibabel import analyze as ana
-from nibabel import ecat, imagestats, mriutils, orientations, streamlines, viewers
+from nibabel import ecat, imagestats, mriutils, orientations, statcontracts, streamlines, viewers
 from nibabel import nifti1 as ni1
 from nibabel import spm2analyze as spm2
 from nibabel import spm99analyze as spm99
@@ -104,6 +104,7 @@ __all__ = [
     'spm2',
     'spm99',
     'squeeze_image',
+    'statcontracts',
     'streamlines',
     'test',
     'viewers',
