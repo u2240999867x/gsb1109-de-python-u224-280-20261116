@@ -18,6 +18,7 @@ brief and will be expanded upon in the future.
    scenarios
    transport
    types
+   command_metadata
 
 .. toctree::
    :maxdepth: 1

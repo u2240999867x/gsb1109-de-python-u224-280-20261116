@@ -16,6 +16,29 @@ from psrpcore._client import (
 )
 from psrpcore._clixml_shell import ClixmlOutput, ClixmlShell
 from psrpcore._command import Command
+from psrpcore._command_metadata import (
+    BindingBasis,
+    BindingErrorKind,
+    BindingFailure,
+    BindingPlan,
+    BindingResult,
+    BindingStatus,
+    CommandBindingCache,
+    CommandMetadata,
+    CommandParameterMetadata,
+    ParameterBinder,
+    ParameterBinding,
+    ParameterBindingPlan,
+    ParameterInput,
+    ParameterSetCandidate,
+    ParameterSetMetadata,
+    ParameterSetResolution,
+    bind_command_parameters,
+    bind_parameters,
+    load_command_metadata,
+    resolve_command_parameters,
+    resolve_parameter_set,
+)
 from psrpcore._crypto import PSRemotingCrypto
 from psrpcore._events import (
     ApplicationPrivateDataEvent,
@@ -66,6 +89,12 @@ from psrpcore._server import ServerPipeline, ServerRunspacePool
 
 __all__ = [
     "ApplicationPrivateDataEvent",
+    "BindingBasis",
+    "BindingErrorKind",
+    "BindingFailure",
+    "BindingPlan",
+    "BindingResult",
+    "BindingStatus",
     "ClientGetCommandMetadata",
     "ClientHostResponder",
     "ClientPowerShell",
@@ -73,6 +102,9 @@ __all__ = [
     "ClixmlOutput",
     "ClixmlShell",
     "Command",
+    "CommandBindingCache",
+    "CommandMetadata",
+    "CommandParameterMetadata",
     "ConnectRunspacePoolEvent",
     "CreatePipelineEvent",
     "DebugRecordEvent",
@@ -92,6 +124,13 @@ __all__ = [
     "PSRPCoreError",
     "PSRPEvent",
     "PSRPPayload",
+    "ParameterBinder",
+    "ParameterBinding",
+    "ParameterBindingPlan",
+    "ParameterInput",
+    "ParameterSetCandidate",
+    "ParameterSetMetadata",
+    "ParameterSetResolution",
     "PipelineHostCallEvent",
     "PipelineHostResponseEvent",
     "PipelineInputEvent",
@@ -119,4 +158,9 @@ __all__ = [
     "UserEventEvent",
     "VerboseRecordEvent",
     "WarningRecordEvent",
+    "bind_command_parameters",
+    "bind_parameters",
+    "load_command_metadata",
+    "resolve_command_parameters",
+    "resolve_parameter_set",
 ]
