@@ -214,7 +214,12 @@ class Request(object):
 
     def deliver(self, response):
         if self.callback is not None:
-            self.callback((response, self.callback_arg, self.aborted))
+            # A misbehaving callback must only fail its own request,
+            # never the responses of other commands still in flight.
+            try:
+                self.callback((response, self.callback_arg, self.aborted))
+            except Exception:
+                if __debug__: self.parent._log(1, 'callback error: %s - %s' % sys.exc_info()[:2])
             return
 
         self.response = response
@@ -315,6 +320,7 @@ class IMAP4(object):
         self.literal = None             # A literal argument to a command
         self.tagged_commands = {}       # Tagged commands awaiting response
         self.untagged_responses = []    # [[typ: [data, ...]], ...]
+        self.unexpected_responses = []  # [(typ, data), ...] events owned by no pending command
         self.mailbox = None             # Current mailbox selected
         self.is_readonly = False        # READ-ONLY desired state
         self.idle_rqb = None            # Server IDLE Request - see _IdleCont
@@ -625,6 +631,22 @@ class IMAP4(object):
             self.commands_lock.acquire()
             try:
                 yield self.untagged_responses.pop(0)
+            finally:
+                self.commands_lock.release()
+
+
+    def pop_unexpected_responses(self):
+        """ for typ,data in pop_unexpected_responses(): pass
+        Generator for responses that could not be attributed to any
+        pending command (eg: stale tagged replies from before a
+        reconnect, or otherwise unrecognised events).
+        Returns and removes unexpected responses in order of reception.
+        Use at your own risk!"""
+
+        while self.unexpected_responses:
+            self.commands_lock.acquire()
+            try:
+                yield self.unexpected_responses.pop(0)
             finally:
                 self.commands_lock.release()
 
@@ -1296,6 +1318,18 @@ class IMAP4(object):
         if __debug__: self._log(5, 'untagged_responses[%s] %s += ["%.80r"]' % (typ, len(urd)-1, dat))
 
 
+    def _append_unexpected(self, typ, dat):
+
+        # Record an event owned by no pending command, so that offline
+        # replay can account for every response line received.
+
+        self.commands_lock.acquire()
+        self.unexpected_responses.append((typ, dat))
+        self.commands_lock.release()
+
+        if __debug__: self._log(5, 'unexpected_responses[%s] += ["%.80r"]' % (typ, dat))
+
+
     def _check_bye(self):
 
         bye = self._get_untagged_response('BYE', leave=True)
@@ -1593,7 +1627,10 @@ class IMAP4(object):
                 if typ in ('OK', 'NO', 'BAD') and self._match(self.response_code_cre, dat):
                     self._append_untagged(str(self.mo.group('type'), 'ASCII'), self.mo.group('data'))
                 if not tag in self.tagged_commands:
+                    # Stale or foreign tag (eg: replayed from an old
+                    # session) - must not be claimed by any pending command.
                     if __debug__: self._log(1, 'unexpected tagged response: %r' % resp)
+                    self._append_unexpected('TAGGED', resp)
                 else:
                     self._request_pop(tag, (typ, [dat]))
             else:
@@ -1611,11 +1648,13 @@ class IMAP4(object):
                     if self._match(self.continuation_cre, resp):
                         if not continuation_expected:
                             if __debug__: self._log(1, "unexpected continuation response: '%r'" % resp)
+                            self._append_unexpected('CONTINUATION', resp)
                             return
                         self._request_pop('continuation', (True, self.mo.group('data')))
                         return
 
                     if __debug__: self._log(1, "unexpected response: '%r'" % resp)
+                    self._append_unexpected('UNEXPECTED', resp)
                     return
 
                 typ = str(self.mo.group('type'), 'ASCII')
