@@ -112,6 +112,83 @@ Windows Shortcut Information:
 }
 ```
 
+## Migration planning
+
+`LnkParse3.migration` is a read-only planner for moving a material package
+between machines. It never launches or rewrites a shortcut; it reports the
+smallest set of allowed field corrections instead.
+
+A plan takes both machine configurations, the material mapping and the
+writable fields:
+
+```json
+{
+  "source": {
+    "name": "PC-A",
+    "env": {"SystemRoot": "C:\\Windows", "USERNAME": "alice", "PROFILE": "C:\\Users\\%USERNAME%"},
+    "known_folders": {"{374DE290-123F-4565-9164-39C4925E467B}": "C:\\Users\\alice\\Downloads"},
+    "drives": ["C:", "D:"]
+  },
+  "target": {
+    "name": "PC-B",
+    "env": {"SystemRoot": "E:\\Windows", "USERNAME": "bob", "PROFILE": "E:\\Profiles\\%USERNAME%"},
+    "known_folders": {"{374DE290-123F-4565-9164-39C4925E467B}": "E:\\Profiles\\bob\\Downloads"},
+    "drives": ["E:"]
+  },
+  "migrations": [
+    {"id": "docs", "source": "D:\\Work\\Docs", "target": "E:\\Data\\Docs", "type": "dir"}
+  ],
+  "allowed_fields": [
+    "relative_path",
+    "working_directory",
+    "icon_location",
+    "link_info.local_base_path"
+  ],
+  "shortcuts": [
+    {
+      "id": "report",
+      "dir": "D:\\Work\\Docs",
+      "declarations": [
+        {"field": "relative_path", "value": ".\\report.xlsx", "base": "shortcut_dir"},
+        {"field": "working_directory", "value": "D:\\Work\\Docs"},
+        {"field": "icon_location", "value": "%SystemRoot%\\system32\\shell32.dll"}
+      ]
+    }
+  ]
+}
+```
+
+```console
+$ python -m LnkParse3.migration plan.json --text
+Status: ok
+Field corrections: 1
+  report working_directory: 'D:\\Work\\Docs' -> 'E:\\Data\\Docs' (literal path)
+```
+
+`python -m LnkParse3.migration plan.json` emits the full JSON plan. Exit status
+is 0 unless `--strict` is given and the plan is not `ok`.
+
+Rules the planner enforces:
+
+- Variables expand transitively. Missing variables and cycles are reported
+  separately, per machine, and a declaration with either stays unchanged.
+- A known-folder value is a base plus an appended relative segment. A suffix
+  that starts a new absolute root is rejected instead of silently replacing
+  the base.
+- A declaration is left alone when its target-side resolution already names
+  the mapped material. Only the smallest set of divergent fields is rewritten,
+  and only when listed in `allowed_fields`.
+- When declarations of one source material disagree after migration, the whole
+  group is reported under `conflicts` and every declaration keeps its original
+  symbolic value. `status` becomes `needs_confirmation`.
+- After planning, every rewritten or preserved declaration is re-resolved under
+  the target configuration and reverse-mapped to its source. Failures appear in
+  `verification.failed`; anything that could not be proven appears in
+  `verification.unproven`.
+
+`declarations_from_lnk_json()` converts `LnkFile.get_json(True)` output into the
+declaration list, keeping `local_base_path` and `common_path_suffix` together.
+
 # Extracted data
 
 List of data in LNK structure and their current status of implementation.
