@@ -6,7 +6,7 @@ from dissect.ntfs.index import Index, IndexEntry
 from dissect.ntfs.mft import Mft, MftRecord
 from dissect.ntfs.ntfs import NTFS
 from dissect.ntfs.secure import ACE, ACL, Secure, SecurityDescriptor
-from dissect.ntfs.usnjrnl import UsnJrnl, UsnRecord
+from dissect.ntfs.usnjrnl import UsnJrnl, UsnMigration, UsnRecord
 
 __all__ = [
     "ACE",
@@ -24,5 +24,6 @@ __all__ = [
     "Secure",
     "SecurityDescriptor",
     "UsnJrnl",
+    "UsnMigration",
     "UsnRecord",
 ]

@@ -11,7 +11,7 @@ from dissect.ntfs.exceptions import Error
 from dissect.ntfs.util import segment_reference, ts_to_ns
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Hashable, Iterator
     from datetime import datetime
 
     from dissect.ntfs.mft import MftRecord
@@ -63,6 +63,54 @@ class UsnJrnl:
             offset += record.record.RecordLength
             if offset % 8:
                 offset += -(offset) & (8 - 1)
+
+    def migrations(self) -> Iterator[UsnMigration]:
+        """Yield reconstructed path migrations (renames) from the USN records.
+
+        A rename is recorded in the USN journal as a record with the ``RENAME_OLD_NAME`` reason,
+        followed by a record with the ``RENAME_NEW_NAME`` reason. Both halves do not have to be
+        adjacent, other file events may be recorded in between. Halves are paired by their complete
+        file reference (segment number and sequence number) and only when the old-name half
+        explicitly precedes the new-name half in USN order.
+
+        If either half is missing, the migration is kept as a single-sided change. A gap in USN
+        order, e.g. caused by journal wraparound, is not inferred as a deletion; pending old-name
+        halves from before the gap are yielded as single-sided migrations instead.
+
+        A single record can carry multiple reason flags (e.g. ``RENAME_OLD_NAME | CLOSE``); every
+        record is only stored once as the original event and contributes to at most one migration.
+        """
+        pending: dict[Hashable, list[UsnRecord]] = {}
+        last_usn: int | None = None
+
+        def flush_pending() -> Iterator[UsnMigration]:
+            remaining = [record for half in pending.values() for record in half]
+            pending.clear()
+            for record in sorted(remaining, key=lambda record: record.record.Usn):
+                yield UsnMigration(old_record=record)
+
+        for record in self.records():
+            usn = record.record.Usn
+            if last_usn is not None and usn < last_usn:
+                # The journal wrapped around, sequence evidence across the gap is unreliable
+                yield from flush_pending()
+            last_usn = usn
+
+            reason = record.record.Reason
+            key = _file_reference_key(record.record.FileReferenceNumber)
+
+            if reason & c_ntfs.USN_REASON.RENAME_NEW_NAME:
+                old_record = None
+                if halves := pending.get(key):
+                    if halves[-1].record.Usn < usn:
+                        old_record = halves.pop()
+                    if not halves:
+                        del pending[key]
+                yield UsnMigration(old_record=old_record, new_record=record)
+            elif reason & c_ntfs.USN_REASON.RENAME_OLD_NAME:
+                pending.setdefault(key, []).append(record)
+
+        yield from flush_pending()
 
 
 class UsnRecord:
@@ -142,3 +190,73 @@ class UsnRecord:
             parent_path = f"<broken_reference_0x{ref:x}#{self.record.ParentFileReferenceNumber.SequenceNumber}>"
 
         return f"{parent_path}\\{self.filename}"
+
+
+class UsnMigration:
+    """A path migration of a file, reconstructed from USN journal rename records.
+
+    Args:
+        old_record: The USN record with the ``RENAME_OLD_NAME`` reason, if available.
+        new_record: The USN record with the ``RENAME_NEW_NAME`` reason, if available.
+    """
+
+    def __init__(self, old_record: UsnRecord | None = None, new_record: UsnRecord | None = None):
+        self.old_record = old_record
+        self.new_record = new_record
+
+    def __repr__(self) -> str:
+        return f"<UsnMigration {self.old_path} -> {self.new_path}>"
+
+    @property
+    def record(self) -> UsnRecord:
+        """The most recent USN record of this migration."""
+        return self.new_record or self.old_record
+
+    @property
+    def complete(self) -> bool:
+        """Whether both the old-name and new-name half of this migration were found."""
+        return self.old_record is not None and self.new_record is not None
+
+    @property
+    def file_reference(self) -> c_ntfs.MFT_SEGMENT_REFERENCE:
+        """The complete file reference of the migrated file."""
+        return self.record.record.FileReferenceNumber
+
+    @property
+    def old_filename(self) -> str | None:
+        """The filename before the migration, if the old-name half was found."""
+        return self.old_record.filename if self.old_record else None
+
+    @property
+    def new_filename(self) -> str | None:
+        """The filename after the migration, if the new-name half was found."""
+        return self.new_record.filename if self.new_record else None
+
+    @property
+    def old_path(self) -> str | None:
+        """The full path before the migration, if the old-name half was found."""
+        return self.old_record.full_path if self.old_record else None
+
+    @property
+    def new_path(self) -> str | None:
+        """The full path after the migration, if the new-name half was found."""
+        return self.new_record.full_path if self.new_record else None
+
+    @property
+    def timestamp(self) -> datetime:
+        return self.record.timestamp
+
+    @property
+    def timestamp_ns(self) -> int:
+        return self.record.timestamp_ns
+
+    @property
+    def usn(self) -> int:
+        return self.record.record.Usn
+
+
+def _file_reference_key(reference: c_ntfs.MFT_SEGMENT_REFERENCE | c_ntfs.FILE_ID_128) -> Hashable:
+    """Return a hashable key of the complete file reference, including the sequence number."""
+    if hasattr(reference, "SequenceNumber"):
+        return (segment_reference(reference), reference.SequenceNumber)
+    return (bytes(reference.Identifier),)
