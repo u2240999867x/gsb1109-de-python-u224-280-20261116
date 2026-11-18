@@ -22,6 +22,8 @@ from cdflib.dataclasses import (
     CDRInfo,
     GDRInfo,
     VDRInfo,
+    SparseData,
+    SparseValue,
 )
 from cdflib.s3 import S3object
 from cdflib.utils import _squeeze_or_scalar
@@ -388,7 +390,8 @@ class CDF:
         endtime: Optional[epoch.epoch_types] = None,
         startrec: int = 0,
         endrec: Optional[int] = None,
-    ) -> Union[str, np.ndarray]:
+        return_provenance: bool = False,
+    ) -> Union[str, np.ndarray, SparseData]:
         """
         Returns the variable data.
 
@@ -401,6 +404,9 @@ class CDF:
         endrec : int
             Index of the last record to get. All records from *startrec* to
             *endrec* inclusive are fetched.
+        return_provenance : bool
+            If True, return a :class:`~cdflib.dataclasses.SparseData` carrying
+            the values plus per-record status and source-record information.
 
         Notes
         -----
@@ -439,6 +445,16 @@ class CDF:
         if (starttime is not None or endtime is not None) and (startrec != 0 or endrec is not None):
             raise ValueError("Can't specify both time and record range")
 
+        if return_provenance:
+            return self.varget_provenance(
+                variable,  # type: ignore[arg-type]
+                epoch=epoch,
+                starttime=starttime,
+                endtime=endtime,
+                startrec=startrec,
+                endrec=endrec,
+            )
+
         vdr_info = self.vdr_info(variable)
         if vdr_info.max_rec < 0:
             # No records have been written (all records are virtual), so return an empty array
@@ -452,6 +468,70 @@ class CDF:
             endtime=endtime,
             startrec=startrec,
             endrec=endrec,
+        )
+
+    def varget_provenance(
+        self,
+        variable: Union[str, int],
+        epoch: Optional[str] = None,
+        starttime: Optional[epoch.epoch_types] = None,
+        endtime: Optional[epoch.epoch_types] = None,
+        startrec: int = 0,
+        endrec: Optional[int] = None,
+    ) -> SparseData:
+        """
+        Returns variable data together with per-logical-record provenance.
+
+        Each record's status is ``"written"`` when that record is physically
+        stored, ``"pad"`` when a ``pad_sparse`` variable filled it, and
+        ``"previous"`` when a ``prev_sparse`` variable reused an earlier
+        record.  ``"previous"`` samples point at the actual source record,
+        which may lie before ``startrec``; a required earlier value may
+        therefore be read from outside the requested window.  If a
+        ``prev_sparse`` record has no preceding physical record in this file,
+        its status is ``"missing"``: the pad value is returned but no evidence
+        is borrowed from another file.
+
+        An explicitly written value is always ``"written"`` even if it equals
+        the variable's pad value.
+        """
+        vdr_info = self.vdr_info(variable)
+        if vdr_info.max_rec < 0:
+            dimensions = [size for size, vary in zip(vdr_info.dim_sizes, vdr_info.dim_vary) if vary]
+            data = self._read_data(b"", vdr_info.data_type, 0, vdr_info.num_elements, dimensions)
+            return SparseData(
+                variable=vdr_info.name,
+                data=data,
+                provenance=[],
+                source_file=str(self.file),
+                start_rec=0,
+            )
+
+        if endrec is None:
+            endrec = vdr_info.max_rec
+
+        result = self._read_vardata(
+            vdr_info,
+            epoch=epoch,
+            starttime=starttime,
+            endtime=endtime,
+            startrec=startrec,
+            endrec=endrec,
+            return_provenance=True,
+        )
+        if result is None:
+            return SparseData(variable=vdr_info.name, data=np.array([]), provenance=[], source_file=str(self.file))
+        data, statuses, sources, first_record = result  # type: ignore[misc]
+        provenance = [
+            SparseValue(status=str(status), source_record=int(source) if source >= 0 else None, record=first_record + ix)
+            for ix, (status, source) in enumerate(zip(statuses, sources))
+        ]
+        return SparseData(
+            variable=vdr_info.name,
+            data=data,
+            provenance=provenance,
+            source_file=str(self.file),
+            start_rec=first_record,
         )
 
     def vdr_info(self, variable: Union[str, int]) -> VDR:
@@ -1463,12 +1543,25 @@ class CDF:
         return vvr_offsets, vvr_start, vvr_end
 
     def _read_vvrs(
-        self, vdr: VDR, vvr_offs: List[int], vvr_start: List[int], vvr_end: List[int], startrec: int, endrec: int
-    ) -> Union[str, np.ndarray]:
+        self,
+        vdr: VDR,
+        vvr_offs: List[int],
+        vvr_start: List[int],
+        vvr_end: List[int],
+        startrec: int,
+        endrec: int,
+        return_provenance: bool = False,
+    ) -> Union[str, np.ndarray, Tuple[Union[str, np.ndarray], np.ndarray, np.ndarray]]:
         """
         Reads in all VVRS that are pointed to in the VVR_OFFS array.
         Creates a large byte array of all values called "byte_stream".
         Decodes the byte_stream, then returns them.
+
+        When ``return_provenance`` is true, also returns two per-logical-record
+        arrays: the record status and the source record number.  The status is
+        derived only from physical VVR coverage, never by comparing values with
+        the pad value, so an explicitly written value that happens to equal the
+        pad value is still reported as written.
         """
 
         numBytes = self._type_size(vdr.data_type, vdr.num_elements)
@@ -1478,8 +1571,17 @@ class CDF:
         lastBlock = -1
         totalBytes = numBytes * numValues * totalRecs
         byte_stream = bytearray(totalBytes)
+        if return_provenance:
+            statuses = np.empty(totalRecs, dtype="<U9")
+            sources = np.full(totalRecs, -1, dtype=np.int64)
+        else:
+            statuses = np.empty(0, dtype="<U9")
+            sources = np.empty(0, dtype=np.int64)
         pos = 0
         if vdr.sparse == 0:
+            if return_provenance:
+                statuses[:] = "written"
+                sources[:] = np.arange(startrec, endrec + 1, dtype=np.int64)
             for vvr_num in range(0, len(vvr_offs)):
                 if vvr_end[vvr_num] >= startrec and firstBlock == -1:
                     firstBlock = vvr_num
@@ -1510,7 +1612,7 @@ class CDF:
                 )
             cur_block = -1
             rec_size = numBytes * numValues
-            for rec_num in range(startrec, (endrec + 1)):
+            for ix, rec_num in enumerate(range(startrec, (endrec + 1))):
                 block, prev_block = self._find_block(vvr_start, vvr_end, cur_block, rec_num)
                 if block > -1:
                     record_off = rec_num - vvr_start[block]
@@ -1522,10 +1624,15 @@ class CDF:
                         cur_block = block
                     xoff = record_off * rec_size
                     byte_stream[pos : pos + rec_size] = var_block_data[xoff : xoff + rec_size]
+                    if return_provenance:
+                        statuses[ix] = "written"
+                        sources[ix] = rec_num
                 else:
                     if vdr.sparse == 1:
                         # use defined pad or default pad
                         byte_stream[pos : pos + rec_size] = filled_data * numValues
+                        if return_provenance:
+                            statuses[ix] = "pad"
                     else:
                         # use previous physical record
                         if prev_block != -1:
@@ -1535,8 +1642,16 @@ class CDF:
                                 var_prev_block_data = self._read_vvr_block2(vvr_offs[prev_block])
                             lastRecOff = (vvr_end[prev_block] - vvr_start[prev_block]) * rec_size
                             byte_stream[pos : pos + rec_size] = var_prev_block_data[lastRecOff:]
+                            if return_provenance:
+                                statuses[ix] = "previous"
+                                sources[ix] = vvr_end[prev_block]
                         else:
+                            # No written record precedes this one in *this*
+                            # file.  Keep the file's pad value but record that
+                            # there was no usable evidence for the value.
                             byte_stream[pos : pos + rec_size] = filled_data * numValues
+                            if return_provenance:
+                                statuses[ix] = "missing"
                 pos = pos + rec_size
                 if block > -1:
                     cur_block = block
@@ -1547,7 +1662,10 @@ class CDF:
             if var_vary[x] == 0:
                 continue
             dimensions.append(var_sizes[x])
-        return self._read_data(byte_stream, vdr.data_type, totalRecs, vdr.num_elements, dimensions)
+        data = self._read_data(byte_stream, vdr.data_type, totalRecs, vdr.num_elements, dimensions)
+        if return_provenance:
+            return data, statuses, sources
+        return data
 
     def _convert_option(self) -> str:
         """
@@ -1812,6 +1930,7 @@ class CDF:
         endtime: Optional[epoch.epoch_types] = None,
         startrec: int = 0,
         endrec: Optional[int] = None,
+        return_provenance: bool = False,
     ) -> Optional[Union[str, np.ndarray]]:
         # Error checking
         if startrec:
@@ -1847,10 +1966,26 @@ class CDF:
             startrec = 0
             endrec = 0
 
-        data = self._read_vvrs(vdr_info, vvr_offsets, vvr_start, vvr_end, startrec, endrec)
+        result = self._read_vvrs(
+            vdr_info,
+            vvr_offsets,
+            vvr_start,
+            vvr_end,
+            startrec,
+            endrec,
+            return_provenance=return_provenance,
+        )
+        if return_provenance:
+            data, statuses, sources = result  # type: ignore[misc]
+        else:
+            data = result
         if vdr_info.record_vary:
+            if return_provenance:
+                return data, statuses, sources, startrec
             return data
         else:
+            if return_provenance:
+                return data[0], statuses[:1], sources[:1], 0
             return data[0]
 
     def _findtimerecords(

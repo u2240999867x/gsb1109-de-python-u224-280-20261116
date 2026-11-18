@@ -43,6 +43,7 @@ nav:
   - Tools:
     - Reading CDFs: cdfread.md
     - Writing CDFs: cdfwrite.md
+    - Sparse Provenance: sparse-provenance.md
     - Time Conversions: cdfepoch.md
     - dataclasses: dataclasses.md
     - xarray: xarray.md

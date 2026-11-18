@@ -811,6 +811,7 @@ class CDF:
                     #                   [recstart2,recend2,data2], ...]
                     var_data = self._make_sparse_blocks(var_spec, var_data[0], var_data[1])
 
+                    varMaxRec = -1
                     for block in var_data:
                         varMaxRec = self._write_var_data_sparse(f, zVar, varNum, dataType, numElems, recVary, block)
                 # Update GDR MaxRec if writing an r variable

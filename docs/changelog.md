@@ -1,6 +1,18 @@
 Changelog
 =========
 
+Unreleased
+==========
+
+cdfread
+-------
+- Added ``CDF.varget_provenance`` (and ``varget(..., return_provenance=True)``) to report each logical record's sparse status and, for ``previous`` records, the physical source record. Status is derived from VXR coverage, so an explicitly written value equal to the pad value remains ``written``.
+- ``prev_sparse`` records with no predecessor in the same file are reported as ``missing`` instead of being treated as ordinary previous values.
+
+ingest
+------
+- Added ``cdflib.ingest`` helpers to read, merge and re-export CDF batches while preserving sparse provenance.
+
 1.3.13
 ======
 
