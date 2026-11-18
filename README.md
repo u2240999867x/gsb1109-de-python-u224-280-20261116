@@ -45,6 +45,21 @@ documentation](https://docs.dissect.tools/en/latest/contributing/tooling.html).
 The Dissect project encourages any contribution to the codebase. To make your contribution fit into the project, please
 refer to [the development guide](https://docs.dissect.tools/en/latest/contributing/developing.html).
 
+## File references
+
+NTFS identifies files by a complete file reference: a record (segment) number plus the sequence number of that
+record. A sequence number is incremented whenever a record is reused, so the record number alone does not identify a
+specific file over time.
+
+`FileReference` and `MftRecord.reference` expose this complete identity. Resolving a cstruct `_MFT_SEGMENT_REFERENCE`
+or a `FileReference` validates both parts and raises `DanglingReferenceError` when the record has been reused instead
+of returning the record currently occupying that number. Integer lookups such as `mft.get(42)` continue to address
+the record currently stored at that segment number.
+
+Directory listings keep the name and parent reference stored in each index entry. Hard links and DOS aliases are
+therefore kept as separate names, and entries whose references are dangling remain available as their original
+`IndexEntry` instead of being silently rebound to a newer record.
+
 ## Copyright and license
 
 Dissect is released as open source by Fox-IT (<https://www.fox-it.com>) part of NCC Group Plc

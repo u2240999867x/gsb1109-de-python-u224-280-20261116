@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import struct
 from collections import UserDict
-from typing import TYPE_CHECKING, Any, BinaryIO
+from typing import TYPE_CHECKING, Any, BinaryIO, NamedTuple
 
 from dissect.cstruct import Enum
 from dissect.util.stream import RunlistStream
@@ -10,11 +10,17 @@ from dissect.util.stream import RunlistStream
 from dissect.ntfs.c_ntfs import (
     ATTRIBUTE_FLAG_COMPRESSION_MASK,
     ATTRIBUTE_TYPE_CODE,
+    FILE_NAME_DOS,
     FILE_NUMBER_ROOT,
     SECTOR_SHIFT,
     SECTOR_SIZE,
 )
-from dissect.ntfs.exceptions import FilenameNotAvailableError, VolumeNotAvailableError
+from dissect.ntfs.exceptions import (
+    DanglingReferenceError,
+    Error,
+    FilenameNotAvailableError,
+    VolumeNotAvailableError,
+)
 from dissect.ntfs.stream import CompressedRunlistStream
 
 if TYPE_CHECKING:
@@ -22,7 +28,7 @@ if TYPE_CHECKING:
     from dissect.ntfs.c_ntfs import (
         c_ntfs,
     )
-    from dissect.ntfs.mft import Mft
+    from dissect.ntfs.mft import Mft, MftRecord
     from dissect.ntfs.ntfs import NTFS
 
 
@@ -256,25 +262,30 @@ def get_full_path(mft: Mft, name: str, parent: c_ntfs._MFT_SEGMENT_REFERENCE, se
         if parent_ref == FILE_NUMBER_ROOT:
             break
 
-        if parent_ref in seen:
+        reference = FileReference.from_reference(parent)
+        if reference in seen:
             path.append("<recursion>")
             break
 
-        seen.add(parent_ref)
+        seen.add(reference)
 
         try:
-            record = mft.get(parent_ref)
+            # Resolve the complete reference so a record that reuses this segment number can not be mistaken
+            # for the directory the reference was originally created for.
+            record = mft.get(parent)
             if not record.filename:
                 raise FilenameNotAvailableError("No filename")  # noqa: TRY301
 
-            if record.header.SequenceNumber != parent.SequenceNumber:
-                path.append(f"<broken_reference_0x{parent_ref:x}#{parent.SequenceNumber}>")
-                break
-
             path.append(record.filename)
 
-            parent = record.attributes.FILE_NAME.attr.ParentDirectory
-        except Exception:
+            parent = _get_parent_reference(record)
+        except DanglingReferenceError:
+            path.append(f"<broken_reference_0x{parent_ref:x}#{parent.SequenceNumber}>")
+            break
+        except FilenameNotAvailableError:
+            path.append(f"<unknown_segment_0x{parent_ref:x}>")
+            break
+        except Error:
             path.append(f"<unknown_segment_0x{parent_ref:x}>")
             break
 
@@ -293,6 +304,55 @@ def segment_reference(reference: c_ntfs._MFT_SEGMENT_REFERENCE) -> int:
         reference: A cstruct _MFT_SEGMENT_REFERENCE instance to return the complete segment number of.
     """
     return reference.SegmentNumberLowPart | (reference.SegmentNumberHighPart << 32)
+
+
+class FileReference(NamedTuple):
+    """A complete NTFS file reference.
+
+    A file reference consists of both the record (segment) number and the sequence number of that record. The
+    sequence number is incremented every time a record is reused, so a reference is only valid when both parts
+    match the record currently stored at the segment number.
+    """
+
+    segment: int
+    sequence: int
+
+    @property
+    def value(self) -> int:
+        """Return the full 64-bit file reference value (record number in the low 48 bits, sequence in the high 16)."""
+        return self.segment | (self.sequence << 48)
+
+    @classmethod
+    def from_reference(cls, reference: c_ntfs._MFT_SEGMENT_REFERENCE) -> FileReference:
+        """Create a :class:`FileReference` from a cstruct ``_MFT_SEGMENT_REFERENCE``."""
+        return cls(segment_reference(reference), reference.SequenceNumber)
+
+    @classmethod
+    def from_int(cls, value: int) -> FileReference:
+        """Create a :class:`FileReference` from a full 64-bit file reference value."""
+        return cls(value & 0xFFFFFFFFFFFF, (value >> 48) & 0xFFFF)
+
+    def __int__(self) -> int:
+        return self.value
+
+    def __str__(self) -> str:
+        return f"0x{self.segment:x}#{self.sequence}"
+
+
+def _get_parent_reference(record: MftRecord) -> c_ntfs._MFT_SEGMENT_REFERENCE:
+    """Return the parent reference of the preferred ``$FILE_NAME`` attribute of a record."""
+    attrs = record.attributes[ATTRIBUTE_TYPE_CODE.FILE_NAME]
+    attr = next((attr for attr in attrs if attr.flags != FILE_NAME_DOS), attrs[0])
+    return attr.attr.ParentDirectory
+
+
+def file_reference(reference: c_ntfs._MFT_SEGMENT_REFERENCE) -> int:
+    """Return the full 64-bit file reference of a cstruct MFT segment reference.
+
+    Unlike :func:`segment_reference`, this includes the sequence number, so the value identifies a specific
+    incarnation of a record instead of only the record number.
+    """
+    return FileReference.from_reference(reference).value
 
 
 def varint(buf: bytes) -> int:

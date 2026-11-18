@@ -7,8 +7,8 @@ from dissect.util.stream import RunlistStream
 from dissect.util.ts import wintimestamp
 
 from dissect.ntfs.c_ntfs import USN_PAGE_SIZE, c_ntfs
-from dissect.ntfs.exceptions import Error
-from dissect.ntfs.util import segment_reference, ts_to_ns
+from dissect.ntfs.exceptions import DanglingReferenceError
+from dissect.ntfs.util import FileReference, ts_to_ns
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -108,15 +108,35 @@ class UsnRecord:
 
     @cached_property
     def file(self) -> MftRecord | None:
-        if self.usnjrnl.ntfs and self.usnjrnl.ntfs.mft:
-            return self.usnjrnl.ntfs.mft(self.record.FileReferenceNumber)
-        return None
+        return self._resolve(self.record.FileReferenceNumber)
+
+    @cached_property
+    def dangling(self) -> bool:
+        """Return whether the file reference of this record points to a reused or missing MFT record."""
+        return self._is_dangling(self.record.FileReferenceNumber)
 
     @cached_property
     def parent(self) -> MftRecord | None:
-        if self.usnjrnl.ntfs and self.usnjrnl.ntfs.mft:
-            return self.usnjrnl.ntfs.mft(self.record.ParentFileReferenceNumber)
-        return None
+        return self._resolve(self.record.ParentFileReferenceNumber)
+
+    def _resolve(self, reference: c_ntfs._MFT_SEGMENT_REFERENCE) -> MftRecord | None:
+        if not self.usnjrnl.ntfs or not self.usnjrnl.ntfs.mft:
+            return None
+
+        try:
+            return self.usnjrnl.ntfs.mft(FileReference.from_reference(reference))
+        except DanglingReferenceError:
+            return None
+
+    def _is_dangling(self, reference: c_ntfs._MFT_SEGMENT_REFERENCE) -> bool:
+        if not self.usnjrnl.ntfs or not self.usnjrnl.ntfs.mft:
+            return False
+
+        try:
+            self.usnjrnl.ntfs.mft(FileReference.from_reference(reference))
+        except DanglingReferenceError:
+            return True
+        return False
 
     @property
     def timestamp(self) -> datetime:
@@ -128,17 +148,15 @@ class UsnRecord:
 
     @cached_property
     def full_path(self) -> str:
-        try:
-            parent = self.parent
-        except Error:
-            parent = None
+        parent_ref = FileReference.from_reference(self.record.ParentFileReferenceNumber)
+        parent = self.parent
 
-        ref = segment_reference(self.record.ParentFileReferenceNumber)
         if parent is None:
-            parent_path = f"<unavailable_reference_0x{ref:x}#{self.record.ParentFileReferenceNumber.SequenceNumber}>"
-        elif parent.header.SequenceNumber == self.record.ParentFileReferenceNumber.SequenceNumber:
-            parent_path = parent.full_path()
+            if self._is_dangling(self.record.ParentFileReferenceNumber):
+                parent_path = f"<broken_reference_0x{parent_ref.segment:x}#{parent_ref.sequence}>"
+            else:
+                parent_path = f"<unavailable_reference_0x{parent_ref.segment:x}#{parent_ref.sequence}>"
         else:
-            parent_path = f"<broken_reference_0x{ref:x}#{self.record.ParentFileReferenceNumber.SequenceNumber}>"
+            parent_path = parent.full_path()
 
         return f"{parent_path}\\{self.filename}"

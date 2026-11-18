@@ -21,6 +21,15 @@ class FileNotFoundError(Error, FileNotFoundError):
     pass
 
 
+class DanglingReferenceError(FileNotFoundError):
+    """Raised when a file reference points to a record that has been reused or no longer exists.
+
+    A file reference consists of both a record (segment) number and a sequence number. When a record is reused,
+    the record number can point at a different file than the one the reference was created for. Such a reference
+    is dangling and must not resolve to the record currently occupying that record number.
+    """
+
+
 class MftNotAvailableError(Error):
     pass
 

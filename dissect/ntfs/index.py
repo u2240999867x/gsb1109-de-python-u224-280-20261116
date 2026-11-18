@@ -9,11 +9,12 @@ from dissect.ntfs.attr import AttributeRecord
 from dissect.ntfs.c_ntfs import ATTRIBUTE_TYPE_CODE, COLLATION, INDEX_ENTRY_END, INDEX_ENTRY_NODE, SECTOR_SHIFT, c_ntfs
 from dissect.ntfs.exceptions import (
     BrokenIndexError,
+    DanglingReferenceError,
     Error,
     FileNotFoundError,
     MftNotAvailableError,
 )
-from dissect.ntfs.util import apply_fixup, segment_reference
+from dissect.ntfs.util import FileReference, apply_fixup, get_full_path
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -252,14 +253,97 @@ class IndexEntry:
         Note that the file reference is a union with the data part so only access this if you know the entry has
         a file reference and not a data part.
 
+        The complete file reference is validated, including the sequence number. If the record number now points to
+        a different record (i.e. the record was reused), a :class:`~dissect.ntfs.exceptions.DanglingReferenceError`
+        is raised instead of silently returning the record currently occupying that number.
+
         Raises:
             MftNotAvailableError: If no MFT is available.
+            DanglingReferenceError: If the referenced record has been reused.
         """
         record = self.index.record
         if not record or not record.ntfs or not record.ntfs.mft:
             raise MftNotAvailableError
 
-        return record.ntfs.mft.get(segment_reference(self.header.FileReference))
+        return record.ntfs.mft.get(FileReference.from_reference(self.header.FileReference))
+
+    @property
+    def reference(self) -> FileReference:
+        """Return the complete file reference (segment number and sequence number) of this entry."""
+        return FileReference.from_reference(self.header.FileReference)
+
+    @property
+    def name(self) -> str | None:
+        """Return the file name stored in this index entry, if it contains a ``$FILE_NAME`` key."""
+        attribute = self.attribute
+        return attribute.file_name if attribute is not None and self.is_filename else None
+
+    @property
+    def source(self) -> FileReference | None:
+        """Return the file reference of the directory whose index contains this entry.
+
+        This is the original source of the entry and is kept even when the referenced record has been reused.
+        """
+        record = self.index.record
+        if record is None or record.segment is None or record.header is None:
+            return None
+        return record.reference
+
+    @property
+    def parent(self) -> FileReference | None:
+        """Return the parent directory reference stored in this entry's ``$FILE_NAME`` key."""
+        attribute = self.attribute
+        if attribute is None or not self.is_filename:
+            return None
+        return FileReference.from_reference(attribute.attr.ParentDirectory)
+
+    @property
+    def dangling(self) -> bool:
+        """Return whether the complete file reference of this entry no longer identifies the record it points to."""
+        return self.is_dangling
+
+    @property
+    def is_filename(self) -> bool:
+        """Return whether this entry's key is a ``$FILE_NAME`` attribute."""
+        return bool(self.key_length) and self.index.root.attribute_type == ATTRIBUTE_TYPE_CODE.FILE_NAME
+
+    @property
+    def is_dangling(self) -> bool:
+        """Return whether this entry's complete file reference no longer identifies the record it points to."""
+        try:
+            self.dereference()
+        except DanglingReferenceError:
+            return True
+        return False
+
+    @property
+    def record(self) -> MftRecord | None:
+        """Return the record this entry points to, or ``None`` if the reference is dangling."""
+        return self.try_dereference()
+
+    @property
+    def full_path(self) -> str | None:
+        """Reconstruct the full path using this entry's own name and parent directory reference.
+
+        Unlike dereferencing the target record first, this keeps the parent relationship of the index entry itself.
+        This matters for hard links, where a record has multiple parents, and for dangling entries, where the
+        current record at the same number belongs to a different file.
+        """
+        if not self.is_filename:
+            return None
+
+        mft = self.index.record.ntfs.mft if self.index.record and self.index.record.ntfs else None
+        if mft is None:
+            return None
+
+        return get_full_path(mft, self.name, self.attribute.attr.ParentDirectory)
+
+    def try_dereference(self) -> MftRecord | None:
+        """Dereference this entry, returning ``None`` if the reference is dangling."""
+        try:
+            return self.dereference()
+        except DanglingReferenceError:
+            return None
 
     @cached_property
     def key(self) -> bytes:

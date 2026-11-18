@@ -19,6 +19,7 @@ from dissect.ntfs.c_ntfs import (
 )
 from dissect.ntfs.exceptions import (
     BrokenMftError,
+    DanglingReferenceError,
     Error,
     FileNotFoundError,
     MftNotAvailableError,
@@ -26,7 +27,7 @@ from dissect.ntfs.exceptions import (
     NotAReparsePointError,
 )
 from dissect.ntfs.index import Index
-from dissect.ntfs.util import AttributeMap, apply_fixup, segment_reference
+from dissect.ntfs.util import AttributeMap, FileReference, apply_fixup
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -50,7 +51,7 @@ class Mft:
 
         self.get = lru_cache(4096)(self.get)
 
-    def __call__(self, ref: int | str | c_ntfs._MFT_SEGMENT_REFERENCE, *args, **kwargs) -> MftRecord:
+    def __call__(self, ref: int | str | c_ntfs._MFT_SEGMENT_REFERENCE | FileReference, *args, **kwargs) -> MftRecord:
         return self.get(ref, *args, **kwargs)
 
     @cached_property
@@ -126,15 +127,23 @@ class Mft:
             return record
 
         attr = next((attr for attr in attrs if attr.flags != FILE_NAME_DOS), attrs[0])
-        return self.get(segment_reference(attr.attr.ParentDirectory))
+        return self.get(FileReference.from_reference(attr.attr.ParentDirectory))
 
-    def get(self, ref: int | str | c_ntfs._MFT_SEGMENT_REFERENCE, root: MftRecord | None = None) -> MftRecord:
+    def get(
+        self, ref: int | str | c_ntfs._MFT_SEGMENT_REFERENCE | FileReference, root: MftRecord | None = None
+    ) -> MftRecord:
         """Retrieve an MFT record using a variety of methods.
 
         Supported references are:
             - ``_MFT_SEGMENT_REFERENCE`` cstruct structure
+            - :class:`~dissect.ntfs.util.FileReference` (record number and sequence number)
             - integer segment number
             - string file path
+
+        An integer segment number refers to the record currently stored at that number. A complete file reference
+        (cstruct structure or :class:`~dissect.ntfs.util.FileReference`) additionally validates the sequence number,
+        so a reference to a record that has since been reused raises
+        :class:`~dissect.ntfs.exceptions.DanglingReferenceError`.
 
         Args:
             ref: Reference to retrieve the record by.
@@ -144,7 +153,20 @@ class Mft:
             TypeError: If the reference is of an unsupported type.
         """
         if isinstance(ref, c_ntfs._MFT_SEGMENT_REFERENCE):
-            ref = segment_reference(ref)
+            ref = FileReference.from_reference(ref)
+
+        if isinstance(ref, FileReference):
+            try:
+                record = self.get(ref.segment)
+            except (Error, EOFError) as e:
+                raise DanglingReferenceError(f"Reference {ref} does not point to an existing MFT record") from e
+
+            if record.header.SequenceNumber != ref.sequence:
+                raise DanglingReferenceError(
+                    f"Reference 0x{ref.segment:x}#{ref.sequence} points to a reused record "
+                    f"(current sequence number: {record.header.SequenceNumber})"
+                )
+            return record
 
         if isinstance(ref, int):
             record_size = self.ntfs._record_size if self.ntfs else DEFAULT_RECORD_SIZE
@@ -201,7 +223,13 @@ class MftRecord:
             return self.segment == other.segment and self.header.SequenceNumber == other.header.SequenceNumber
         return False
 
-    __hash__ = object.__hash__
+    def __hash__(self) -> int:
+        return hash((self.segment, self.header.SequenceNumber))
+
+    @property
+    def reference(self) -> FileReference:
+        """Return the complete file reference (segment number and sequence number) of this record."""
+        return FileReference(self.segment, self.header.SequenceNumber)
 
     @classmethod
     def from_fh(cls, fh: BinaryIO, offset: int, ntfs: NTFS | None = None) -> MftRecord:
@@ -254,6 +282,16 @@ class MftRecord:
         if not self.ntfs or not self.ntfs.mft:
             raise MftNotAvailableError
         return self.ntfs.mft.get(path, root=self)
+
+    @property
+    def parent_reference(self) -> FileReference | None:
+        """Return the parent directory reference of this record, if it has a ``$FILE_NAME`` attribute."""
+        attrs = self.attributes[ATTRIBUTE_TYPE_CODE.FILE_NAME]
+        if not attrs:
+            return None
+
+        attr = next((attr for attr in attrs if attr.flags != FILE_NAME_DOS), attrs[0])
+        return FileReference.from_reference(attr.attr.ParentDirectory)
 
     @cached_property
     def attributes(self) -> AttributeMap:
@@ -330,6 +368,17 @@ class MftRecord:
         """
         paths = self.full_paths(ignore_dos)
         return paths[0] if paths else None
+
+    def parent_references(self) -> list[FileReference]:
+        """Return the parent references of all ``$FILE_NAME`` attributes of this record.
+
+        A record can have multiple ``$FILE_NAME`` attributes due to hard links or a DOS alias. Each attribute has
+        its own parent directory reference, so they are returned separately instead of collapsing to a single path.
+        """
+        return [
+            FileReference.from_reference(attr.attr.ParentDirectory)
+            for attr in self.attributes[ATTRIBUTE_TYPE_CODE.FILE_NAME]
+        ]
 
     def full_paths(self, ignore_dos: bool = False) -> list[str]:
         """Return all full paths of this record.
@@ -514,6 +563,9 @@ class MftRecord:
             dereference: Determines whether to resolve the :class:`~dissect.ntfs.index.IndexEntry`'s to :class:`MftRecord`'s. This impacts performance.
             ignore_dos: Ignore DOS file name entries.
 
+        When ``dereference`` is ``True``, entries whose file reference is dangling are yielded as their
+        :class:`~dissect.ntfs.index.IndexEntry` instead of being resolved to an unrelated record.
+
         Raises:
             NotADirectoryError: If this record is not a directory.
         """  # noqa: E501
@@ -523,7 +575,8 @@ class MftRecord:
         for entry in self.index("$I30").entries():
             if ignore_dos and entry.attribute.flags == FILE_NAME_DOS:
                 continue
-            yield entry.dereference() if dereference else entry
+            record = entry.try_dereference() if dereference else None
+            yield record if record is not None else entry
 
     def listdir(self, dereference: bool = False, ignore_dos: bool = False) -> dict[str, IndexEntry | MftRecord]:
         """Return a dictionary of the directory entries of this record.
@@ -532,13 +585,18 @@ class MftRecord:
             dereference: Determines whether to resolve the :class:`~dissect.ntfs.index.IndexEntry`'s to :class:`MftRecord`'s. This impacts performance.
             ignore_dos: Ignore DOS file name entries.
 
+        Each index entry is returned under the file name stored in that entry. If a record has multiple names (for
+        example hard links or a DOS alias), each name is kept as a separate entry instead of being expanded from the
+        resolved record. When ``dereference`` is ``True``, valid entries are returned as their resolved
+        :class:`~dissect.ntfs.mft.MftRecord` and dangling entries as their original
+        :class:`~dissect.ntfs.index.IndexEntry` so the stale reference and its source remain available.
+
         Raises:
             NotADirectoryError: If this record is not a directory.
         """  # noqa: E501
         result = {}
-        for entry in self.iterdir(dereference, ignore_dos):
-            filenames = entry.filenames(ignore_dos) if dereference else [entry.attribute.file_name]
-            for filename in filenames:
-                result[filename] = entry
+        for entry in self.iterdir(False, ignore_dos):
+            record = entry.try_dereference() if dereference else None
+            result[entry.attribute.file_name] = record if record is not None else entry
 
         return result
