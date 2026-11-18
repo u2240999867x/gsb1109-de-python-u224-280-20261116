@@ -4,6 +4,7 @@
 # License: Apache-2.0
 
 from .consts import MailBoxFolderStatusOptions, MailMessageFlags, SortCriteria
+from .delivery import DeliveryReport, HeaderConflict, HopDelay, ReceivedHop, analyze_delivery, analyze_message
 from .errors import (
     ImapToolsError,
     MailboxAppendError,
@@ -44,5 +45,6 @@ __all__ = [
     'MailboxFolderDeleteError', 'MailboxFolderRenameError', 'MailboxFolderSelectError', 'MailboxFolderStatusError',
     'MailboxFolderStatusValueError', 'MailboxFolderSubscribeError', 'MailboxLoginError', 'MailboxLogoutError',
     'MailboxMoveError', 'MailboxNumbersError', 'MailboxStarttlsError', 'MailboxTaggedResponseError', 'MailboxUidsError',
-    'N', 'NOT', 'O', 'OR', 'SortCriteria', 'U', 'UidRange', 'UnexpectedCommandStatusError', '__version__', 'LazyHeaders'
+    'N', 'NOT', 'O', 'OR', 'SortCriteria', 'U', 'UidRange', 'UnexpectedCommandStatusError', '__version__', 'LazyHeaders',
+    'DeliveryReport', 'HeaderConflict', 'HopDelay', 'ReceivedHop', 'analyze_delivery', 'analyze_message',
 ]
