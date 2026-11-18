@@ -13,6 +13,10 @@ class BrokenMftError(Error):
     pass
 
 
+class DataRunError(Error):
+    pass
+
+
 class FilenameNotAvailableError(Error):
     pass
 

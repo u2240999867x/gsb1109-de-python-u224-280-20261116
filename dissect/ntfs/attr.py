@@ -7,7 +7,7 @@ from dissect.util.stream import RangeStream, RunlistStream
 from dissect.util.ts import wintimestamp
 
 from dissect.ntfs.c_ntfs import ATTRIBUTE_TYPE_CODE, IO_REPARSE_TAG, c_ntfs
-from dissect.ntfs.exceptions import MftNotAvailableError, VolumeNotAvailableError
+from dissect.ntfs.exceptions import DataRunError, MftNotAvailableError, VolumeNotAvailableError
 from dissect.ntfs.util import ensure_volume, get_full_path, segment_reference, ts_to_ns, varint
 
 if TYPE_CHECKING:
@@ -196,6 +196,21 @@ class AttributeHeader:
         Raises:
             TypeError: If attribute is resident.
         """
+        return [(lcn, count) for _, lcn, count in self.dataruns_vcn()]
+
+    def dataruns_vcn(self) -> list[tuple[int, int, int]]:
+        """Return the dataruns of this non-resident attribute with their starting VCN.
+
+        Each entry is a ``(vcn, lcn, cluster_count)`` tuple. ``lcn`` is ``None`` for an explicit sparse
+        run (a mapping pair with an offset length of zero), which is the only evidence on which a run
+        may be zero-filled. Malformed mapping pairs (truncated encoding, invalid field lengths, zero or
+        negative run sizes or negative cluster offsets) raise :class:`DataRunError` instead of being
+        silently treated as sparse data.
+
+        Raises:
+            TypeError: If attribute is resident.
+            DataRunError: If the mapping pair stream is malformed.
+        """
         if self.resident:
             raise TypeError("Resident attributes don't have dataruns")
 
@@ -205,24 +220,52 @@ class AttributeHeader:
 
         runs = []
         run_offset = None
-        run_size = None
         offset = 0
+        vcn = self.lowest_vcn or 0
 
         while True:
-            value = fh.read(1)[0]  # Get the integer value
+            header = fh.read(1)
+            if not header:
+                # The mapping pairs must be terminated by a zero byte before the attribute record ends
+                raise DataRunError("Truncated mapping pairs in non-resident attribute")
+
+            value = header[0]  # Get the integer value
             if value == 0:
                 break
 
             size_len = value & 0xF
             offset_len = (value >> 4) & 0xF
 
-            run_size = varint(fh.read(size_len))
-            if offset_len == 0:  # Sparse run
+            if size_len == 0 or size_len > 8 or offset_len > 8:
+                raise DataRunError(f"Invalid mapping pair field length: size_len={size_len}, offset_len={offset_len}")
+
+            size_buf = fh.read(size_len)
+            if len(size_buf) != size_len:
+                raise DataRunError("Truncated cluster count in mapping pair")
+
+            run_size = varint(size_buf)
+            if run_size <= 0:
+                raise DataRunError(f"Invalid cluster count in mapping pair: {run_size}")
+
+            if offset_len == 0:  # Explicit sparse run, the only evidence allowed to zero-fill
                 run_offset = None
             else:
-                run_offset = offset = offset + varint(fh.read(offset_len))
+                offset_buf = fh.read(offset_len)
+                if len(offset_buf) != offset_len:
+                    raise DataRunError("Truncated cluster offset in mapping pair")
 
-            runs.append((run_offset, run_size))
+                # Negative deltas are legal for fragmented files, but the resolved absolute LCN
+                # can never be negative as there is no cluster at a negative volume offset
+                run_offset = offset = offset + varint(offset_buf)
+                if run_offset < 0:
+                    raise DataRunError(f"Mapping pair resolves to a negative cluster offset: {run_offset}")
+
+            runs.append((vcn, run_offset, run_size))
+            vcn += run_size
+
+        # A zero-length non-resident attribute is allowed to carry only the mapping pairs terminator
+        if not runs and self.size != 0:
+            raise DataRunError("Non-resident attribute with a declared size has no mapping pairs")
 
         return runs
 
