@@ -45,6 +45,7 @@ nav:
     - Writing CDFs: cdfwrite.md
     - Time Conversions: cdfepoch.md
     - dataclasses: dataclasses.md
+    - Dependency Repair: depend_repair.md
     - xarray: xarray.md
   - XArray Tools: xarray.md
   - Changelog: changelog.md

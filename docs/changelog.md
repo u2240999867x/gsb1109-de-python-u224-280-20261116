@@ -1,6 +1,15 @@
 Changelog
 =========
 
+1.3.14
+======
+
+depend_repair
+-------------
+- Added ``cdflib.depend_repair`` for value-aware ``DEPEND_n`` repairs: it plans the cheapest set of attribute changes that makes the whole dependency graph legal, applies only the edits all cheapest plans agree on, reports the rest as candidates, and reports conflicting edges when no plan exists
+- Repairs preserve every observation and non-repair attribute, record the previous target in ``DEPEND_<n>_ORIGINAL``, add ``DEPEND_REPAIR_*`` audit attributes, and write a manifest with per-variable and per-record hashes
+- Added ``python -m cdflib.depend_repair analyze|repair`` and a post-write verification that checks observations, attributes, graph legality and xarray import
+
 1.3.13
 ======
 
