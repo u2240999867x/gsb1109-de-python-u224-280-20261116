@@ -190,6 +190,11 @@ class AttributeHeader:
         """Return the compression unit if non-resident, else None."""
         return self.header.Form.Nonresident.CompressionUnit if not self.resident else None
 
+    @property
+    def valid_data_length(self) -> int | None:
+        """Return the valid data length if non-resident, else None."""
+        return self.header.Form.Nonresident.ValidDataLength if not self.resident else None
+
     def dataruns(self) -> list[tuple[int, int]]:
         """Return the dataruns of this attribute, if non-resident.
 
