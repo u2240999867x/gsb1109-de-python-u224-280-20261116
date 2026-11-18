@@ -11,8 +11,15 @@ Compute image statistics
 """
 
 import argparse
+import json
+import sys
 
-from nibabel.imagestats import count_nonzero_voxels, mask_volume
+from nibabel.imagestats import (
+    count_nonzero_voxels,
+    label_statistics,
+    mask_volume,
+    write_label_statistics,
+)
 from nibabel.loadsave import load
 
 
@@ -34,6 +41,16 @@ def _get_parser():
         choices=('mm3', 'vox'),
         help='Preferred output units',
     )
+    p.add_argument(
+        '--label-table',
+        metavar='PATH',
+        help='CSV or JSON table mapping labels to names and business regions.',
+    )
+    p.add_argument(
+        '--output',
+        metavar='PATH',
+        help='Write label statistics to this CSV or JSON file instead of stdout.',
+    )
     return p
 
 
@@ -42,6 +59,15 @@ def main(args=None):
     parser = _get_parser()
     opts = parser.parse_args(args)
     from_img = load(opts.infile)
+
+    if opts.label_table:
+        statistics = label_statistics(from_img, opts.label_table)
+        if opts.output:
+            write_label_statistics(statistics, opts.output)
+        else:
+            json.dump(statistics.to_dict(), sys.stdout, indent=2)
+            sys.stdout.write('\n')
+        return 0
 
     if opts.Volume:
         if opts.units == 'mm3':
@@ -52,3 +78,4 @@ def main(args=None):
             raise ValueError(f'{opts.units} is not a valid unit. Choose "mm3" or "vox".')
         print(computed_volume)
         return 0
+    return 0

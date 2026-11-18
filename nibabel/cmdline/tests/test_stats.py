@@ -7,7 +7,10 @@
 #
 ### ### ### ### ### ### ### ### ### ### ### ### ### ### ### ### ### ### ### ##
 
+import json
+
 import numpy as np
+import pytest
 
 from nibabel import Nifti1Image
 from nibabel.cmdline.stats import main
@@ -31,3 +34,26 @@ def test_volume(tmpdir, capsys):
 
     assert float(vol_mm3[0]) == 1000.0
     assert int(vol_vox[0]) == 1000
+
+
+def test_label_statistics_cli(tmpdir, capsys):
+    data = np.zeros((4, 4, 4), dtype=np.int16)
+    data[0:2] = 1
+    data[2:3] = 2
+    img = Nifti1Image(data, np.diag([2.0, 3.0, 4.0, 1.0]))
+    infile = tmpdir / 'labels.nii'
+    save(img, infile)
+
+    table = tmpdir / 'labels.csv'
+    table.write_text('label,name,region\n1,left,brain\n2,right,brain\n', encoding='utf-8')
+
+    assert main([str(infile), '--label-table', str(table)]) == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output['regions'][0]['region'] == 'brain'
+    assert output['regions'][0]['voxel_count'] == 48
+    assert output['regions'][0]['volume_mm3'] == pytest.approx(48 * 24.0)
+    assert output['background']['voxel_count'] == 16
+
+    out_path = tmpdir / 'stats.json'
+    assert main([str(infile), '--label-table', str(table), '--output', str(out_path)]) == 0
+    assert json.loads(out_path.read_text(encoding='utf-8')) == output

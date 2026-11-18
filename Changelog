@@ -38,6 +38,13 @@ New features
 * The :class:`~nibabel.nicom.dicomwrappers.FilterMultiOrient` frame filter
   allows extracting a volume of consistent orientation from a DICOM containing
   mixed orienations (pr/1485) (Michael Krause, reviewed by Basile Pinsard and CM)
+* :func:`~nibabel.imagestats.label_statistics` summarizes integer
+  segmentations by source label and business region from a CSV/JSON label
+  table, keeping unknown labels and background separate and computing physical
+  volumes from the affine determinant.  :func:`~nibabel.imagestats.compare_segmentations`
+  compares two versions by region footprint, reports renumbered regions as
+  unchanged and lists voxel transfers without interpolating new categories.
+  The ``nib-stats --label-table`` command exposes the summary from the CLI.
 
 Enhancements
 ------------

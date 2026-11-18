@@ -45,6 +45,7 @@ Image Utilities
    funcs
    imageclasses
    imageglobals
+   imagestats
    loadsave
    orientations
    quaternions
