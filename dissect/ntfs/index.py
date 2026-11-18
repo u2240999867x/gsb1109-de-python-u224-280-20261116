@@ -56,6 +56,21 @@ class Index:
 
         self.index_buffer = lru_cache(128)(self.index_buffer)
 
+    @property
+    def has_allocation(self) -> bool:
+        """Return whether this index has an ``$INDEX_ALLOCATION`` stream."""
+        return self._index_stream is not None
+
+    @property
+    def allocation(self) -> BinaryIO | None:
+        """Return the ``$INDEX_ALLOCATION`` stream, if this index has one."""
+        return self._index_stream
+
+    @property
+    def vcn_size_shift(self) -> int:
+        """Return the shift to convert a VCN to a byte offset in the index allocation."""
+        return self._vcn_size_shift
+
     def __iter__(self) -> Iterator[IndexEntry]:
         return self.entries()
 

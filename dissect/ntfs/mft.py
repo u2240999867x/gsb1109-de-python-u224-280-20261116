@@ -14,6 +14,7 @@ from dissect.ntfs.c_ntfs import (
     FILE_NAME_DOS,
     FILE_NUMBER_MFT,
     FILE_NUMBER_ROOT,
+    FILE_RECORD_SEGMENT_IN_USE,
     IO_REPARSE_TAG,
     c_ntfs,
 )
@@ -31,6 +32,7 @@ from dissect.ntfs.util import AttributeMap, apply_fixup, segment_reference
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
+    from dissect.ntfs.directory import DirectoryCatalog
     from dissect.ntfs.index import IndexEntry
     from dissect.ntfs.ntfs import NTFS
     from dissect.ntfs.util import AttributeCollection
@@ -47,6 +49,9 @@ class Mft:
     def __init__(self, fh: BinaryIO, ntfs: NTFS | None = None):
         self.fh = fh
         self.ntfs = ntfs
+
+        self._all_file_names = None
+        self._allocated_file_names = None
 
         self.get = lru_cache(4096)(self.get)
 
@@ -178,6 +183,53 @@ class Mft:
                 continue
             except EOFError:
                 break
+
+    def children(self, segment: int, allocated_only: bool = False) -> Iterator[tuple[MftRecord, Attribute]]:
+        """Yield all ``$FILE_NAME`` attributes that claim to belong to the given parent directory segment.
+
+        This complements :meth:`MftRecord.iterdir`, which only reads the directory index. Scanning the MFT for
+        ``$FILE_NAME`` attributes finds entries that are present in a record but absent from the index.
+
+        Args:
+            segment: The parent directory segment number to look for.
+            allocated_only: Only consider attributes in allocated MFT records.
+        """
+        for owner, attribute in self._file_names(allocated_only):
+            try:
+                parent = segment_reference(attribute.attr.ParentDirectory)
+            except Exception:  # noqa: BLE001
+                continue
+
+            if parent == segment:
+                yield owner, attribute
+
+    def _file_names(self, allocated_only: bool) -> list[tuple[MftRecord, Attribute]]:
+        if allocated_only:
+            if self._allocated_file_names is None:
+                self._allocated_file_names = self._scan_file_names(allocated_only=True)
+            return self._allocated_file_names
+
+        if self._all_file_names is None:
+            self._all_file_names = self._scan_file_names(allocated_only=False)
+        return self._all_file_names
+
+    def _scan_file_names(self, allocated_only: bool) -> list[tuple[MftRecord, Attribute]]:
+        result = []
+
+        for record in self.segments():
+            if allocated_only and not record.header.Flags & FILE_RECORD_SEGMENT_IN_USE:
+                continue
+
+            try:
+                attributes = record.attributes[ATTRIBUTE_TYPE_CODE.FILE_NAME]
+            except Exception:  # noqa: BLE001
+                continue
+
+            for attribute in attributes:
+                if attribute.attribute is not None:
+                    result.append((record, attribute))
+
+        return result
 
 
 class MftRecord:
@@ -506,6 +558,33 @@ class MftRecord:
             name: The index name to open. For example, ``"$I30"``.
         """
         return Index(self, name)
+
+    def catalog(self, ignore_dos: bool = False, allocated_only: bool = False) -> DirectoryCatalog:
+        """Reconcile this directory's index with the ``$FILE_NAME`` attributes in the MFT.
+
+        Unlike :meth:`iterdir` and :meth:`listdir`, this reads both the directory index and the ``$FILE_NAME``
+        attributes of all MFT records. Every path keeps track of whether the index, the attributes, or both support
+        it, and disagreements are reported separately instead of one source overwriting the other.
+
+        Args:
+            ignore_dos: Ignore DOS file name entries.
+            allocated_only: Only consider ``$FILE_NAME`` attributes of allocated MFT records. By default all
+                records are included, so paths that only exist as a stale attribute (e.g. deleted files) are
+                still reported.
+
+        Raises:
+            NotADirectoryError: If this record is not a directory.
+            MftNotAvailableError: If no MFT is available.
+        """
+        if not self.is_dir():
+            raise NotADirectoryError(f"{self!r} is not a directory")
+
+        if not self.ntfs or not self.ntfs.mft:
+            raise MftNotAvailableError
+
+        from dissect.ntfs.directory import catalog
+
+        return catalog(self, ignore_dos, allocated_only)
 
     def iterdir(self, dereference: bool = False, ignore_dos: bool = False) -> Iterator[IndexEntry | MftRecord]:
         """Yield directory entries of this record.
