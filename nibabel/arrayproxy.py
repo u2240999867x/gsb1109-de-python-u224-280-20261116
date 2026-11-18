@@ -37,6 +37,7 @@ import numpy as np
 
 from . import _compression, openers
 from .fileslice import canonical_slicers, fileslice
+from .openers import FileVersion, FileVersionError, file_version
 from .volumeutils import apply_read_scaling, array_from_file
 
 """This flag controls whether a new file handle is created every time an image
@@ -114,6 +115,13 @@ class ArrayProxy(ArrayLike):
 
     This implementation allows us to deal with Analyze and its variants,
     including Nifti1, and with the MGH format.
+
+    The proxy fingerprints the file version at creation, and checks each
+    data read against that fingerprint.  If the file is replaced or
+    modified after the proxy was created, reads raise
+    :class:`~nibabel.openers.FileVersionError` rather than silently
+    returning data that does not belong to the same file version as the
+    header the proxy was created from.  See :meth:`check_file_version`.
 
     Other image types might need more specific classes to implement the API.
     See :mod:`nibabel.minc1`, :mod:`nibabel.ecat` and :mod:`nibabel.parrec` for
@@ -212,6 +220,11 @@ class ArrayProxy(ArrayLike):
         # Flags to keep track of whether a single ImageOpener is created, and
         # whether a single underlying file handle is created.
         self._keep_file_open, self._persist_opener = self._should_keep_file_open(keep_file_open)
+        # Fingerprint of the file version this proxy was created from.  The
+        # header / spec values above were read from this version; data reads
+        # are checked against it so that a file replaced or modified in the
+        # meantime cannot silently mix versions.
+        self._file_version = file_version(file_like)
         self._lock = RLock()
 
     def _has_fh(self) -> bool:
@@ -252,6 +265,9 @@ class ArrayProxy(ArrayLike):
     def __setstate__(self, state):
         """Sets the state of this ``ArrayProxy`` during unpickling."""
         self.__dict__.update(state)
+        # State pickled before file version tracking was added
+        if '_file_version' not in state:
+            self._file_version = file_version(self.file_like)
         self._lock = RLock()
 
     def _should_keep_file_open(self, keep_file_open):
@@ -363,12 +379,83 @@ class ArrayProxy(ArrayLike):
     def is_proxy(self):
         return True
 
+    @property
+    def file_version(self) -> FileVersion | None:
+        """Fingerprint of the file version this proxy was created from
+
+        The shape, dtype, offset and scaling of this proxy were read from
+        this version of the file.  None if no fingerprint could be
+        determined (for example for in-memory file objects).
+        """
+        return self._file_version
+
+    def check_file_version(self) -> bool | None:
+        """Check the file still is the version this proxy was created from
+
+        Returns
+        -------
+        bool or None
+            True if the file backing this proxy is the same version as
+            when the proxy was created, so data read through this proxy
+            belongs to the same file version as the header / spec the
+            proxy was created with.  None if the file version cannot be
+            determined.
+
+        Raises
+        ------
+        FileVersionError
+            If the file has detectably been replaced or modified since
+            this proxy was created.
+        """
+        if self._file_version is None:
+            return None
+        current = self._current_file_version()
+        if current is None:
+            return None
+        self._raise_if_mismatch(current)
+        return True
+
+    def _current_file_version(self) -> FileVersion | None:
+        """Fingerprint of the file as it is now, or None if undeterminable"""
+        # Prefer the persistent handle if we have one: it identifies the
+        # file this proxy will actually read, even if the path it was
+        # opened from has since been replaced.
+        opener = getattr(self, '_opener', None)
+        if opener is not None and not opener.closed:
+            version = opener.file_version()
+            if version is not None:
+                return version
+        return file_version(self.file_like)
+
+    def _raise_if_mismatch(self, current: FileVersion) -> None:
+        if not self._file_version.matches(current):
+            raise FileVersionError(
+                f'File {self.file_like!r} has been replaced or modified since '
+                'this proxy was created; refusing to mix data from the new '
+                'file version with the header of the old version '
+                f'(was {self._file_version}, now {current})'
+            )
+
+    def _check_file_version(self, opener) -> None:
+        """Raise ``FileVersionError`` if `opener` reads the wrong file version"""
+        if self._file_version is None:
+            return
+        current = opener.file_version()
+        if current is None:
+            return
+        self._raise_if_mismatch(current)
+
     @contextmanager
     def _get_fileobj(self):
         """Create and return a new ``ImageOpener``, or return an existing one.
 
         The specific behaviour depends on the value of the ``keep_file_open``
         flag that was passed to ``__init__``.
+
+        A persistent opener is reused only while it still refers to the file
+        version this proxy was created from; a fresh opener is checked
+        against that version, raising ``FileVersionError`` if the file has
+        been replaced or modified in the meantime.
 
         Yields
         ------
@@ -379,9 +466,11 @@ class ArrayProxy(ArrayLike):
         if self._persist_opener:
             if not hasattr(self, '_opener'):
                 self._opener = openers.ImageOpener(self.file_like, keep_open=self._keep_file_open)
+            self._check_file_version(self._opener)
             yield self._opener
         else:
             with openers.ImageOpener(self.file_like, keep_open=False) as opener:
+                self._check_file_version(opener)
                 yield opener
 
     def _get_unscaled(self, slicer):

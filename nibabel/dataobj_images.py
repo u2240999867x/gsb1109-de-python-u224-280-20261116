@@ -17,6 +17,7 @@ import numpy as np
 from .arrayproxy import get_obj_dtype
 from .deprecated import deprecate_with_version
 from .filebasedimages import FileBasedHeader, FileBasedImage
+from .openers import FileVersionError
 
 if ty.TYPE_CHECKING:
     import numpy.typing as npt
@@ -422,6 +423,36 @@ class DataobjImage(FileBasedImage):
         """
         self._fdata_cache = None
         self._data_cache = None
+
+    def cache_matches_file(self) -> bool | None:
+        """Whether cached array data corresponds to the current file version
+
+        A proxy image caches the data it reads from file (see
+        ``get_fdata``).  If the file is replaced or modified after the
+        cache was filled, the cache still holds the previous file
+        version's data; it is data of the *old* file, and must not be
+        mistaken for the contents of the file now at that path.
+
+        Returns
+        -------
+        bool or None
+            True if nothing is cached, if the image is an array image, or
+            if the cache was filled from the same file version that backs
+            the image now.  False if the file has been replaced or
+            modified since the cache was filled.  None if the file version
+            cannot be determined.
+        """
+        if self._data_cache is None and self._fdata_cache is None:
+            return True
+        checker = getattr(self._dataobj, 'check_file_version', None)
+        if checker is None:
+            # Array image, or proxy without version information: the cache
+            # cannot be contradicted by the file.
+            return True
+        try:
+            return checker()
+        except FileVersionError:
+            return False
 
     @property
     def shape(self) -> tuple[int, ...]:

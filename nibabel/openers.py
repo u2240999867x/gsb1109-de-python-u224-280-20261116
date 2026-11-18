@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import io
+import os
 import typing as ty
 from bz2 import BZ2File
 from os.path import splitext
@@ -28,6 +29,77 @@ if ty.TYPE_CHECKING:
     from ._typing import Self
 
     OpenerDef = tuple[ty.Callable[..., io.IOBase], tuple[str, ...]]
+
+
+class FileVersionError(RuntimeError):
+    """The file on disk is not the version that was read earlier
+
+    Raised when a file has been replaced or modified between reading one
+    part of it (for example an image header) and reading another (for
+    example the image data array), so the two reads cannot be guaranteed
+    to belong to the same version of the file.
+    """
+
+
+class FileVersion(ty.NamedTuple):
+    """Fingerprint identifying a particular version of a file
+
+    Two fingerprints taken of the same file compare equal only if the file
+    has not been replaced (same device and inode) or modified (same size
+    and modification time) between the two observations.
+    """
+
+    dev: int
+    ino: int
+    size: int
+    mtime_ns: int
+
+    @classmethod
+    def from_stat(cls, st: os.stat_result) -> FileVersion:
+        return cls(st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+
+    def matches(self, other: FileVersion) -> bool:
+        """True if `other` is a fingerprint of the same file version"""
+        if self.ino and other.ino:
+            # Some filesystems report a zero inode; only compare inodes
+            # when both observations have a usable one.
+            return self == other
+        return (self.size, self.mtime_ns) == (other.size, other.mtime_ns)
+
+
+def _fstat_fobj(fobj: ty.Any) -> os.stat_result | None:
+    """Stat an open file object, or return None if not possible"""
+    try:
+        return os.fstat(fobj.fileno())
+    except (AttributeError, OSError, io.UnsupportedOperation):
+        return None
+
+
+def file_version(fileish: str | os.PathLike | io.IOBase) -> FileVersion | None:
+    """Return version fingerprint for a path or open file object
+
+    Parameters
+    ----------
+    fileish : str or path-like or file-like
+        File to fingerprint.  Open file objects are fingerprinted with
+        ``os.fstat`` on their file descriptor, so the fingerprint refers
+        to the file the handle actually reads, even if the path it was
+        opened from has since been replaced.
+
+    Returns
+    -------
+    file_version : FileVersion or None
+        Fingerprint of the file, or None if no fingerprint can be
+        determined (for example for in-memory file objects, or paths that
+        cannot be stat'ed).
+    """
+    if isinstance(fileish, (str, os.PathLike)):
+        try:
+            return FileVersion.from_stat(os.stat(fileish))
+        except OSError:
+            return None
+    st = _fstat_fobj(fileish)
+    return None if st is None else FileVersion.from_stat(st)
 
 
 @ty.runtime_checkable
@@ -146,6 +218,22 @@ class Opener:
 
     def fileno(self) -> int:
         return self.fobj.fileno()
+
+    def file_version(self) -> FileVersion | None:
+        """Return version fingerprint of the underlying file
+
+        Prefers ``os.fstat`` on the open file handle, so the fingerprint
+        refers to the file this opener actually reads, even if the path it
+        was opened from has since been replaced.  Falls back to stat'ing
+        the path for handles without a file descriptor.  Returns None if
+        no fingerprint can be determined.
+        """
+        st = _fstat_fobj(self.fobj)
+        if st is not None:
+            return FileVersion.from_stat(st)
+        if self._name is not None:
+            return file_version(self._name)
+        return None
 
     def read(self, size: int = -1, /) -> bytes:
         return self.fobj.read(size)
