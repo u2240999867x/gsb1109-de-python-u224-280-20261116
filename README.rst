@@ -283,6 +283,46 @@ or with ``pytest``:
 .. Note::
     Test coverage is not complete, pull requests are welcome to help improve coverage.
 
+Offline Testing with an In-Memory CIP Peer
+-------------------------------------------
+
+``pycomm3.testing.cip_peer`` is a reusable, fully in-memory CIP target for
+regression tests that must not connect to a real device.  Scenarios declare
+session registration, connection open/close, reads, fragmented reads and
+disconnect events; responses are synthesized from each request's decoded
+identity (service, path, tag, element count, fragment offset, session and
+connection ID) instead of being replayed by arrival order.
+
+.. code-block:: python
+
+    from pycomm3 import LogixDriver
+    from pycomm3.testing.cip_peer import (
+        CIPPeer, Scenario, RegisterSession, ForwardOpen, ForwardClose,
+        Read, Reply, dint,
+    )
+
+    peer = CIPPeer(Scenario([
+        RegisterSession(),
+        ForwardOpen(reply=Reply.forward_open(connection_id=0x22)),
+        Read(tag="MyTag", elements=1, reply=Reply.read(dint(42))),
+        ForwardClose(),
+    ]))
+    plc = LogixDriver("192.168.1.10", init_tags=False, init_program_tags=False)
+    plc._sock = peer.socket()
+    plc.open()
+    plc._tags = {"MyTag": {...}}  # tag definition uploaded separately
+    assert plc.read("MyTag").value == 42
+    plc.close()
+    peer.assert_complete()
+
+Independent reads may be declared with ``independent=True`` and are matched by
+identity, so reordered or multi-service reads still receive the value declared
+for that tag.  Stale sessions and stale connection IDs are answered with an
+error and recorded in ``peer.rejections``; they never consume a scenario step.
+If a request does not match, ``ScenarioMismatch`` reports the first divergence,
+the consumed step range and the remaining steps, and the peer stops replying
+instead of blindly sending later fixed responses.
+
 
 License
 =======

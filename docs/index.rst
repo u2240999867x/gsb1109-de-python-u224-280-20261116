@@ -16,5 +16,6 @@ Contents
     examples/index
     api_reference/index
     cip_reference
+    testing
     contributing
     releases
