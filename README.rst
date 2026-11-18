@@ -140,6 +140,41 @@ MailMessage and MailAttachment public attributes are cached by functools.cached_
         # imap_tools.EmailAddress example:
         # EmailAddress(name='Ya', email='im@ya.ru')  # has "full" property = 'Ya <im@ya.ru>'
 
+🗂️ Inner messages of summary emails
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+A customer-service archive may receive a summary email that bundles several original messages.
+``inner_messages`` indexes each encapsulated message separately while the outer delivery message
+stays available as-is. It supports ``message/rfc822`` parts, ``multipart/digest`` parts and plain
+text summaries delimited by a caller-provided separator.
+
+.. code-block:: python
+
+    from imap_tools import MailMessage, parse_text_summary
+
+    for msg in mailbox.fetch():
+        # separator is optional; pass it to also split plain text summary parts
+        for inner in msg.inner_messages(text_separator='----- FORWARD -----'):
+            inner.index             # int: zero-based occurrence position across the summary
+            inner.origin            # str: 'message/rfc822' or 'text/plain'
+            inner.message           # email.message.Message: the standalone inner message
+            inner.message['From']   # None when the inner message has no From header
+            inner.message['Date']   # None when the inner message has no Date header
+
+Rules:
+
+* Inner messages keep their own headers only; missing inner From/Date stay missing and are never
+  inherited from the outer message.
+* The separator splits only when it forms a whole line, so the same text inside a quoted body
+  never cuts a message.
+* Two inner messages sharing a Message-ID stay as two independent occurrences (see ``index``).
+* A segment that cannot be parsed as a complete message is skipped without dropping the segments
+  after it, so a malformed part never swallows the rest of the summary.
+* The outer message is not modified and remains the original delivery record.
+
+``parse_text_summary`` parses a standalone plain text summary string (or bytes) without a full
+outer message, and ``parse_inner_messages`` accepts any ``email.message.Message``.
+
 🔍 Search criteria
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 

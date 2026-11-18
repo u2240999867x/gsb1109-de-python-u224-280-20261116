@@ -4,6 +4,7 @@
 # License: Apache-2.0
 
 from .consts import MailBoxFolderStatusOptions, MailMessageFlags, SortCriteria
+from .digest import InnerMessage, parse_inner_messages, parse_text_summary
 from .errors import (
     ImapToolsError,
     MailboxAppendError,
@@ -37,12 +38,14 @@ from .utils import EmailAddress
 __version__ = '1.16.0'
 
 __all__ = [
-    'A', 'AND', 'BaseMailBox', 'EmailAddress', 'FolderInfo', 'H', 'Header', 'ImapToolsError', 'MailAttachment',
+    'A', 'AND', 'BaseMailBox', 'EmailAddress', 'FolderInfo', 'H', 'Header', 'ImapToolsError', 'InnerMessage',
+    'MailAttachment',
     'MailBox', 'MailBoxFolderManager', 'MailBoxFolderStatusOptions', 'MailBoxStartTls', 'MailBoxUnencrypted',
     'MailMessage', 'MailMessageFlags', 'MailboxAppendError', 'MailboxCopyError', 'MailboxDeleteError',
     'MailboxExpungeError', 'MailboxFetchError', 'MailboxFlagError', 'MailboxFolderCreateError',
     'MailboxFolderDeleteError', 'MailboxFolderRenameError', 'MailboxFolderSelectError', 'MailboxFolderStatusError',
     'MailboxFolderStatusValueError', 'MailboxFolderSubscribeError', 'MailboxLoginError', 'MailboxLogoutError',
     'MailboxMoveError', 'MailboxNumbersError', 'MailboxStarttlsError', 'MailboxTaggedResponseError', 'MailboxUidsError',
-    'N', 'NOT', 'O', 'OR', 'SortCriteria', 'U', 'UidRange', 'UnexpectedCommandStatusError', '__version__', 'LazyHeaders'
+    'N', 'NOT', 'O', 'OR', 'SortCriteria', 'U', 'UidRange', 'UnexpectedCommandStatusError', '__version__',
+    'LazyHeaders', 'parse_inner_messages', 'parse_text_summary',
 ]

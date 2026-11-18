@@ -8,9 +8,10 @@ from email.header import decode_header
 from email.message import Message, _parseparam  # noqa
 from functools import cached_property
 from itertools import chain
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Union
 
 from .consts import CODECS_OFFICIAL_REPLACEMENT_CHAR, UID_PATTERN
+from .digest import InnerMessage, parse_inner_messages
 from .utils import EmailAddress, decode_value, parse_email_addresses, parse_email_date, replace_html_ct_charset
 
 
@@ -263,6 +264,20 @@ class MailMessage:
                 continue
             results.append(MailAttachment(part))
         return results
+
+    def inner_messages(self, text_separator: Optional[Union[str, bytes]] = None) -> List[InnerMessage]:
+        """
+        Inner messages of a summary/digest email, in occurrence order.
+
+        Indexes messages encapsulated by message/rfc822 and multipart/digest
+        parts, plus plain text chunks delimited by ``text_separator`` when it
+        is given (the separator must form a whole line, so quoted occurrences
+        never split a message). The outer message is left untouched. Inner
+        messages missing From or Date keep them missing instead of inheriting
+        the outer values; duplicate Message-ID messages stay independent, and
+        unparseable segments are skipped without losing the rest.
+        """
+        return parse_inner_messages(self.obj, text_separator)
 
 
 class MailAttachment:
