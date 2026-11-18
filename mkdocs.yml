@@ -43,6 +43,7 @@ nav:
   - Tools:
     - Reading CDFs: cdfread.md
     - Writing CDFs: cdfwrite.md
+    - Variable Naming: naming.md
     - Time Conversions: cdfepoch.md
     - dataclasses: dataclasses.md
     - xarray: xarray.md

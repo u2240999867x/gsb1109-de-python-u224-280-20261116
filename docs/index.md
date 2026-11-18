@@ -22,5 +22,6 @@ The only module you need to install is `numpy`, but there are a few things you c
 
 - Ability to read variables and attributes from CDF files (see [CDF Reading](cdfread.md))
 - Writes CDF version 3 files (see [CDF Writing](cdfwrite.md))
+- Builds collision-free variable name plans that preserve original names and `DEPEND_n` references (see [Variable Naming](naming.md))
 - Can convert between CDF time types (EPOCH/EPOCH16/TT2000) to other common time formats (see [`CDF Time Conversions`](cdfepoch.md))
 - Can convert CDF files into XArray Dataset objects and vice versa, attempting to maintain ISTP compliance (see [`Working with XArray`](xarray.md))

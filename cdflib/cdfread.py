@@ -1,10 +1,12 @@
 import hashlib
 import io
+import json
 import os
 import struct
 import sys
 import tempfile
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -23,10 +25,29 @@ from cdflib.dataclasses import (
     GDRInfo,
     VDRInfo,
 )
+from cdflib.naming import NamePlan, VariableIdentity, VariableNameConflict, build_name_plan
 from cdflib.s3 import S3object
 from cdflib.utils import _squeeze_or_scalar
 
 __all__ = ["CDF"]
+
+
+@dataclass
+class _VariableRef:
+    """Internal locator for one source variable.
+
+    ``ordinal`` is the index within its CDF domain and is used only to read the
+    right VDR, never to choose between ambiguous name references.
+    """
+
+    identity: VariableIdentity
+    position: int
+    ordinal: int
+    domain: str
+
+    @property
+    def is_zvariable(self) -> bool:
+        return self.domain == "zvariable"
 
 
 class CDF:
@@ -190,6 +211,194 @@ class CDF:
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         return
 
+    def _variable_index(self) -> List[_VariableRef]:
+        """Return one locator per source variable, in CDF storage order.
+
+        The result is cached because every name lookup consults it.  Physical
+        order is recorded only for reading; identity is ``(raw name, domain)``.
+        """
+
+        cached = getattr(self, "_variable_index_cache", None)
+        if cached is not None:
+            return cached
+
+        refs: List[_VariableRef] = []
+        if self._num_zvariable > 0:
+            position = self._first_zvariable
+            for ordinal in range(self._num_zvariable):
+                name, next_vdr = self._read_vdr_fast(position)
+                refs.append(_VariableRef(VariableIdentity(name, "zvariable", ordinal), position, ordinal, "zvariable"))
+                position = next_vdr
+        if self._num_rvariable > 0:
+            position = self._first_rvariable
+            for ordinal in range(self._num_rvariable):
+                name, next_vdr = self._read_vdr_fast(position)
+                refs.append(_VariableRef(VariableIdentity(name, "rvariable", ordinal), position, ordinal, "rvariable"))
+                position = next_vdr
+
+        self._variable_index_cache = refs
+        return refs
+
+    def _resolve_variable(self, variable: str, domain: Optional[str] = None) -> _VariableRef:
+        """Resolve a variable name to exactly one source variable.
+
+        Exact matches always win.  A match that relies on the legacy
+        case/edge-space folding is accepted only when it is unique; otherwise a
+        :class:`VariableNameConflict` is raised instead of silently picking the
+        first variable in file order.
+        """
+
+        if not isinstance(variable, str):
+            raise TypeError("variable name must be a string")
+
+        refs = self._variable_index()
+        candidates = refs
+        if domain is not None:
+            wanted = VariableIdentity("", domain).domain
+            candidates = [ref for ref in refs if ref.domain == wanted]
+
+        exact = [ref for ref in candidates if ref.identity.name == variable]
+        if len(exact) == 1:
+            return exact[0]
+        if len(exact) > 1:
+            raise VariableNameConflict(
+                f"Variable name {variable!r} occurs more than once; specify its domain.",
+                [ref.identity.name for ref in exact],
+            )
+
+        folded = variable.strip().casefold()
+        matches = [ref for ref in candidates if ref.identity.folded == folded]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise VariableNameConflict(
+                f"Variable name {variable!r} is ambiguous after case/edge-space folding; "
+                "specify the exact name or its r/zVariable domain.",
+                [repr(ref.identity.name) for ref in matches],
+            )
+        raise ValueError(f"Variable name '{variable}' not found.")
+
+    def variable_identities(self) -> List[VariableIdentity]:
+        """Return the stable identity of every variable in the file.
+
+        Names include their original case and edge whitespace, and each entry
+        records whether it is an rVariable or zVariable.
+        """
+
+        return [ref.identity for ref in self._variable_index()]
+
+    def variable_name_map(
+        self,
+        *,
+        reserved: Any = (),
+        is_legal: Optional[Any] = None,
+        max_length: int = 256,
+    ) -> Any:
+        """Build a collision-free target-name plan for this file.
+
+        The returned :class:`cdflib.naming.NamePlan` maps each original
+        variable identity to a distinct target name and migrates every
+        DEPEND_n reference through the same resolution rules.  References that
+        cannot be resolved uniquely remain marked as conflicts.
+
+        If the file was written with a plan, that persisted map is returned
+        instead so target names continue to bind to their original identities.
+        """
+
+        stored = self.stored_name_plan()
+        if stored is not None:
+            return stored
+
+        identities = self.variable_identities()
+        depends: Dict[VariableIdentity, Dict[int, str]] = {}
+        for identity in identities:
+            attributes = self.varattsget(identity.name, domain=identity.domain)
+            references: Dict[int, str] = {}
+            for attribute, value in attributes.items():
+                if not isinstance(attribute, str):
+                    continue
+                match = attribute.upper()
+                if match.startswith("DEPEND_") and match[7:].isdigit():
+                    if isinstance(value, str):
+                        references[int(match[7:])] = value
+            if references:
+                depends[identity] = references
+        return build_name_plan(identities, depends=depends, reserved=reserved, is_legal=is_legal, max_length=max_length)
+
+    def stored_name_map(self) -> Optional[Dict[str, Any]]:
+        """Return the identity map persisted by :class:`cdflib.cdfwrite.CDF`.
+
+        ``None`` is returned for files written without a name plan.
+        """
+
+        try:
+            entry = self.attget("CDFLIB_NAME_MAP", 0)
+        except (KeyError, ValueError):
+            return None
+        if entry is None or not isinstance(entry.Data, str):
+            return None
+        try:
+            payload = json.loads(entry.Data)
+        except ValueError:
+            return None
+        return payload
+
+    def stored_name_plan(self) -> Optional[NamePlan]:
+        """Return a :class:`NamePlan` reconstructed from stored metadata."""
+
+        payload = self.stored_name_map()
+        if payload is None:
+            return None
+        try:
+            return NamePlan.from_dict({"variables": payload.get("variables", [])})
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def restored_variable_name(self, target: str, domain: Optional[str] = None) -> Optional[str]:
+        """Return the original spelling of a persisted target name."""
+
+        payload = self.stored_name_map()
+        if payload is None:
+            return None
+        for entry in payload.get("variables", []):
+            if entry.get("target") != target:
+                continue
+            entry_domain = VariableIdentity("", entry.get("domain", "zvariable")).domain
+            if domain is None or entry_domain == VariableIdentity("", domain).domain:
+                return str(entry.get("original"))
+        return None
+
+    def varget_original(self, original: str, domain: Optional[str] = None, **kwargs: Any) -> Union[str, np.ndarray]:
+        """Fetch a variable by its pre-rename name.
+
+        If the file was written with a name plan, the original name is mapped
+        to its target before reading.  Files without a stored map are read
+        directly, so this method is also usable on ordinary CDFs.
+        """
+
+        payload = self.stored_name_map()
+        if payload is not None:
+            for entry in payload.get("variables", []):
+                if entry.get("original") != original:
+                    continue
+                entry_domain = VariableIdentity("", entry.get("domain", "zvariable")).domain
+                if domain is None or entry_domain == VariableIdentity("", domain).domain:
+                    return self.varget(str(entry.get("target")), domain=entry_domain, **kwargs)
+        return self.varget(original, domain=domain, **kwargs)
+
+    def varattsget_original(self, original: str, domain: Optional[str] = None) -> Dict[str, Any]:
+        """Fetch variable attributes by the pre-rename name."""
+
+        payload = self.stored_name_map()
+        if payload is not None:
+            for entry in payload.get("variables", []):
+                if entry.get("original") != original:
+                    continue
+                entry_domain = VariableIdentity("", entry.get("domain", "zvariable")).domain
+                if domain is None or entry_domain == VariableIdentity("", domain).domain:
+                    return self.varattsget(str(entry.get("target")), domain=entry_domain)
+        return self.varattsget(original, domain=domain)
+
     def cdf_info(self) -> CDFInfo:
         """
         Returns basic CDF information.
@@ -276,7 +485,9 @@ class CDF:
         else:
             raise ValueError("attribute keyword must be a string or integer")
 
-    def attget(self, attribute: Union[str, int], entry: Optional[Union[str, int]] = None) -> AttData:
+    def attget(
+        self, attribute: Union[str, int], entry: Optional[Union[str, int]] = None, domain: Optional[str] = None
+    ) -> AttData:
         """
         Returns the value of the attribute at the entry number provided.
 
@@ -288,6 +499,9 @@ class CDF:
         attribute : str, int
             Attribute name or number to get.
         entry : int, optional
+        domain : str, optional
+            ``"rVariable"`` or ``"zVariable"`` when the same name exists in
+            both domains.
 
         Returns
         -------
@@ -341,26 +555,9 @@ class CDF:
             var_num = -1
             zvar = False
             if isinstance(entry, str):
-                # a zVariable?
-                positionx = self._first_zvariable
-                for x in range(0, self._num_zvariable):
-                    name, vdr_next = self._read_vdr_fast(positionx)
-                    if name.strip().lower() == entry.strip().lower():
-                        var_num = x
-                        zvar = True
-                        break
-                    positionx = vdr_next
-                if var_num == -1:
-                    # a rVariable?
-                    positionx = self._first_rvariable
-                    for x in range(0, self._num_rvariable):
-                        name, vdr_next = self._read_vdr_fast(positionx)
-                        if name.strip().lower() == entry.strip().lower():
-                            var_num = x
-                            break
-                        positionx = vdr_next
-                if var_num == -1:
-                    raise ValueError(f"No variable by this name: {entry}")
+                reference = self._resolve_variable(entry, domain)
+                var_num = reference.ordinal
+                zvar = reference.is_zvariable
                 entry_num = var_num
             else:
                 if self._num_zvariable > 0 and self._num_rvariable > 0:
@@ -388,6 +585,7 @@ class CDF:
         endtime: Optional[epoch.epoch_types] = None,
         startrec: int = 0,
         endrec: Optional[int] = None,
+        domain: Optional[str] = None,
     ) -> Union[str, np.ndarray]:
         """
         Returns the variable data.
@@ -401,6 +599,9 @@ class CDF:
         endrec : int
             Index of the last record to get. All records from *startrec* to
             *endrec* inclusive are fetched.
+        domain : str, optional
+            ``"rVariable"`` or ``"zVariable"``, used to disambiguate a name
+            that occurs in both CDF variable domains.
 
         Notes
         -----
@@ -439,7 +640,7 @@ class CDF:
         if (starttime is not None or endtime is not None) and (startrec != 0 or endrec is not None):
             raise ValueError("Can't specify both time and record range")
 
-        vdr_info = self.vdr_info(variable)
+        vdr_info = self.vdr_info(variable, domain=domain)
         if vdr_info.max_rec < 0:
             # No records have been written (all records are virtual), so return an empty array
             dimensions = [size for size, vary in zip(vdr_info.dim_sizes, vdr_info.dim_vary) if vary]
@@ -454,26 +655,13 @@ class CDF:
             endrec=endrec,
         )
 
-    def vdr_info(self, variable: Union[str, int]) -> VDR:
+    def vdr_info(self, variable: Union[str, int], domain: Optional[str] = None) -> VDR:
         if isinstance(variable, int) and self._num_zvariable > 0 and self._num_rvariable > 0:
             raise ValueError("This CDF has both r and z variables. " "Use variable name instead")
 
         if isinstance(variable, str):
-            # Check z variables for the name, then r variables
-            position = self._first_zvariable
-            num_variables = self._num_zvariable
-            vdr_info = None
-            for zVar in [1, 0]:
-                for _ in range(0, num_variables):
-                    name, vdr_next = self._read_vdr_fast(position)
-                    if name.strip().lower() == variable.strip().lower():
-                        vdr_info = self._read_vdr(position)
-                        break
-                    position = vdr_next
-                position = self._first_rvariable
-                num_variables = self._num_rvariable
-            if vdr_info is None:
-                raise ValueError(f"Variable name '{variable}' not found.")
+            entry = self._resolve_variable(variable, domain)
+            vdr_info = self._read_vdr(entry.position)
         elif isinstance(variable, int):
             if self._num_zvariable > 0:
                 position = self._first_zvariable
@@ -530,7 +718,7 @@ class CDF:
 
         return return_dict
 
-    def varattsget(self, variable: Union[str, int]) -> Dict[str, Union[None, str, np.ndarray]]:
+    def varattsget(self, variable: Union[str, int], domain: Optional[str] = None) -> Dict[str, Union[None, str, np.ndarray]]:
         """
         Gets all variable attributes.
 
@@ -542,18 +730,9 @@ class CDF:
         if isinstance(variable, int) and self._num_zvariable > 0 and self._num_rvariable > 0:
             raise ValueError("This CDF has both r and z variables. Use variable name")
         if isinstance(variable, str):
-            position = self._first_zvariable
-            num_variables = self._num_zvariable
-            for zVar in [True, False]:
-                for _ in range(0, num_variables):
-                    name, vdr_next = self._read_vdr_fast(position)
-                    if name.strip().lower() == variable.strip().lower():
-                        vdr_info = self._read_vdr(position)
-                        return self._read_varatts(vdr_info.variable_number, zVar)
-                    position = vdr_next
-                position = self._first_rvariable
-                num_variables = self._num_rvariable
-            raise ValueError(f"No variable by this name: {variable}")
+            reference = self._resolve_variable(variable, domain)
+            vdr_info = self._read_vdr(reference.position)
+            return self._read_varatts(vdr_info.variable_number, reference.is_zvariable)
         elif isinstance(variable, int):
             if self._num_zvariable > 0:
                 num_variable = self._num_zvariable
@@ -1863,12 +2042,13 @@ class CDF:
             if vdr_info.Data_Type == 31 or vdr_info.Data_Type == 32 or vdr_info.Data_Type == 33:
                 epochtimes = self.varget(epoch)
         else:
-            vdr_info = self.varinq(var_name)
+            current = self._resolve_variable(var_name)
+            vdr_info = self.varinq(var_name, domain=current.domain)
             if vdr_info.Data_Type == 31 or vdr_info.Data_Type == 32 or vdr_info.Data_Type == 33:
-                epochtimes = self.varget(var_name)
+                epochtimes = self.varget(var_name, domain=current.domain)
             else:
                 # acquire depend_0 variable
-                dependVar = self.attget("DEPEND_0", var_name)
+                dependVar = self.attget("DEPEND_0", var_name, domain=current.domain)
                 if dependVar is None:
                     raise ValueError(
                         "No corresponding epoch from 'DEPEND_0' attribute "
@@ -1879,14 +2059,16 @@ class CDF:
                 if not isinstance(dependVar.Data, str):
                     raise ValueError()
 
-                vdr_info = self.varinq(dependVar.Data)
+                depend_ref = self._resolve_variable(dependVar.Data)
+                depend_name = depend_ref.identity.name
+                vdr_info = self.varinq(depend_name, domain=depend_ref.domain)
                 if vdr_info.Data_Type != 31 and vdr_info.Data_Type != 32 and vdr_info.Data_Type != 33:
                     raise ValueError(
                         "Corresponding variable from 'DEPEND_0' attribute "
                         "for variable: {}".format(var_name) + " is not a CDF epoch type"
                     )
 
-                epochtimes = self.varget(dependVar.Data)
+                epochtimes = self.varget(depend_name, domain=depend_ref.domain)
 
         return self._findrangerecords(vdr_info.Data_Type, epochtimes, starttime, endtime)
 

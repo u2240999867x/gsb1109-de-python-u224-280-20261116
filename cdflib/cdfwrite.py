@@ -1,4 +1,5 @@
 import binascii
+import json
 import hashlib
 import logging
 import math
@@ -10,7 +11,7 @@ import sys
 from functools import wraps
 from numbers import Number
 from pathlib import Path
-from typing import Any, BinaryIO, Dict, List, Optional, Tuple, Union
+from typing import Any, BinaryIO, Dict, List, Mapping, Optional, Tuple, Union
 
 import numpy as np
 import numpy.typing as npt
@@ -18,8 +19,12 @@ import numpy.typing as npt
 import cdflib.epochs as cdfepoch
 from cdflib._gzip_wrapper import gzip_deflate
 from cdflib.logging import logger
+from cdflib.naming import NamePlan, VariableNameConflict
 
 __all__ = ["CDF"]
+
+#: Global attribute used to persist the identity map of a collapsed name plan.
+NAME_MAP_ATTRIBUTE = "CDFLIB_NAME_MAP"
 
 
 def is_open(func):
@@ -176,7 +181,13 @@ class CDF:
 
     level = 0
 
-    def __init__(self, path: Union[str, Path], cdf_spec: Optional[Dict[str, Any]] = None, delete: bool = False):
+    def __init__(
+        self,
+        path: Union[str, Path],
+        cdf_spec: Optional[Dict[str, Any]] = None,
+        delete: bool = False,
+        name_plan: Optional[Union[NamePlan, Mapping[str, Any]]] = None,
+    ):
         path = pathlib.Path(path).expanduser()
 
         major = 1
@@ -256,6 +267,10 @@ class CDF:
         self.num_rdim = num_rdim  # Number of r dimensions
         self.rdim_sizes = rdim_sizes  # Size of r dimensions
         self.majority = major
+        if isinstance(name_plan, Mapping):
+            name_plan = NamePlan.from_dict(name_plan)
+        self.name_plan = name_plan
+        self._name_plan_variables: List[Dict[str, str]] = []
 
         with path.open("wb") as f:
             f.write(binascii.unhexlify(self.V3magicNUMBER_1))
@@ -287,6 +302,9 @@ class CDF:
         if self.is_closed:
             return
 
+        if self.name_plan is not None and self._name_plan_variables:
+            self._write_name_map()
+
         if self.compressed_file is None:
             with self.path.open("rb+") as f:
                 f.seek(0, 2)
@@ -314,6 +332,18 @@ class CDF:
         self.path.unlink()  # NOTE: for Windows this is necessary
         self.compressed_file.rename(self.path)
         self.is_closed = True
+
+    @is_open
+    def _write_name_map(self) -> None:
+        """Persist the applied identity map as a single global attribute."""
+
+        payload = {
+            "version": 1,
+            "variables": list(self._name_plan_variables),
+        }
+        if NAME_MAP_ATTRIBUTE in self.gattrs:
+            return
+        self.write_globalattrs({NAME_MAP_ATTRIBUTE: {0: json.dumps(payload, sort_keys=True)}})
 
     @is_open
     def write_globalattrs(self, globalAttrs):
@@ -449,6 +479,43 @@ class CDF:
                 self._update_offset_value(f, offsetADR + 40, 4, entryNumMaX)
 
     @is_open
+    def _apply_plan_to_variable_attrs(self, variableAttrs: Dict[str, Any]) -> Dict[str, Any]:
+        """Translate a ``{attribute: {variable: value}}`` mapping through the plan.
+
+        DEPEND_n values are rewritten to target names, and the entry IDs are
+        translated from original names to the names actually stored in the
+        CDF.
+        """
+
+        translated: Dict[str, Any] = {}
+        for attribute, entries in variableAttrs.items():
+            if not isinstance(entries, dict):
+                translated[attribute] = entries
+                continue
+            new_entries: Dict[Any, Any] = {}
+            is_depend = str(attribute).upper().startswith("DEPEND_") and str(attribute)[7:].isdigit()
+            index = int(str(attribute)[7:]) if is_depend else None
+            for variable, value in entries.items():
+                if not isinstance(variable, str):
+                    new_entries[variable] = value
+                    continue
+                domain = None
+                if self.name_plan is not None:
+                    identity = self.name_plan.identity_for(variable)
+                    if identity is not None:
+                        domain = identity.domain
+                target = self.name_plan.target_for(variable, domain)
+                if target is None:
+                    raise VariableNameConflict(f"variable {variable!r} is not present in the name plan")
+                if is_depend and index is not None and isinstance(value, str):
+                    migrated = self.name_plan.depend_targets.get(((variable, domain), index)) if domain else None
+                    if migrated is not None:
+                        value = migrated
+                new_entries[target] = value
+            translated[attribute] = new_entries
+        return translated
+
+    @is_open
     def write_variableattrs(self, variableAttrs):
         """
         Writes a variable's attributes, provided the variable already exists.
@@ -479,6 +546,8 @@ class CDF:
         """
         if not (isinstance(variableAttrs, dict)):
             raise ValueError("Variable attribute(s) not in dictionary form")
+        if self.name_plan is not None:
+            variableAttrs = self._apply_plan_to_variable_attrs(variableAttrs)
         dataType = None
         numElems = None
         with self.path.open("rb+") as f:
@@ -766,8 +835,43 @@ class CDF:
         if hasattr(pad, "__len__"):
             pad = pad[0]
 
-        if name in self.zvars or name in self.rvars:
+        if (zVar and name in self.zvars) or ((not zVar) and name in self.rvars):
             raise ValueError(f"{name} already exists")
+
+        original_name = name
+        if self.name_plan is not None:
+            domain = "zvariable" if zVar else "rvariable"
+            target = self.name_plan.target_for(original_name, domain)
+            if target is None:
+                raise VariableNameConflict(f"variable {original_name!r} is not present in the name plan")
+            name = target
+            depends_entry: Dict[str, Any] = {}
+            if var_attrs is not None:
+                var_attrs = dict(var_attrs)
+                for attribute, value in list(var_attrs.items()):
+                    match = str(attribute).upper()
+                    if match.startswith("DEPEND_") and match[7:].isdigit() and isinstance(value, str):
+                        index = int(match[7:])
+                        migrated = self.name_plan.depend_targets.get(((original_name, domain), index))
+                        if migrated is not None:
+                            var_attrs[attribute] = migrated
+                        depends_entry[attribute] = {
+                            "original": value,
+                            "target": migrated,
+                        }
+            entry: Dict[str, Any] = {"original": original_name, "target": name, "domain": domain}
+            if depends_entry:
+                entry["depends"] = depends_entry
+            # Some writers pass attributes separately; retain any plan-known
+            # dependencies even when they were not supplied with this call.
+            for (key, index), reference in self.name_plan.depend_raw.items():
+                if key == (original_name, domain):
+                    attribute = f"DEPEND_{index}"
+                    entry.setdefault("depends", {})[attribute] = {
+                        "original": reference,
+                        "target": self.name_plan.depend_targets.get((key, index)),
+                    }
+            self._name_plan_variables.append(entry)
 
         with self.path.open("rb+") as f:
             f.seek(0, 2)  # EOF (appending)
