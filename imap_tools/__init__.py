@@ -3,6 +3,13 @@
 # Mirror: https://gitflic.ru/project/ikvk/imap-tools
 # License: Apache-2.0
 
+from .attachment_filename import (
+    FilenameInfo,
+    FilenameIssue,
+    FilenameSegment,
+    build_filename_info,
+    safe_filename,
+)
 from .consts import MailBoxFolderStatusOptions, MailMessageFlags, SortCriteria
 from .errors import (
     ImapToolsError,
@@ -37,12 +44,15 @@ from .utils import EmailAddress
 __version__ = '1.16.0'
 
 __all__ = [
-    'A', 'AND', 'BaseMailBox', 'EmailAddress', 'FolderInfo', 'H', 'Header', 'ImapToolsError', 'MailAttachment',
+    'A', 'AND', 'BaseMailBox', 'EmailAddress', 'FilenameInfo', 'FilenameIssue', 'FilenameSegment',
+    'FolderInfo', 'H', 'Header', 'ImapToolsError', 'MailAttachment',
     'MailBox', 'MailBoxFolderManager', 'MailBoxFolderStatusOptions', 'MailBoxStartTls', 'MailBoxUnencrypted',
     'MailMessage', 'MailMessageFlags', 'MailboxAppendError', 'MailboxCopyError', 'MailboxDeleteError',
     'MailboxExpungeError', 'MailboxFetchError', 'MailboxFlagError', 'MailboxFolderCreateError',
     'MailboxFolderDeleteError', 'MailboxFolderRenameError', 'MailboxFolderSelectError', 'MailboxFolderStatusError',
     'MailboxFolderStatusValueError', 'MailboxFolderSubscribeError', 'MailboxLoginError', 'MailboxLogoutError',
-    'MailboxMoveError', 'MailboxNumbersError', 'MailboxStarttlsError', 'MailboxTaggedResponseError', 'MailboxUidsError',
-    'N', 'NOT', 'O', 'OR', 'SortCriteria', 'U', 'UidRange', 'UnexpectedCommandStatusError', '__version__', 'LazyHeaders'
+    'MailboxMoveError', 'MailboxNumbersError', 'MailboxStarttlsError', 'MailboxTaggedResponseError',
+    'MailboxUidsError',
+    'N', 'NOT', 'O', 'OR', 'SortCriteria', 'U', 'UidRange', 'UnexpectedCommandStatusError', '__version__',
+    'LazyHeaders', 'build_filename_info', 'safe_filename',
 ]

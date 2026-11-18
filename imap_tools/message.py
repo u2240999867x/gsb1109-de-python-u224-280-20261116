@@ -5,12 +5,24 @@ import imaplib
 import re
 from collections.abc import Mapping
 from email.header import decode_header
-from email.message import Message, _parseparam  # noqa
+from email.message import Message
 from functools import cached_property
 from itertools import chain
-from typing import List, Optional, Tuple
+from pathlib import Path
+from typing import List, Optional, Tuple, Union
 
-from .consts import CODECS_OFFICIAL_REPLACEMENT_CHAR, UID_PATTERN
+from .attachment_filename import (
+    FilenameInfo,
+    FilenameIssue,
+    FilenameSegment,
+    attachment_manifest_entry,
+    build_filename_info,
+    has_filename_parameter,
+    safe_filename,
+    save_attachment,
+    write_attachment_manifest,
+)
+from .consts import UID_PATTERN
 from .utils import EmailAddress, decode_value, parse_email_addresses, parse_email_date, replace_html_ct_charset
 
 
@@ -220,7 +232,7 @@ class MailMessage:
         """Plain text of the mail message"""
         results = []
         for part in self.obj.walk():
-            if part.get_content_maintype() == 'multipart' or part.get_filename():
+            if part.get_content_maintype() == 'multipart' or has_filename_parameter(part):
                 continue
             if part.get_content_type() in ('text/plain', 'text/'):
                 results.append(decode_value(part.get_payload(decode=True), part.get_content_charset()))
@@ -231,7 +243,7 @@ class MailMessage:
         """HTML text of the mail message"""
         results = []
         for part in self.obj.walk():
-            if part.get_content_maintype() == 'multipart' or part.get_filename():
+            if part.get_content_maintype() == 'multipart' or has_filename_parameter(part):
                 continue
             if part.get_content_type() == 'text/html':
                 html = decode_value(part.get_payload(decode=True), part.get_content_charset())
@@ -258,11 +270,54 @@ class MailMessage:
         for part in self.obj.walk():
             if part.get_content_maintype() == 'multipart':  # multipart/* are containers
                 continue
-            if part.get('Content-ID') is None and part.get_filename() is None \
+            if part.get('Content-ID') is None and not has_filename_parameter(part) \
                     and part.get_content_type() != 'message/rfc822':
                 continue
             results.append(MailAttachment(part))
         return results
+
+    def save_attachments(self, directory: Union[str, Path], *,
+                         overwrite: bool = False,
+                         manifest: bool = False) -> List[Path]:
+        """Save all attachments below *directory* without replacing files.
+
+        Display names are converted to safe file names.  Distinct display
+        names that sanitize to the same file name do not overwrite each other;
+        the later one receives a numeric suffix.  With ``manifest=True`` an
+        ``attachments.json`` records each saved path together with the display
+        name and raw filename segments, so the directory can be audited back
+        to the header bytes.
+
+        Without ``overwrite``, all writes must succeed or none of the new
+        files remain: an existing manifest is checked before writing, and
+        files written by this call are removed if the manifest can not be
+        written.
+        """
+        attachments = self.attachments
+        directory_path = Path(directory)
+        if manifest:
+            manifest_path = directory_path / 'attachments.json'
+            if manifest_path.exists():
+                raise FileExistsError(f'attachment manifest already exists: {manifest_path}')
+        paths = []
+        try:
+            for attachment in attachments:
+                paths.append(attachment.save(directory, overwrite=overwrite))
+            if manifest:
+                entries = [
+                    attachment_manifest_entry(attachment, path)
+                    for attachment, path in zip(attachments, paths)
+                ]
+                write_attachment_manifest(entries, directory)
+        except BaseException:
+            if not overwrite:
+                for path in paths:
+                    try:
+                        path.unlink()
+                    except FileNotFoundError:
+                        pass
+            raise
+        return paths
 
 
 class MailAttachment:
@@ -275,45 +330,61 @@ class MailAttachment:
         return f'<{self.filename} | {self.content_type} | {self.content_disposition} | {self.content_id}>'
 
     @cached_property
+    def filename_info(self) -> FilenameInfo:
+        """Reconstructed filename with its raw segments and diagnostics.
+
+        The header parameters are read from the original header bytes.  The
+        precedence policy is described in :mod:`imap_tools.attachment_filename`.
+        """
+        return build_filename_info(self.part)
+
+    @cached_property
     def filename(self) -> str:
         """
-        Attachment filename
+        Attachment display name, reconstructed from the header parameters.
+
+        ``Content-Disposition`` is preferred over ``Content-Type``; RFC 2231
+        continuations are preferred over a single extended parameter, which is
+        preferred over the ordinary parameter.  When the winning declaration
+        is inconsistent, :attr:`filename_info` reports ``complete`` as
+        ``False`` and the returned name contains only the bytes that could be
+        attributed to it.
+
         nameless cases:
             inline file (Content-Disposition = inline)
             forwarded message (Content-Type = message/rfc822)
         :return: filename
         """
-        # attempt 1
-        raw = self.part.get_filename() or ''
-        attempt_1_filename = ''.join(decode_value(*head_part) for head_part in decode_header(raw))
-        if CODECS_OFFICIAL_REPLACEMENT_CHAR not in attempt_1_filename:
-            return attempt_1_filename
+        return self.filename_info.name
 
-        # attempt 2 - non-ascii filename
-        for header_name, target_param_name in (('content-disposition', 'filename'), ('content-type', 'name')):
-            header_obj = self.part.get(header_name, None)
-            if not header_obj:
-                continue
-            for header_item in decode_header(header_obj):
-                if header_item[1] == 'unknown-8bit':
-                    try:
-                        # suppose encoded utf8
-                        parsed_params = _parseparam(header_item[0].decode(errors='replace'))  # ['',]
-                    except Exception:  # noqa
-                        continue
-                    for parsed_param_item in parsed_params:
-                        try:
-                            name, val = parsed_param_item.split('=', 1)
-                            name = name.strip()
-                            val = val.strip()
-                        except ValueError:
-                            # Must have been a bare attribute
-                            name = parsed_param_item.strip()
-                            val = ''
-                        if name == target_param_name and val and CODECS_OFFICIAL_REPLACEMENT_CHAR not in val:
-                            return val.strip('"')
+    @cached_property
+    def filename_segments(self) -> Tuple[FilenameSegment, ...]:
+        """Filename segments in the order used to build :attr:`filename`."""
+        return self.filename_info.segments
 
-        return attempt_1_filename
+    @cached_property
+    def filename_issues(self) -> Tuple[FilenameIssue, ...]:
+        """Filename diagnostics; each item is also usable as its issue code."""
+        return self.filename_info.issues
+
+    @cached_property
+    def filename_is_complete(self) -> bool:
+        """Whether the winning filename declaration was consistent."""
+        return self.filename_info.complete
+
+    @cached_property
+    def safe_filename(self) -> str:
+        """Filesystem-safe single path component derived from :attr:`filename`."""
+        return safe_filename(self.filename)
+
+    def save(self, directory: Union[str, Path], *, filename: Optional[str] = None,
+             overwrite: bool = False) -> Path:
+        """Save the attachment below *directory* without replacing a file.
+
+        The display name is converted with :func:`safe_filename`; collisions
+        receive a numeric suffix.  Returns the path actually written.
+        """
+        return save_attachment(self, directory, filename=filename, overwrite=overwrite)
 
     @cached_property
     def content_id(self) -> str:

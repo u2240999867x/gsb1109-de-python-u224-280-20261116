@@ -1,3 +1,10 @@
+1.17.0
+======
+* Added: MailAttachment.filename_info, filename_segments, filename_issues, filename_is_complete - auditable RFC 2231 filename reconstruction.
+* Changed: MailAttachment.filename uses an explicit precedence policy: content-disposition over content-type, continuations over extended over plain, no joining of differently named parameters.
+* Added: MailAttachment.safe_filename, MailAttachment.save, MailMessage.save_attachments - safe file names, no overwrite by default, numeric suffixes on collisions.
+* Fixed: attachment declarations that the standard library ignored (broken continuations, conflicting parameters) are now reported instead of silently dropped.
+
 1.16.0
 ======
 * Fixed: silent no-op behavior at BaseMailBox.<action> when using iterables. (#274)

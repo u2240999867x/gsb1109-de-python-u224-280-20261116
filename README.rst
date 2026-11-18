@@ -122,13 +122,58 @@ MailMessage and MailAttachment public attributes are cached by functools.cached_
         msg.size         # int: 20377 bytes - size of received message
 
         for att in msg.attachments:  # list: imap_tools.MailAttachment
-            att.filename             # str: 'cat.jpg'
+            att.filename             # str: 'cat.jpg' - display name, as written by the sender
+            att.filename_info        # imap_tools.FilenameInfo - raw segments, source, issues
+            att.filename_is_complete # bool: False when the declaration is broken or contradictory
+            att.safe_filename        # str: 'cat.jpg' - single path component for saving
             att.payload              # bytes: b'\xff\xd8\xff\xe0\'
             att.content_id           # str: 'part45.06020801.00060008@mail.ru'
             att.content_type         # str: 'image/jpeg'
             att.content_disposition  # str: 'inline'
             att.part                 # email.message.Message: original object
             att.size                 # int: 17361 bytes
+
+        # Save attachments below a directory: safe names, never overwrite
+        msg.save_attachments('/tmp/attachments')  # list[pathlib.Path]
+
+📎 Attachment filenames
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+A part can declare its name several ways. ``att.filename`` follows one fixed
+policy instead of trusting the standard library's collapse:
+
+* ``Content-Disposition: filename`` wins over ``Content-Type: name``.
+* Within a header, numbered continuations (``filename*0*=``) win over a single
+  extended parameter (``filename*=``), which wins over the plain parameter.
+* Parameters with different base names are never joined, so a byte from
+  ``name*1*`` can not complete ``filename*0*``.
+
+``att.filename_info`` records how the name was obtained: the selected header
+and parameter, the raw bytes of every segment, the charset actually used, and
+diagnostics. ``att.filename_is_complete`` is ``False`` for a missing or
+duplicated continuation, a conflicting declaration, or bytes that could not
+be decoded. A missing continuation is rendered as U+FFFD at the gap and a
+contradictory declaration gets a trailing U+FFFD; do not save such a name as
+if it were complete. Names that are split in the middle of a multi-byte
+character are joined before decoding, so they are complete when all segments
+are present.
+
+.. code-block:: python
+
+    att = msg.attachments[0]
+    att.filename                     # '中文.txt'
+    att.filename_info.source         # 'content-disposition'
+    att.filename_info.parameter      # 'filename'
+    [(s.index, s.raw) for s in att.filename_info.segments]
+    att.filename_info.charset        # 'utf-8'
+    att.filename_is_complete         # True
+    att.filename_issues              # ()
+
+``att.filename`` is not a path. Use ``att.safe_filename`` for a single path
+component, or ``att.save(directory)`` / ``msg.save_attachments(directory)``.
+Saving never overwrites an existing file by default, and two different legal
+display names that sanitize to the same name receive numeric suffixes. Pass
+``overwrite=True`` to replace a file explicitly.
 
         msg.obj              # email.message.Message: original object
         msg.from_values      # imap_tools.EmailAddress | None
