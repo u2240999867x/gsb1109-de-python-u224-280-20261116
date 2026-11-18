@@ -29,6 +29,25 @@ from .errors import (
     UnexpectedCommandStatusError,
 )
 from .folder import FolderInfo, MailBoxFolderManager
+from .incremental import (
+    CoverageStatus,
+    FileArchive,
+    FileSystemArchive,
+    FolderImportState,
+    ImportCoverage,
+    ImportResult,
+    ImportState,
+    ImportStateError,
+    IncrementalImport,
+    IncrementalImporter,
+    IncrementalImportResult,
+    IncrementalImportState,
+    MailboxImporter,
+    MailboxImportState,
+    MessageSource,
+    import_incremental,
+    incremental_import,
+)
 from .mailbox import BaseMailBox, MailBox, MailBoxStartTls, MailBoxUnencrypted
 from .message import LazyHeaders, MailAttachment, MailMessage
 from .query import AND, NOT, OR, A, H, Header, N, O, U, UidRange
@@ -44,5 +63,10 @@ __all__ = [
     'MailboxFolderDeleteError', 'MailboxFolderRenameError', 'MailboxFolderSelectError', 'MailboxFolderStatusError',
     'MailboxFolderStatusValueError', 'MailboxFolderSubscribeError', 'MailboxLoginError', 'MailboxLogoutError',
     'MailboxMoveError', 'MailboxNumbersError', 'MailboxStarttlsError', 'MailboxTaggedResponseError', 'MailboxUidsError',
-    'N', 'NOT', 'O', 'OR', 'SortCriteria', 'U', 'UidRange', 'UnexpectedCommandStatusError', '__version__', 'LazyHeaders'
+    'N', 'NOT', 'O', 'OR', 'SortCriteria', 'U', 'UidRange', 'UnexpectedCommandStatusError', '__version__',
+    'LazyHeaders',
+    'CoverageStatus', 'FileArchive', 'FileSystemArchive', 'FolderImportState', 'ImportCoverage', 'ImportResult',
+    'ImportState', 'ImportStateError', 'IncrementalImport', 'IncrementalImporter', 'IncrementalImportResult',
+    'IncrementalImportState', 'MailboxImportState', 'MailboxImporter', 'MessageSource', 'import_incremental',
+    'incremental_import',
 ]

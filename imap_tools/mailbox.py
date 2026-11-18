@@ -136,6 +136,28 @@ class BaseMailBox:
         check_command_status(result, MailboxLogoutError, expected='BYE')
         return result
 
+    def incremental_import(self, state=None, folder: Optional[str] = None, archive=None, on_message=None, **kwargs):
+        """
+        Incrementally download only messages not confirmed by a previous run.
+
+        State keeps the folder, its UIDVALIDITY epoch and confirmed UID ranges.
+        A changed UIDVALIDITY starts a new epoch, so old UIDs never skip new
+        messages.  The cursor stops before the first message that fails to
+        download or store.  See :mod:`imap_tools.incremental` for details.
+
+        :param state: MailboxImportState, state file path, or None for in-memory state
+        :param folder: folder to import, current folder by default
+        :param archive: FileSystemArchive, archive root path, or object with store(message, source)
+        :param on_message: callable(message, source), called before the UID is confirmed
+        :param kwargs: IncrementalImporter options (mark_seen, headers_only, charset, save_after_each)
+        :return: imap_tools.incremental.ImportResult
+        """
+        from .incremental import IncrementalImporter
+        return IncrementalImporter(
+            self, state=state, folder=folder, archive=archive, on_message=on_message, **kwargs).run()
+
+    import_incremental = incremental_import
+
     def numbers(self, criteria: Criteria = 'ALL', charset: Optional[str] = 'US-ASCII') -> List[str]:
         """
         Search mailbox for matching message numbers in current folder (this is not uids)

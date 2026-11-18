@@ -272,6 +272,39 @@ For actions with large number of messages IMAP command may be too large and will
             msg = imap_tools.MailMessage.from_bytes(f.read())  # *or use bytes instead MailMessage
         mailbox.append(msg, 'INBOX', dt=None, flag_set=[imap_tools.MailMessageFlags.SEEN])
 
+🔄 Incremental import
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+``BaseMailBox.incremental_import`` downloads only messages that were not confirmed
+by a previous run. State is kept per folder and per UIDVALIDITY epoch:
+
+* a changed UIDVALIDITY starts a new epoch - old UIDs never skip new messages;
+* the previous epoch (UIDVALIDITY, cursor, confirmed ranges) stays in the state;
+* an archive path contains the folder and UIDVALIDITY, so files written before the
+  change keep their original source metadata;
+* a message is confirmed only after fetch and the archive/callback succeeded, and
+  the cursor never advances past a failed UID;
+* the result tells apart a complete scan, an incomplete scan stopped by a message
+  failure, and unknown coverage when the folder status/search connection failed.
+
+.. code-block:: python
+
+    from imap_tools import MailBox, MailboxImportState, CoverageStatus
+
+    state = MailboxImportState.load_or_create('/var/lib/mail-import/state.json')
+    with MailBox('imap.mail.com').login('test@mail.com', 'pwd') as mailbox:
+        result = mailbox.incremental_import(state=state, folder='INBOX', archive='/var/lib/mail-import')
+        print(result.status, result.fetched, result.cursor, result.error)
+        if result.status == CoverageStatus.COMPLETE:
+            print('all messages through UID', result.cursor, 'are confirmed')
+        elif result.status == CoverageStatus.INCOMPLETE:
+            print('retry from UID', result.failed_uid)
+
+A successful search with no matching messages still returns ``COMPLETE`` (the
+cursor may move to ``UIDNEXT - 1``). A connection or command failure returns
+``UNKNOWN`` - it is never reported as complete. Use ``on_message(message, source)``
+for custom consumers; an exception from it stops the cursor before that UID.
+
 📁 Actions with folders
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 

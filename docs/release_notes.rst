@@ -1,3 +1,11 @@
+Unreleased
+==========
+* Added: imap_tools.incremental / BaseMailBox.incremental_import - resumable folder import. State keeps the folder, UIDVALIDITY and
+    confirmed UID ranges; a UIDVALIDITY change starts a new epoch so old UIDs never skip new messages.
+    ImportResult distinguishes complete coverage, incomplete coverage stopped by one failed message, and
+    unknown coverage after a connection/search error. FileSystemArchive keeps the folder and UIDVALIDITY
+    in the path so old archives retain their original source metadata.
+
 1.16.0
 ======
 * Fixed: silent no-op behavior at BaseMailBox.<action> when using iterables. (#274)

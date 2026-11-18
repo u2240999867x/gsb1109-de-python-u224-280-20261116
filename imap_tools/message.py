@@ -78,6 +78,7 @@ class MailMessage:
         raw_message_data, raw_uid_data, raw_flag_data = self._get_message_data_parts(fetch_data)
         self._raw_uid_data = raw_uid_data
         self._raw_flag_data = raw_flag_data
+        self._raw_message_data = raw_message_data
         self.obj: Message = email.message_from_bytes(raw_message_data)
 
     @classmethod
@@ -109,6 +110,11 @@ class MailMessage:
                 raw_flag_data.append(fetch_item[0])  # may contains flags (google, dovecot)
                 raw_message_data = fetch_item[1]
         return raw_message_data, raw_uid_data, raw_flag_data
+
+    @property
+    def raw(self) -> bytes:
+        """Original message bytes as received from the server"""
+        return self._raw_message_data
 
     @cached_property
     def uid(self) -> Optional[str]:
