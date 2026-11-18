@@ -11,6 +11,7 @@ Manual
   nibabel_images
   images_and_memory
   nifti_images
+  lossless_delivery
   image_orientation
   legal
   changelog

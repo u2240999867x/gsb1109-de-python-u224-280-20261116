@@ -60,6 +60,7 @@ Float / integer conversion
 
     arraywriters
     casting
+    delivery
 
 System utilities
 ================

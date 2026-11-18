@@ -25,6 +25,17 @@ Eric Larson (EL), Demian Wassermann, Stephan Gerhard and Ross Markello (RM).
 
 References like "pr/298" refer to github pull request numbers.
 
+5.6.0 (unreleased)
+==================
+
+New features
+------------
+* New :mod:`nibabel.delivery` module plans the smallest lossless NIfTI
+  delivery for a target site's allowed versions, data types, scaling
+  representation and header ranges.  It works from decoded voxel values,
+  reports each header migration and lists blockers instead of rounding.
+  The ``nib-deliver`` command exposes the same planner.
+
 5.5.0 (Monday 9 November 2026)
 ==============================
 
