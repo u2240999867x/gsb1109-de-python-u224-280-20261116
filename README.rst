@@ -272,6 +272,52 @@ For actions with large number of messages IMAP command may be too large and will
             msg = imap_tools.MailMessage.from_bytes(f.read())  # *or use bytes instead MailMessage
         mailbox.append(msg, 'INBOX', dt=None, flag_set=[imap_tools.MailMessageFlags.SEEN])
 
+📨 Unsubscribe preview
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+``imap_tools.unsubscribe`` extracts unsubscribe declarations from archived messages without making any network
+requests. It implements the message-side rules of `RFC 8058 <https://www.rfc-editor.org/rfc/rfc8058.html>`_:
+``List-Unsubscribe`` (RFC 2369) declares the available URIs, and
+``List-Unsubscribe-Post: List-Unsubscribe=One-Click`` marks an HTTPS URI as eligible for one-click processing.
+DKIM verification is supplied by the caller, not performed here.
+
+Evidence is bound to an exact header occurrence, expressed as ``HeaderReference(name, occurrence)``. Duplicate
+fields and folded values keep separate identities, so a valid signature that covers one field cannot authorize a
+second, uncovered field with the same name. A plan is produced only when both required fields are covered by the
+same valid signature and a matching ``ConsentRecord`` exists for the message and recipient. Without consent, the
+report still previews candidates but emits no executable action.
+
+.. code-block:: python
+
+    from imap_tools import MailMessage
+    from imap_tools.unsubscribe import (
+        ConsentRecord, HeaderReference, SignatureVerification, build_unsubscribe_report,
+    )
+
+    msg = MailMessage.from_bytes(raw_bytes)  # an archived message, already fetched
+    report = build_unsubscribe_report(
+        msg,
+        signatures=[SignatureVerification(
+            valid=True,
+            covered_headers=(
+                HeaderReference('List-Unsubscribe', 0),
+                HeaderReference('List-Unsubscribe-Post', 0),
+            ),
+            message_id='<list-1@example.test>',
+        )],
+        consents=[ConsentRecord(message_id='<list-1@example.test>', recipient='user@example.net')],
+    )
+
+    print(report.readable())  # readable declarations, classifications, and previewed plans
+    for plan in report.plans:
+        # plan.method == 'POST', plan.body == b'List-Unsubscribe=One-Click'
+        # plan has no cookies or authorization context
+        ...
+
+Targets are classified as ``one_click_https_post``, ``manual``, ``insufficient_evidence``, or ``unparsed``.
+Malformed declarations remain readable through ``report.readable()`` and are never converted into executable
+actions. Link validity is never tested by this module, so unreachable or expired URLs are reported as-is.
+
 📁 Actions with folders
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
