@@ -159,6 +159,28 @@ Output Options
             write received objects to directory ``d`` (with ``--store``)
 ``--ignore``
             receive data but don't store it (with ``--store``)
+``--report-file [f]ile (str)``
+            write a per-instance retrieval report as JSON to file ``f``
+
+Retrieval Report
+----------------
+The ``--report-file`` option writes a JSON report that keeps the sub-operation
+counts reported by the C-MOVE SCP separate from the C-STORE receipts observed
+by the local Storage SCP. This matters because the C-MOVE responses arrive over
+the request association while the C-STORE sub-operations normally arrive over
+a separate association with the *Move Destination*, so the two sets of numbers
+aren't guaranteed to agree. For each SOP Instance UID the report records
+whether it was completed, returned a warning, failed or has conflicting
+evidence, and it reports the difference between the totals and the part of the
+result that isn't tied to a specific SOP Instance UID. Duplicate C-STORE
+receipts for the same SOP Instance UID are counted once.
+
+A *Failed SOP Instance UID List* is the only standard way the peer identifies
+which sub-operations failed. If the peer reports failed sub-operations without
+that list (or with an incomplete one), the report records the unaccounted
+count as unidentified rather than assigning the failures to specific SOP
+Instance UIDs. When ``--store`` isn't used no receipts are observed locally,
+so the report only reflects the reported counts and any failed UID list.
 
 
 .. include:: keyword_pathing.rst

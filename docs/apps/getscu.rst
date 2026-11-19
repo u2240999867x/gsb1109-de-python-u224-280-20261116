@@ -116,6 +116,24 @@ Output Options
             write received objects to directory ``d``
 ``--ignore``
             receive data but don't store it
+``--report-file [f]ile (str)``
+            write a per-instance retrieval report as JSON to file ``f``
+
+Retrieval Report
+----------------
+The ``--report-file`` option writes a JSON report that keeps the sub-operation
+counts reported by the C-GET SCP separate from the C-STORE receipts observed
+locally. For each SOP Instance UID the report records whether it was completed,
+returned a warning, failed or has conflicting evidence, and it reports the
+difference between the totals and the part of the result that isn't tied to a
+specific SOP Instance UID. Duplicate C-STORE receipts for the same SOP Instance
+UID are counted once.
+
+A *Failed SOP Instance UID List* is the only standard way the peer identifies
+which sub-operations failed. If the peer reports failed sub-operations without
+that list (or with an incomplete one), the report records the unaccounted
+count as unidentified rather than assigning the failures to specific SOP
+Instance UIDs.
 
 
 .. include:: keyword_pathing.rst

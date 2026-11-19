@@ -1,5 +1,6 @@
 """Unit tests for getscu.py"""
 
+import json
 import logging
 import os
 import shutil
@@ -563,6 +564,46 @@ class GetSCUBase:
         scp.shutdown()
 
         assert "CT.1.2.3.4" not in os.listdir()
+
+    def test_flag_report_file(self, tmp_path):
+        """Test the --report-file flag with C-GET stores on the same association."""
+        report_file = tmp_path / "report.json"
+
+        def handle_get(event):
+            yield 1
+            yield 0xFF00, self.response
+            yield 0x0000, None
+
+        handlers = [
+            (evt.EVT_C_GET, handle_get),
+        ]
+
+        self.ae = ae = AE()
+        ae.acse_timeout = 5
+        ae.dimse_timeout = 5
+        ae.network_timeout = 5
+        ae.supported_contexts = QueryRetrievePresentationContexts
+        ae.add_supported_context(CTImageStorage, scu_role=True, scp_role=True)
+        scp = ae.start_server(("localhost", 11112), block=False, evt_handlers=handlers)
+
+        p = self.func(["--report-file", str(report_file), "-k", "PatientName="])
+        p.wait()
+        assert p.returncode == 0
+
+        scp.shutdown()
+
+        with open(report_file, encoding="utf-8") as fp:
+            report = json.load(fp)
+
+        assert report["reported"]["final_received"] is True
+        assert report["reported"]["status"] == "0x0000"
+        assert report["reported"]["completed"] == 1
+        assert report["observed"]["distinct_instances"] == 1
+        assert report["instances"][0]["sop_instance_uid"] == "1.2.3.4"
+        assert report["instances"][0]["result"] == "Completed"
+        assert report["differences"]["total"] == 0
+
+        os.remove("CT.1.2.3.4")
 
 
 class TestGetSCU(GetSCUBase):

@@ -15,6 +15,7 @@ from pynetdicom import (
 )
 from pynetdicom._globals import ALL_TRANSFER_SYNTAXES, DEFAULT_MAX_LENGTH
 from pynetdicom.apps.common import create_dataset, handle_store, setup_logging
+from pynetdicom.apps.retrieval_report import RetrievalReport
 from pynetdicom.pdu_primitives import SOPClassExtendedNegotiation
 from pynetdicom.sop_class import (
     PatientRootQueryRetrieveInformationModelMove,
@@ -246,6 +247,16 @@ def _setup_argparser(args=None):
     out_opts.add_argument(
         "--ignore", help="receive data but don't store it", action="store_true"
     )
+    out_opts.add_argument(
+        "--report-file",
+        metavar="[f]ile",
+        help=(
+            "write a per-instance retrieval report as JSON to file f; the "
+            "report reconciles the sub-operation counts reported by the C-MOVE "
+            "SCP with the C-STORE receipts observed by the local Storage SCP"
+        ),
+        type=str,
+    )
 
     ns = parser.parse_args(args)
     if ns.version:
@@ -283,11 +294,14 @@ def main(args=None):
     # Create application entity
     ae = AE()
 
+    # Track the reported sub-operation counts and the local C-STORE receipts
+    report = RetrievalReport()
+
     # Start the Store SCP (optional)
     scp = None
     if args.store:
         transfer_syntax = ALL_TRANSFER_SYNTAXES[:]
-        store_handlers = [(evt.EVT_C_STORE, handle_store, [args, APP_LOGGER])]
+        store_handlers = [(evt.EVT_C_STORE, handle_store, [args, APP_LOGGER, report])]
         ae.ae_title = args.store_aet
         for cx in AllStoragePresentationContexts:
             ae.add_supported_context(cx.abstract_syntax, transfer_syntax)
@@ -337,6 +351,8 @@ def main(args=None):
         move_aet = args.move_aet or args.calling_aet
         responses = assoc.send_c_move(identifier, move_aet, query_model)
         for status, rsp_identifier in responses:
+            report.add_response(status, rsp_identifier)
+
             # If `status.Status` is one of the 'Pending' statuses then
             #   `rsp_identifier` is the C-MOVE response's Identifier dataset
             if status and status.Status in [0xFF00, 0xFF01]:
@@ -352,6 +368,13 @@ def main(args=None):
     # Shutdown the Storage SCP (if used)
     if scp:
         scp.shutdown()
+
+    if args.report_file:
+        report.write(args.report_file)
+
+    APP_LOGGER.info("")
+    for line in report.summary().splitlines():
+        APP_LOGGER.info(line)
 
     sys.exit(_EXIT_VALUE)
 

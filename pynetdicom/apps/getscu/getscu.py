@@ -15,6 +15,7 @@ from pynetdicom import (
 )
 from pynetdicom._globals import DEFAULT_MAX_LENGTH
 from pynetdicom.apps.common import create_dataset, handle_store, setup_logging
+from pynetdicom.apps.retrieval_report import RetrievalReport
 from pynetdicom.pdu_primitives import SOPClassExtendedNegotiation
 from pynetdicom.sop_class import (
     PatientRootQueryRetrieveInformationModelGet,
@@ -210,6 +211,16 @@ def _setup_argparser(args):
     out_opts.add_argument(
         "--ignore", help="receive data but don't store it", action="store_true"
     )
+    out_opts.add_argument(
+        "--report-file",
+        metavar="[f]ile",
+        help=(
+            "write a per-instance retrieval report as JSON to file f; the "
+            "report reconciles the sub-operation counts reported by the peer "
+            "with the C-STORE receipts observed locally"
+        ),
+        type=str,
+    )
 
     ns = parser.parse_args(args)
     if ns.version:
@@ -281,13 +292,16 @@ def main(args=None):
         item.service_class_application_information = app_info
         ext_neg.append(item)
 
+    # Track the reported sub-operation counts and the local C-STORE receipts
+    report = RetrievalReport()
+
     # Request association with remote
     assoc = ae.associate(
         args.addr,
         args.port,
         ae_title=args.called_aet,
         ext_neg=ext_neg,
-        evt_handlers=[(evt.EVT_C_STORE, handle_store, [args, APP_LOGGER])],
+        evt_handlers=[(evt.EVT_C_STORE, handle_store, [args, APP_LOGGER, report])],
         max_pdu=args.max_pdu,
     )
 
@@ -295,6 +309,8 @@ def main(args=None):
         # Send query
         responses = assoc.send_c_get(identifier, query_model)
         for status, rsp_identifier in responses:
+            report.add_response(status, rsp_identifier)
+
             # If `status.Status` is one of the 'Pending' statuses then
             #   `rsp_identifier` is the C-GET response's Identifier dataset
             if status and status.Status in [0xFF00, 0xFF01]:
@@ -305,6 +321,13 @@ def main(args=None):
         assoc.release()
     else:
         sys.exit(1)
+
+    if args.report_file:
+        report.write(args.report_file)
+
+    APP_LOGGER.info("")
+    for line in report.summary().splitlines():
+        APP_LOGGER.info(line)
 
 
 if __name__ == "__main__":

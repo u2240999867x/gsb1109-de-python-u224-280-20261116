@@ -544,7 +544,7 @@ def setup_logging(args, app_name):
     return app_logger
 
 
-def handle_store(event, args, app_logger):
+def handle_store(event, args, app_logger, report=None):
     """Handle a C-STORE request.
 
     Parameters
@@ -556,6 +556,9 @@ def handle_store(event, args, app_logger):
         contain ``args.ignore`` and ``args.output_directory`` attributes.
     app_logger : logging.Logger
         The application's logger.
+    report : pynetdicom.apps.retrieval_report.RetrievalReport, optional
+        If supplied, the C-STORE receipt will be added to the report using the
+        request's *Affected SOP Instance UID* and the returned status.
 
     Returns
     -------
@@ -563,6 +566,21 @@ def handle_store(event, args, app_logger):
         A valid return status code, see PS3.4 Annex B.2.3 or the
         ``StorageServiceClass`` implementation for the available statuses
     """
+    status = _store(event, args, app_logger)
+
+    if report is not None:
+        try:
+            sop_instance = event.request.AffectedSOPInstanceUID
+        except Exception:
+            sop_instance = None
+
+        report.add_store_receipt(sop_instance, status)
+
+    return status
+
+
+def _store(event, args, app_logger):
+    """Store a C-STORE request's dataset and return the response status."""
     if args.ignore:
         return 0x0000
 
