@@ -6,6 +6,7 @@ from .shortnumberinfotest import ShortNumberInfoTest
 from .asyoutypetest import AsYouTypeFormatterTest
 from .examplenumberstest import ExampleNumbersTest
 from .phonenumbermatchertest import PhoneNumberMatchTest, PhoneNumberMatcherTest
+from .dialbatchtest import ResolveBatchTest
 from .geocodertest import PhoneNumberGeocoderTest
 from .carriertest import PhoneNumberToCarrierMapperTest
 from .timezonetest import PhoneNumberToTimeZonesMapperTest
