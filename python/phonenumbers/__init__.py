@@ -143,6 +143,13 @@ from .shortnumberinfo import (SUPPORTED_SHORT_REGIONS,
                               is_sms_service_for_region)
 from .phonenumbermatcher import PhoneNumberMatch, PhoneNumberMatcher, Leniency
 from .re_util import enable_pattern_cache
+# Range-based directory support (compressed supplier number ranges).
+from .numberrange import (NumberRange, NumberRangeError,
+                          intersect_ranges, merge_ranges, parse_range,
+                          subtract_ranges, total_count)
+from .numberrules import (RANGE_VALID, RANGE_PENDING, RANGE_INVALID,
+                          ClassifiedRange, RangeRuleClassifier)
+from .numbercatalog import CATALOG_SCHEMA_VERSION, NumberCatalog
 
 
 # Version number is taken from the upstream libphonenumber version
@@ -221,6 +228,13 @@ __all__ = ['PhoneNumber', 'CountryCodeSource', 'FrozenPhoneNumber',
            # end of items from shortnumberinfo.py
            'PhoneNumberMatch', 'PhoneNumberMatcher', 'Leniency',
            'enable_pattern_cache',
+           # range-based directory support
+           'NumberRange', 'NumberRangeError',
+           'intersect_ranges', 'merge_ranges', 'parse_range',
+           'subtract_ranges', 'total_count',
+           'RANGE_VALID', 'RANGE_PENDING', 'RANGE_INVALID',
+           'ClassifiedRange', 'RangeRuleClassifier',
+           'CATALOG_SCHEMA_VERSION', 'NumberCatalog',
            ]
 
 if __name__ == '__main__':  # pragma no cover

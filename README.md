@@ -181,6 +181,67 @@ belongs to.
 For more information about the other functionality available from the library, look in the unit tests or in the original
 [libphonenumber project](https://github.com/google/libphonenumber).
 
+Range-Based Number Directories
+-------------------------------
+
+When a supplier delivers *ranges* of numbers (with exclusion ranges) rather than individual contacts, the library can
+keep the directory as a compressed collection of intervals instead of materialising millions of `PhoneNumber` objects.
+Each `NumberRange` stores a closed interval over the national significant number (NSN), together with the country
+calling code and the fixed NSN length; the length preserves any leading zero(s), while a `number_count` gives the
+total without enumeration.
+
+Different notations for the same international interval normalize to the same canonical range, and overlapping
+ranges merge into maximal disjoint intervals.
+
+```pycon
+>>> from phonenumbers import parse_range, merge_ranges
+>>> plus = parse_range("+493012345678", "+493012345699", "DE")
+>>> idd = parse_range("00493012345678", "00493012345699", "DE")
+>>> national = parse_range("03012345678", "03012345699", "DE")
+>>> plus == idd == national
+True
+>>> plus.e164_start(), plus.nsn_length, plus.number_count
+('+493012345678', 10, 22)
+>>> italian = parse_range("+390123456780", "+390123456789", "IT")
+>>> italian.nsn_start()  # the significant leading zero is retained
+'0123456780'
+```
+
+A `RangeRuleClassifier` splits a range against the same regular expressions that back `is_valid_number`, using a
+deterministic automaton so that whole intervals are classified at once.  A piece is `valid` only when *every* number
+in it matches a concrete number-type rule; numbers matching just the general description are `pending` manual
+verification, and numbers outside the general description are `invalid`.  Merely valid endpoints never certify the
+numbers in between.
+
+```pycon
+>>> from phonenumbers import RangeRuleClassifier
+>>> classifier = RangeRuleClassifier("DE")
+>>> pieces = classifier.classify(parse_range("+4915299999990", "+4915310000005", "DE"))
+>>> [(p.status, p.number_range.e164_start(), p.number_range.e164_end()) for p in pieces]
+[('valid', '+4915299999990', '+4915299999999'), ('pending', '+4915300000000', '+4915309999999'), ('valid', '+4915310000000', '+4915310000005')]
+```
+
+`NumberCatalog` assembles several suppliers.  Exclusions are scoped to the source that declares them: an exclusion
+only removes numbers inside that source's own supply, and exclusions landing elsewhere are reported as out of scope.
+The catalogue stores the merged valid coverage, the pending/invalid review pieces and the total valid number count,
+and can be saved to or loaded from JSON.
+
+```pycon
+>>> document = {"sources": [
+...     {"source_id": "alpha",
+...      "supply": [{"start": "+493012340000", "end": "+493012340999"}],
+...      "exclusions": [{"start": "+493012340500", "end": "+493012340599"}]}]}
+>>> catalog = NumberCatalog.from_supply_doc("DE", document)
+>>> catalog.valid_count, catalog.totals()["excluded_count"]
+(900, 100)
+>>> [(r.e164_start(), r.e164_end()) for r in catalog.coverage]
+[('+493012340000', '+493012340499'), ('+493012340600', '+493012340999')]
+>>> catalog.save("catalog.json")  # ranges and counts only; no individual contacts
+```
+
+A command line interface is also available:
+`python -m phonenumbers.numbercatalog build --region DE --input supply.json --output catalog.json`.
+
 Memory Usage
 ------------
 

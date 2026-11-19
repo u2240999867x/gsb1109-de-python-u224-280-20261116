@@ -9,6 +9,10 @@ from .phonenumbermatchertest import PhoneNumberMatchTest, PhoneNumberMatcherTest
 from .geocodertest import PhoneNumberGeocoderTest
 from .carriertest import PhoneNumberToCarrierMapperTest
 from .timezonetest import PhoneNumberToTimeZonesMapperTest
+from .rangeautomatontest import DigitRangeDFATest
+from .numberrangetest import NumberRangeTest
+from .numberrulestest import RangeRuleClassifierTest
+from .numbercatalogtest import NumberCatalogTest
 
 if __name__ == '__main__':
     unittest.main()
