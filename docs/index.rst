@@ -63,6 +63,40 @@ And there is one utility method for parsing IMAP4 ``FLAGS`` responses:
    Convert an IMAP4 flags response (a string of the form
    ``"...FLAGS (flag ...)"``) to a python tuple..
 
+Recorded Response Parsing
+-------------------------
+
+``parse_recording``\ (*data*)
+   Parse a recorded server-to-client byte stream and return a
+   ``ParseResult`` containing complete ``Response`` objects and, when the
+   recording ends mid-response, a ``Pending`` tail.  ``data`` may be
+   ``bytes`` or any iterable of byte chunks.
+
+   Each ``Response`` has ``kind`` (``tagged``, ``untagged`` or
+   ``continuation``), ``tag``, ``number``, ``status``, ``text``, ``code``
+   and ``code_data`` fields, plus ``start``/``end`` offsets.  Each
+   ``Literal`` records the marker and the exact payload span; the latter
+   is also available as ``Response.payload_ranges``.  ``Response.segments``
+   partitions the whole response into ordered ``header``, ``separator``,
+   ``payload``, and ``tail`` pieces, so the payload can be decoded without
+   guessing which protocol-looking bytes belong to it.  Offsets are
+   absolute in the original recording and end offsets are exclusive.
+
+   Literal payloads are consumed strictly by the declared length.  CRLF,
+   ``*`` untagged responses, tags, and other literal-looking ``{N}`` text
+   inside a payload are data, not structure.  A length header may be
+   split across input chunks.  Multiple literals in one response are
+   consumed in order.  If the recording is truncated inside a literal or
+   a line, no partial response is emitted; the unconfirmed bytes from the
+   start of that response are returned in ``ParseResult.pending``, so
+   appending more bytes with ``IMAPRecordingParser.feed`` resumes exactly
+   where it stopped.
+
+``IMAPRecordingParser``
+   Incremental form of the above.  ``feed(data)`` returns newly
+   completed responses, ``pending`` exposes the unconfirmed tail, and
+   ``finish()`` marks the recording complete.
+
 IMAP4 Objects
 -------------
 
