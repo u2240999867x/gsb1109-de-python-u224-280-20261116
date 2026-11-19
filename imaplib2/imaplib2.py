@@ -319,6 +319,14 @@ class IMAP4(object):
         self.is_readonly = False        # READ-ONLY desired state
         self.idle_rqb = None            # Server IDLE Request - see _IdleCont
         self.idle_timeout = None        # Must prod server occasionally
+        self.idle_done_rqb = None       # IDLE request whose DONE is in flight
+        self.idle_phase = None          # None, 'idle', or 'done_sent'
+        self.idle_tag = None            # Tag of the active/draining IDLE command
+        self.idle_done_event = threading.Event()
+        self.idle_done_error = None
+        self.untagged_observer = None   # Optional callback for ordered untagged events
+        self.untagged_event_seq = 0     # Arrival order for observer events
+        self.uidvalidity = None         # Last UIDVALIDITY seen in this session
 
         self._expecting_data = False    # Expecting message data
         self._expecting_data_len = 0    # How many characters we expect
@@ -901,6 +909,34 @@ class IMAP4(object):
             self._release_state_change()
 
 
+    def wait_idle_done(self, timeout=None):
+        """ok = wait_idle_done(timeout=None)
+        Wait until an IDLE command's DONE handshake has completed (the
+        server has returned the tagged response for IDLE).  Returns True
+        if the handshake completed, False on timeout.  Raises abort if
+        the connection terminated before the tagged response arrived."""
+
+        if self.idle_done_error is not None:
+            raise self.abort(self.idle_done_error)
+        if self.idle_phase is None:
+            return True
+        if not self.idle_done_event.wait(timeout):
+            return False
+        if self.idle_done_error is not None:
+            raise self.abort(self.idle_done_error)
+        return self.idle_phase is None
+
+
+    def end_idle(self, timeout=None):
+        """ok = end_idle(timeout=None)
+        Leave IDLE by sending DONE, then wait for the server's tagged
+        response.  Returns True when not IDLE or when the handshake
+        completed, False if 'timeout' expired first."""
+
+        self._end_idle()
+        return self.wait_idle_done(timeout)
+
+
     def list(self, directory='""', pattern='*', **kw):
         """(typ, [data]) = list(directory='""', pattern='*')
         List mailbox names in directory matching pattern.
@@ -1293,7 +1329,45 @@ class IMAP4(object):
 
         self.commands_lock.release()
 
+        self._emit_untagged(typ, dat)
+
         if __debug__: self._log(5, 'untagged_responses[%s] %s += ["%.80r"]' % (typ, len(urd)-1, dat))
+
+
+    def _emit_untagged(self, typ, dat):
+
+        # Record arrival order and hand a copy to an installed observer.
+        # Called without commands_lock held so observers may query the client.
+
+        if typ == 'UIDVALIDITY':
+            try:
+                self.uidvalidity = int(dat.split()[0])
+            except (AttributeError, IndexError, TypeError, ValueError):
+                pass
+
+        observer = self.untagged_observer
+        if observer is None:
+            return
+
+        self.untagged_event_seq += 1
+        event = {
+            'seq': self.untagged_event_seq,
+            'type': typ,
+            'data': dat,
+            'mailbox': self.mailbox,
+            'uidvalidity': self.uidvalidity,
+            'idle_phase': self.idle_phase,
+            'idle_tag': self.idle_tag,
+            'pending': tuple(self.tagged_commands),
+            'pending_names': tuple(
+                rqb.name for rqb in list(self.tagged_commands.values())
+            ),
+        }
+        try:
+            observer(event)
+        except Exception:
+            # An observer must never break protocol processing.
+            pass
 
 
     def _check_bye(self):
@@ -1503,10 +1577,31 @@ class IMAP4(object):
             return
         self.idle_rqb = None
         self.idle_timeout = None
+        self.idle_done_rqb = irqb
+        self.idle_phase = 'done_sent'
+        self.idle_done_event.clear()
         self.idle_lock.release()
         irqb.data = bytes('DONE', 'ASCII') + CRLF
         self.ouq.put(irqb)
         if __debug__: self._log(2, 'server IDLE finished')
+
+
+    def _idle_completed(self, rqb):
+
+        # Tagged response for IDLE received: DONE handshake is complete.
+
+        if rqb is None or rqb.name != 'IDLE':
+            return
+        self.idle_lock.acquire()
+        if rqb is self.idle_done_rqb or rqb is self.idle_rqb:
+            self.idle_rqb = None
+            self.idle_done_rqb = None
+            self.idle_timeout = None
+            self.idle_phase = None
+            self.idle_tag = None
+            self.idle_done_event.set()
+        self.idle_lock.release()
+        if __debug__: self._log(2, 'server IDLE DONE acknowledged')
 
 
     def _get_capabilities(self):
@@ -1675,6 +1770,8 @@ class IMAP4(object):
         self.commands_lock.release()
 
         if __debug__: self._log(4, '_request_pop(%s, %r) [%d] = %s' % (name, data, len(self.tagged_commands), rqb.tag))
+        if rqb.name == 'IDLE':
+            self._idle_completed(rqb)
         rqb.deliver(data)
 
         if need_event:
@@ -1795,6 +1892,12 @@ class IMAP4(object):
         self.Terminate = True
 
         if __debug__: self._log(1, 'terminating: %s' % repr(val))
+
+        self.idle_lock.acquire()
+        if self.idle_phase is not None:
+            self.idle_done_error = 'connection terminated before IDLE DONE completed'
+            self.idle_done_event.set()
+        self.idle_lock.release()
 
         while not self.ouq.empty():
             try:
@@ -2311,11 +2414,17 @@ class _IdleCont(object):
         self.parent.idle_timeout = self.timeout + time.time()
 
     def process(self, data, rqb):
-        self.parent.idle_lock.acquire()
-        self.parent.idle_rqb = rqb
-        self.parent.idle_timeout = self.timeout + time.time()
-        self.parent.idle_lock.release()
-        if __debug__: self.parent._log(2, 'server IDLE started, timeout in %.2f secs' % self.timeout)
+        parent = self.parent
+        parent.idle_lock.acquire()
+        parent.idle_rqb = rqb
+        parent.idle_done_rqb = None
+        parent.idle_phase = 'idle'
+        parent.idle_tag = rqb.tag
+        parent.idle_done_error = None
+        parent.idle_done_event.clear()
+        parent.idle_timeout = self.timeout + time.time()
+        parent.idle_lock.release()
+        if __debug__: parent._log(2, 'server IDLE started, timeout in %.2f secs' % self.timeout)
         return None
 
 

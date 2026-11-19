@@ -210,10 +210,20 @@ An ``IMAP4`` instance has the following methods:
    determination. NB: a single argument is assumed to be correctly
    formatted and is passed through unchanged (for backward compatibility
    with earlier version). The ID extension is defined in RFC 2971.
+``end_idle``\ (*timeout=*\ ``None``)
+   Leave IDLE by sending ``DONE``, then wait for the server's tagged
+   response. Returns ``True`` when not IDLE or when the handshake
+   completed, ``False`` if *timeout* expired first. Use this instead of
+   simply issuing another command when you need to know that the IDLE
+   window has definitively closed.
 ``idle``\ (*timeout=*\ ``None``)
    Put server into IDLE mode until server notifies some change, or
    *timeout* (secs) occurs [default: 29 minutes], or another IMAP4
    command is scheduled.
+``wait_idle_done``\ (*timeout=*\ ``None``)
+   Wait for an already-sent ``DONE`` to receive its tagged completion.
+   Returns ``True`` if complete, ``False`` on timeout, and raises
+   ``abort`` if the connection terminated first.
 ``list``\ (*directory=*\ ``'""'``\ *, pattern=*\ ``'*'``)
    List mailbox names in directory matching pattern. Returned *data* is
    list of LIST responses.
@@ -338,6 +348,60 @@ response. Returns response appropriate to *command*.
 
 ``IMAP4`` instances have a variable, ``PROTOCOL_VERSION``, that is set
 to the most recent supported protocol in the CAPABILITY response.
+
+Resumable IDLE collection
+-------------------------
+
+``imaplib2.idle.IdleCollector`` treats IDLE notifications as change
+signals, not as a directory. ``EXISTS``, ``EXPUNGE`` and flag
+notifications may interleave, and a higher message count does not mean
+that the highest sequence numbers are the new messages. Only the
+``(UIDVALIDITY, UID)`` pair identifies a message.
+
+The collector runs one explicit cycle at a time:
+
+1. enter an IDLE listening window and record notifications in arrival
+   order;
+2. leave IDLE, send ``DONE``, and wait for the tagged completion;
+3. run ``UID FETCH 1:*`` over the current UID domain;
+4. publish the result only if no change arrived during the scan;
+5. otherwise scan again without publishing the stale result.
+
+If the scan does not converge, the directory is left unpublished and a
+:class:`imaplib2.idle.Gap` records the unknown range. Disconnects,
+``UIDVALIDITY`` changes and mailbox switches also record gaps. Gaps
+caused by a mailbox switch or a ``UIDVALIDITY`` change stay unresolved:
+a scan of the new domain cannot recover the old history.
+
+Each notification is recorded with its listening window, phase and
+sequence. A ``FETCH`` with a UID can update flags for an already
+confirmed UID; an ``EXISTS``/``EXPUNGE`` number is stored only as a
+hint and never promoted to a UID.
+
+Archiving is idempotent by ``(UIDVALIDITY, UID)``. Replayed
+notifications and repeated catch-up queries record duplicates but never
+archive a second copy. Material fetched for a confirmed UID is reused
+on later scans.
+
+::
+
+       from imaplib2 import IMAP4_SSL, IdleCollector
+
+       M = IMAP4_SSL(host)
+       M.login(user, password)
+       collector = IdleCollector(M, "INBOX", idle_timeout=29*60)
+       collector.start()
+
+       snapshot = collector.snapshot      # latest complete directory
+       for message in snapshot:
+           print(message.uid, message.flags)
+
+       for event in collector.replay():
+           print(event["kind"], event)
+
+``IdleCollector`` also offers deterministic primitives
+(``synchronize()``, ``listen()``, ``catch_up()``), ``switch_mailbox()``,
+``archive()``, ``close_gap()`` and ``status()``.
 
 Usage
 -----
