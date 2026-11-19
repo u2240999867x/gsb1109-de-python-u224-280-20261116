@@ -34,3 +34,10 @@ Exceptions
 .. autoexception:: cbor2.CBORDecodeError
 .. autoexception:: cbor2.CBORDecodeValueError
 .. autoexception:: cbor2.CBORDecodeEOF
+
+Fixed-point column planning
+---------------------------
+
+.. automodule:: cbor2.fixedpoint
+    :members:
+
