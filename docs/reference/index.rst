@@ -31,5 +31,6 @@ This API reference guide details the functions, modules and objects included in
    sop_classes
    status
    timer
+   transcode
    transport
    utils

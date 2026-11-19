@@ -3,6 +3,16 @@
 3.1.0
 =====
 
+Added
+-----
+
+* Added :mod:`pynetdicom.transcode`, a module for converting datasets between
+  the uncompressed *Implicit VR Little Endian*, *Explicit VR Little Endian*
+  and *Explicit VR Big Endian* transfer syntaxes. Compressed, encapsulated and
+  deflated transfer syntaxes are rejected, binary payloads have their byte
+  order converted according to their real value representation and every copy
+  is re-read and authenticated against the original before being accepted
+
 Fixes
 -----
 
