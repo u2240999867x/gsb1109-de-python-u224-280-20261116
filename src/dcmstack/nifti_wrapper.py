@@ -15,6 +15,7 @@ with warnings.catch_warnings():
     from nibabel.nicom.dicomwrappers import wrapper_from_data
 
 from .dcmmeta import DcmMetaExtension, InvalidExtensionError, dcm_meta_ecode
+from . import gradients as _gradients
 
 
 class MissingExtensionError(Exception):
@@ -229,6 +230,9 @@ class NiftiWrapper(object):
 
             #First try per time/vector sample values
             if classes == ('time', 'samples'):
+                #In 5D, time samples are stored vector-major
+                if len(shape) > 4 and shape[4] > 1:
+                    return values[index[4] * shape[3] + index[3]]
                 return values[index[3]]
             if classes == ('vector', 'samples'):
                 return values[index[4]]
@@ -251,6 +255,50 @@ class NiftiWrapper(object):
                 return values[val_idx]
 
         return default
+
+    def get_gradients(self, check_alignment=True, **kwargs):
+        '''Get a `gradients.GradientTable` for the wrapped image.
+
+        The table aligns each gradient sample with its b-value and the
+        source DICOM instances.  Keyword arguments are passed to
+        `gradients.gradient_table_from_meta`.  The source affine defaults to
+        the affine before the reorientation recorded in the meta extension,
+        and the target affine defaults to the image affine.
+
+        Parameters
+        ----------
+        check_alignment : bool
+            If True (the default) verify that the meta data shape and slice
+            direction still describe this image.  This avoids silently using
+            stale per-slice values after the image has been cropped,
+            resampled or coregistered independently of its meta data.
+        '''
+        meta = self.meta_ext
+        if check_alignment:
+            img_shape = tuple(self.nii_img.shape)
+            meta_shape = tuple(meta.shape)
+
+            def _trim(shape):
+                shape = list(shape)
+                while len(shape) > 3 and shape[-1] == 1:
+                    shape.pop()
+                return tuple(shape)
+
+            if _trim(img_shape) != _trim(meta_shape):
+                raise ValueError(
+                    "The meta data shape %s does not match the image shape %s"
+                    % (meta_shape, img_shape)
+                )
+            if (meta.slice_dim is not None and
+                    not self.meta_valid(('global', 'slices'))):
+                raise ValueError(
+                    "The per-slice meta data does not match the image "
+                    "orientation or slice count"
+                )
+        kwargs.setdefault('target_affine', self.nii_img.affine)
+        if kwargs.get('source_affine') is None:
+            kwargs['source_affine'] = _gradients.original_affine(meta)
+        return _gradients.gradient_table_from_meta(meta, **kwargs)
 
     def remove_extension(self):
         '''Remove the DcmMetaExtension from the header of nii_img. The

@@ -28,6 +28,7 @@ with warnings.catch_warnings():
 
 from .globals import SORT_GUESSES
 from . import snd
+from . import gradients as _gradients
 from .dcmmeta import DcmMetaExtension
 
 
@@ -99,6 +100,7 @@ create the `default_meta_filter`.'''
 
 default_key_incl_res = ['ImageOrientationPatient',
                         'ImagePositionPatient',
+                        'SOPInstanceUID',
                        ]
 '''A list of regexes passed to `make_key_regex_filter` as `force_include_res`
 to create the `default_meta_filter`.'''
@@ -344,6 +346,8 @@ class DicomStack(object):
         """Returns `(min_dicom, min_trans)`, the min required DICOM keys and translators 
         """
         min_keys = snd.get_snd_sources()
+        min_keys |= set(_gradients.DEFAULT_GRADIENT_KEYS)
+        min_keys |= set(_gradients.DEFAULT_INSTANCE_KEYS)
         for key in DEFAULT_GROUP_KEYS + cls.SORT_GUESSES + cls.OTHER_REQ_ATTRS:
             if key.startswith("SND."):
                 continue
@@ -733,6 +737,83 @@ class DicomStack(object):
 
     affine = property(fget=get_affine)
 
+    @staticmethod
+    def _validate_voxel_order(voxel_order):
+        """Return a normalized voxel order code, validating it early."""
+        if not voxel_order:
+            return voxel_order
+        voxel_order = str(voxel_order).upper()
+        if len(voxel_order) != 3:
+            raise ValueError('The voxel_order must contain three characters')
+        dcm_axes = ['LR', 'AP', 'SI']
+        for char in voxel_order:
+            if char not in 'LRAPSI':
+                raise ValueError('The characters in voxel_order must be one '
+                                 'of: L,R,A,P,I,S')
+            for idx, axis in enumerate(dcm_axes):
+                if char in axis:
+                    del dcm_axes[idx]
+                    break
+        if len(dcm_axes) != 0:
+            raise ValueError('No character in voxel_order corresponding to '
+                             'axes: %s' % dcm_axes)
+        return voxel_order
+
+    def get_gradients(self, voxel_order='LAS', **kwargs):
+        '''Get the diffusion gradient table for the converted stack.
+
+        Parameters
+        ----------
+        voxel_order : str
+            The voxel order used by `to_nifti` when producing the image.  The
+            gradient directions are expressed in the corresponding target
+            basis.
+
+        kwargs
+            Passed to `gradients.gradient_table_from_meta`.  In particular
+            `gradient_keys`, `b_value_keys`, `source_basis`, `target_basis`,
+            `source_convention` and `target_convention` should be provided by
+            the caller when they differ from the defaults.
+
+        Returns
+        -------
+        gradients.GradientTable
+        '''
+        _, table = self.to_nifti_and_gradients(voxel_order, **kwargs)
+        return table
+
+    def to_nifti_and_gradients(self, voxel_order='LAS', embed_meta=True,
+                               **gradient_kwargs):
+        '''Convert to Nifti and build the matching gradient table.
+
+        The image and the table are produced from a single reorientation of
+        the stack, so the exported gradient components correspond to the
+        delivered voxel axes.
+
+        Parameters
+        ----------
+        voxel_order : str
+            Passed to `to_nifti`.
+
+        embed_meta : bool
+            Passed to `to_nifti`.  Should normally remain True so the table's
+            source geometry is recorded with the image.
+
+        gradient_kwargs
+            Passed to `gradients.gradient_table_from_meta`.
+
+        Returns
+        -------
+        (nii, table) : (nibabel.nifti1.Nifti1Image, GradientTable)
+        '''
+        nii = self.to_nifti(voxel_order, True)
+        wrapper = NiftiWrapper(nii, make_empty=False)
+        table = wrapper.get_gradients(**gradient_kwargs)
+        if not embed_meta:
+            wrapper.remove_extension()
+        table.voxel_order = voxel_order or None
+        return nii, table
+
     def to_nifti(self, voxel_order='LAS', embed_meta=False):
         '''Returns a NiftiImage with the data and affine from the stack.
 
@@ -770,6 +851,7 @@ class DicomStack(object):
         permutation = [0, 1, 2]
         slice_dim = 2
         reorient_transform = np.eye(4)
+        files_info = self._files_info
         if voxel_order:
             (data,
              affine,
@@ -779,17 +861,15 @@ class DicomStack(object):
             permutation = [int(val) for val in permutation]
 
             #Reverse file order in each volume's files if we flipped slice order
-            #This will keep the slice times and meta data order correct
+            #This will keep the slice times and meta data order correct.  Work
+            #on a local copy so exporting gradients later does not see a
+            #different order than the stack itself.
             if files_per_vol > 1 and flips[slice_dim] == -1:
-                self._shape_dirty = True
+                files_info = []
                 for vol_idx in range(n_vols):
                     start = vol_idx * files_per_vol
                     stop = start + files_per_vol
-                    self._files_info[start:stop] = [self._files_info[idx]
-                                                    for idx in range(stop - 1,
-                                                                      start - 1,
-                                                                      -1)
-                                                   ]
+                    files_info.extend(reversed(self._files_info[start:stop]))
 
             #Update the slice dim
             slice_dim = permutation[2]
@@ -820,12 +900,12 @@ class DicomStack(object):
         n_slices = data.shape[slice_dim]
 
         #Set the slice timing header info
-        has_acq_time = (self._files_info[0][0].get_meta('SND.AcquisitionTimeStamp') !=
+        has_acq_time = (files_info[0][0].get_meta('SND.AcquisitionTimeStamp') !=
                         None)
         if files_per_vol > 1 and has_acq_time:
             #Pull out the relative slice times for the first volume
             slice_times = np.array([file_info[0]['SND.AcquisitionTimeStamp']
-                                    for file_info in self._files_info[:n_slices]]
+                                    for file_info in files_info[:n_slices]]
                                   )
             slice_times -= np.min(slice_times)
 
@@ -834,7 +914,7 @@ class DicomStack(object):
             for vol_idx in range(1, n_vols):
                 start_slice = vol_idx * n_slices
                 end_slice = start_slice + n_slices
-                slices_info = self._files_info[start_slice:end_slice]
+                slices_info = files_info[start_slice:end_slice]
                 vol_slc_times = \
                     np.array([file_info[0]['SND.AcquisitionTimeStamp']
                               for file_info in slices_info]
@@ -854,7 +934,7 @@ class DicomStack(object):
 
         #Embed the meta data extension if requested
         if embed_meta:
-            if len(self._files_info) > 1:
+            if len(files_info) > 1:
                 #Build meta data for each volume if needed
                 vol_meta = []
                 if files_per_vol > 1:
@@ -862,12 +942,12 @@ class DicomStack(object):
                         start_slice = vol_idx * n_slices
                         end_slice = start_slice + n_slices
                         exts = [file_info[0].meta_ext
-                                for file_info in self._files_info[start_slice:end_slice]]
+                                for file_info in files_info[start_slice:end_slice]]
                         meta = DcmMetaExtension.from_sequence(exts, 2)
                         vol_meta.append(meta)
                 else:
                     vol_meta = [file_info[0].meta_ext
-                                for file_info in self._files_info]
+                                for file_info in files_info]
                 #Build meta data for each time point / vector component
                 if len(data.shape) == 5:
                     if data.shape[3] != 1:
@@ -887,11 +967,12 @@ class DicomStack(object):
                 else:
                     meta_ext = vol_meta[0]
                     # TODO(BUG): file_info is not available here!
-                    if meta_ext is self._files_info[0][0].meta_ext:
+                    if meta_ext is files_info[0][0].meta_ext:
                         meta_ext = deepcopy(meta_ext)
             else:
-                meta_ext = self._files_info[0][0].meta_ext
-               
+                #Always copy, the extension is modified below and must not
+                #alter the source stack.
+                meta_ext = deepcopy(files_info[0][0].meta_ext)
             meta_ext.shape = data.shape
             meta_ext.slice_dim = slice_dim
             meta_ext.affine = nifti_header.get_best_affine()

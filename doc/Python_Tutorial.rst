@@ -140,7 +140,7 @@ the voxel array in order to provide access to varying meta data.
 
 Merging and Splitting Data Sets
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-We can create a *NiftiWrapper* by merging a sequence of *NiftiWrapper* 
+We can create a *NiftiWrapper* by merging a sequence of *NiftiWrapper*
 objects using the class method *from_sequence*. Conversely, we can split 
 a *NiftiWrapper* into a sequence if *NiftiWrapper* objects using the 
 method *split*.
@@ -196,3 +196,69 @@ extension directly.
     [11.0, 87.0]
     >>> print nw.meta_ext.get_classification('EchoTime')
     ('time', 'samples')
+
+Diffusion Gradients and Reorientation
+-------------------------------------
+
+When a stack is converted with a voxel order (reorientation), the image
+voxels, affine and the meta data are updated together.  The original DICOM
+gradient directions can be exported alongside the image with
+*DicomStack.get_gradients* or *NiftiWrapper.get_gradients*:
+
+.. code-block:: python
+
+    >>> nii_wrp = my_stack.to_nifti_wrapper('LAS')
+    >>> table = nii_wrp.get_gradients(
+    ...     source_basis='scanner', target_basis='voxel',
+    ...     gradient_keys=('DiffusionGradientOrientation',),
+    ...     b_value_keys=('DiffusionBValue',),
+    ... )
+    >>> table.bvals
+    array([0., 1000., 2000.])
+    >>> table.bvecs
+    array([[...]])
+    >>> table.instances
+    ['1.2.3.1', ...]
+
+Each row of the table corresponds to one actual sample.  The b-value, the
+source meta data key, the source instance(s) and the source index or indices
+are kept with the gradient so the table can be aligned with the voxel data.
+If the gradient or b-value varies from slice to slice within a volume, one
+row is produced per slice instead of silently discarding values.
+
+Directions are interpreted in the *source_basis* and written in the
+*target_basis*:
+
+- ``scanner`` is the DICOM patient basis (LPS by default)
+- ``world`` is the NIfTI world basis (RAS by default)
+- ``voxel`` uses the affine column vectors
+
+A voxel reorientation permutes and flips the voxel axes, but it does not
+rotate a physical direction as a side effect.  Converting a ``scanner`` or
+``world`` direction to ``voxel`` after reorientation therefore uses the new
+affine, while a direction supplied in the ``voxel`` basis is permuted/flipped
+directly.  The ``source_convention`` and ``target_convention`` arguments can
+be used when the scanner/world data use the other handedness.
+
+A missing or incomplete direction is never replaced by a unit vector.  Zero
+gradients stay zero and are marked with status ``zero``.  A missing direction
+has status ``missing`` (or ``incomplete`` when fewer than three values were
+available).  Degenerate affines raise *DegenerateTransformError* by default;
+with ``on_degenerate='status'`` the affected row is marked ``degenerate`` and
+its gradient is left as ``nan``.
+
+The table also supports returning to the original basis:
+
+.. code-block:: python
+
+    >>> original = table.inverse('scanner')
+    >>> np.allclose(original.gradients, source_gradients)
+    True
+
+The inverse preserves the b-values, source instances and source indices.
+
+Use *table.write_json(path)* for the full table, or
+*gradients.write_bvals_bvecs* (or *table.write_json* plus the CLI options
+described in :doc:`CLI_Tutorial`) for FSL-style ``.bval``/``.bvec`` files.  A
+missing direction is written as zeros in those two files; use the JSON table
+to distinguish it from a genuine zero gradient.

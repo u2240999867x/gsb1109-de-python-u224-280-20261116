@@ -6,6 +6,7 @@ from datetime import datetime
 import pydicom
 
 from . import dcmstack
+from . import gradients
 from .extract import ExtractionLevel, EXTRACTORS
 from .dcmstack import parse_and_group, stack_group, DicomOrdering, DEFAULT_GROUP_KEYS
 from .nifti_wrapper import NiftiWrapper
@@ -133,6 +134,46 @@ def main(argv=sys.argv):
                            'for the values (one per line) of the attribute '
                            'used as the vector variable. This option is rarely '
                            'needed.'))
+
+    grad_opt = arg_parser.add_argument_group('Gradient Export Options')
+    grad_opt.add_argument('--dump-gradients', default=False,
+                          action='store_true',
+                          help=('Write a JSON gradient table next to the '
+                          'output Nifti. Each row records the gradient, '
+                          'b-value, source instance(s) and indices.'))
+    grad_opt.add_argument('--export-bvals', default=False, action='store_true',
+                          help=('Write FSL-style .bval and .bvec files next '
+                          'to the output Nifti.'))
+    grad_opt.add_argument('--gradient-keys', default=None,
+                          help=('Comma separated meta data keys to read the '
+                          'gradient direction from, in priority order.'))
+    grad_opt.add_argument('--b-value-keys', default=None,
+                          help=('Comma separated meta data keys to read the '
+                          'b-value from, in priority order.'))
+    grad_opt.add_argument('--gradient-source-basis', default='scanner',
+                          choices=('scanner', 'world', 'voxel'),
+                          help=('Basis of the extracted gradient directions. '
+                          'Default: %(default)s'))
+    grad_opt.add_argument('--gradient-target-basis', default='voxel',
+                          choices=('scanner', 'world', 'voxel'),
+                          help=('Basis used for the exported gradient '
+                          'directions. Default: %(default)s'))
+    grad_opt.add_argument('--gradient-source-convention', default=None,
+                          help=('Physical convention for the source basis '
+                          '(lps or ras). Defaults to lps for scanner and ras '
+                          'for world.'))
+    grad_opt.add_argument('--gradient-target-convention', default=None,
+                          help=('Physical convention for the target basis '
+                          '(lps or ras). Defaults to lps for scanner and ras '
+                          'for world.'))
+    grad_opt.add_argument('--gradient-normalize', default=False,
+                          action='store_true',
+                          help='Normalize non-zero exported directions.')
+    grad_opt.add_argument('--gradient-on-degenerate', default='raise',
+                          choices=('raise', 'status'),
+                          help=('Action for a degenerate spatial transform: '
+                          'raise an error or record a status entry. '
+                          'Default: %(default)s'))
 
     extr_opt = arg_parser.add_argument_group('Meta Data Extraction Options')
     extr_opt.add_argument("-l", "--level", default="more", 
@@ -316,6 +357,28 @@ def main(argv=sys.argv):
                 if not out_dir.is_dir():
                     out_dir = out_dir.parent
             out_path = os.path.join(out_dir, out_fn)
+            grad_table = None
+            if args.dump_gradients or args.export_bvals:
+                grad_kwargs = {
+                    'source_basis': args.gradient_source_basis,
+                    'target_basis': args.gradient_target_basis,
+                    'source_convention': args.gradient_source_convention,
+                    'target_convention': args.gradient_target_convention,
+                    'normalize': args.gradient_normalize,
+                    'on_degenerate': args.gradient_on_degenerate,
+                }
+                if args.gradient_keys:
+                    grad_kwargs['gradient_keys'] = tuple(
+                        key.strip() for key in args.gradient_keys.split(',')
+                        if key.strip()
+                    )
+                if args.b_value_keys:
+                    grad_kwargs['b_value_keys'] = tuple(
+                        key.strip() for key in args.b_value_keys.split(',')
+                        if key.strip()
+                    )
+                grad_table = stack.get_gradients(args.voxel_order,
+                                                 **grad_kwargs)
             if args.dump_meta:
                 nii_wrp = NiftiWrapper(nii)
                 path_tokens = out_path.split('.')
@@ -332,6 +395,25 @@ def main(argv=sys.argv):
                 if not args.embed_meta:
                     nii_wrp.remove_extension()
                 del nii_wrp
+            if grad_table is not None:
+                base_tokens = out_path.split('.')
+                if base_tokens[-1] == 'gz':
+                    base_tokens = base_tokens[:-1]
+                if base_tokens[-1] == 'nii':
+                    base_tokens = base_tokens[:-1]
+                base = '.'.join(base_tokens)
+                if args.verbose:
+                    print(f"Writing gradient table to {base}.gradients.json")
+                json_path = (base + '.gradients.json'
+                             if args.dump_gradients else None)
+                bval_path = base + '.bval' if args.export_bvals else None
+                bvec_path = base + '.bvec' if args.export_bvals else None
+                gradients.write_gradient_table(
+                    grad_table,
+                    json_path=json_path,
+                    bval_path=bval_path,
+                    bvec_path=bvec_path,
+                )
             if args.verbose:
                 print("Writing out stack to path %s" % out_path)
                 start = datetime.now()

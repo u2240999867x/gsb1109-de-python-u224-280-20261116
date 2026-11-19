@@ -179,3 +179,43 @@ and values. For example, to set a globally constant element with the key
 
 
 
+
+Exporting Diffusion Gradients
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Use *--dump-gradients* to write a JSON gradient table next to the converted
+Nifti, and *--export-bvals* to additionally write FSL-style ``.bval`` and
+``.bvec`` files.  The gradient directions are read from explicitly named meta
+data fields with *--gradient-keys* and *--b-value-keys* (comma separated, in
+priority order).  For example:
+
+.. code-block:: console
+
+    $ dcmstack dcm_dir/ --embed-meta --dump-gradients --export-bvals \
+        --gradient-keys DiffusionGradientOrientation \
+        --b-value-keys DiffusionBValue
+
+The source and target bases are selected with *--gradient-source-basis* and
+*--gradient-target-basis* (``scanner``, ``world`` or ``voxel``).
+*--gradient-source-convention* and *--gradient-target-convention* select the
+physical handedness (``lps`` or ``ras``) when it differs from the default.
+Directions are transformed as vectors in the requested basis; they are not
+blindly permuted/flipped when the voxel order changes.
+
+The JSON table records, for every sample, the exported gradient, b-value,
+status, time/vector/slice indices, the original gradient and its meta data
+key, and the source instance(s) or index.  Missing and incomplete directions
+are reported with a status instead of being replaced by a unit vector; zero
+gradients remain zero.  A degenerate transform raises an error unless
+*--gradient-on-degenerate status* is given, in which case the row is marked
+``degenerate``.
+
+The same table can be produced from an existing extended Nifti:
+
+.. code-block:: console
+
+    $ nitool gradients image.nii.gz -j image.gradients.json \
+        --bval image.bval --bvec image.bvec \
+        --source-basis scanner --target-basis voxel
+
+Use *--inverse* to convert the exported directions back to the source basis.

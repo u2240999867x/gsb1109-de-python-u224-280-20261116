@@ -12,6 +12,7 @@ import nibabel as nb
 
 from .dcmmeta import DcmMetaExtension
 from .nifti_wrapper import MissingExtensionError
+from . import gradients
 
 prog_descrip = """Work with extended Nifti files created by dcmstack"""
 
@@ -90,6 +91,44 @@ def main(argv=sys.argv):
                                "must be provided as a comma separated list of "
                                "integers (one for each dimension)."))
     lookup_parser.set_defaults(func=lookup)
+
+    #Gradient command
+    grad_help = ("Export a gradient table aligned with the image, including "
+                 "b-values and the source instance(s) for each sample.")
+    grad_parser = sub_parsers.add_parser('gradients', help=grad_help)
+    grad_parser.add_argument('src_nii', nargs=1)
+    grad_parser.add_argument('-j', '--json', default=None,
+                             help=("Write the full gradient table to this "
+                             "JSON file. Defaults to stdout when no bval/bvec "
+                             "output is requested."))
+    grad_parser.add_argument('--bval', default=None,
+                             help="Write an FSL-style .bval file.")
+    grad_parser.add_argument('--bvec', default=None,
+                             help="Write an FSL-style .bvec file.")
+    grad_parser.add_argument('--gradient-keys', default=None,
+                             help=("Comma separated meta data keys to read the "
+                             "gradient direction from, in priority order."))
+    grad_parser.add_argument('--b-value-keys', default=None,
+                             help=("Comma separated meta data keys to read the "
+                             "b-value from, in priority order."))
+    grad_parser.add_argument('--instance-keys', default=None,
+                             help=("Comma separated meta data keys used to "
+                             "identify the source instance(s)."))
+    grad_parser.add_argument('--source-basis', default='scanner',
+                             choices=('scanner', 'world', 'voxel'))
+    grad_parser.add_argument('--target-basis', default='voxel',
+                             choices=('scanner', 'world', 'voxel'))
+    grad_parser.add_argument('--source-convention', default=None)
+    grad_parser.add_argument('--target-convention', default=None)
+    grad_parser.add_argument('--normalize', default=False,
+                             action='store_true')
+    grad_parser.add_argument('--on-degenerate', default='raise',
+                             choices=('raise', 'status'))
+    grad_parser.add_argument('--inverse', default=False,
+                             action='store_true',
+                             help=("Convert back to the source basis using the "
+                             "source affine recorded in the extension."))
+    grad_parser.set_defaults(func=gradients_cmd)
 
     #Inject command
     inject_help = "Inject meta data into the JSON extension."
@@ -208,6 +247,50 @@ def lookup(args):
     meta = src_wrp.get_meta(args.key[0], index)
     if not meta is None:
         print(meta)
+    return 0
+
+
+def _split_keys(value):
+    if value is None:
+        return None
+    keys = tuple(key.strip() for key in value.split(',') if key.strip())
+    return keys or None
+
+
+def gradients_cmd(args):
+    src_wrp = NiftiWrapper.from_filename(args.src_nii[0])
+    kwargs = {
+        'source_basis': args.source_basis,
+        'target_basis': args.target_basis,
+        'source_convention': args.source_convention,
+        'target_convention': args.target_convention,
+        'normalize': args.normalize,
+        'on_degenerate': args.on_degenerate,
+    }
+    gradient_keys = _split_keys(args.gradient_keys)
+    b_value_keys = _split_keys(args.b_value_keys)
+    instance_keys = _split_keys(args.instance_keys)
+    if gradient_keys:
+        kwargs['gradient_keys'] = gradient_keys
+    if b_value_keys:
+        kwargs['b_value_keys'] = b_value_keys
+    if instance_keys:
+        kwargs['instance_keys'] = instance_keys
+    table = src_wrp.get_gradients(**kwargs)
+    if args.inverse:
+        table = table.inverse(args.source_basis)
+    json_path = args.json
+    if json_path is None and args.bval is None and args.bvec is None:
+        json_path = sys.stdout
+    if json_path is sys.stdout:
+        sys.stdout.write(table.to_json())
+        sys.stdout.write('\n')
+    elif json_path is not None:
+        table.write_json(json_path)
+    if args.bval is not None or args.bvec is not None:
+        gradients.write_bvals_bvecs(
+            table.b_values, table.gradients, args.bval, args.bvec
+        )
     return 0
 
 def convert_values(values, type_str=None):

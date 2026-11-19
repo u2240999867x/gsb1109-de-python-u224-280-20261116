@@ -29,3 +29,10 @@ dcmstack Package
     :members:
     :show-inheritance:
 
+
+:mod:`gradients` Module
+-----------------------
+
+.. automodule:: dcmstack.gradients
+    :members:
+    :show-inheritance:
