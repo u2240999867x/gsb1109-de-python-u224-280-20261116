@@ -106,6 +106,42 @@ class UsnRecord:
     def __getattr__(self, attr: str) -> Any:
         return getattr(self.record, attr)
 
+    @property
+    def usn(self) -> int:
+        """Return the USN of this record."""
+        return self.record.Usn
+
+    @property
+    def reason(self) -> int:
+        """Return the reason flags of this record as an integer."""
+        return int(self.record.Reason)
+
+    @property
+    def file_reference(self) -> int | bytes:
+        """Return the file reference of this record.
+
+        Version 2 records are resolved to a single integer segment reference. Version 3 and 4
+        records keep their 128-bit identifier as bytes.
+        """
+        return _record_reference(self.record.FileReferenceNumber)
+
+    @property
+    def parent_reference(self) -> int | bytes:
+        """Return the parent file reference of this record."""
+        return _record_reference(self.record.ParentFileReferenceNumber)
+
+    @property
+    def sequence_number(self) -> int:
+        """Return the sequence number of this record's file reference, or ``0`` for 128-bit references."""
+        reference = self.record.FileReferenceNumber
+        return int(getattr(reference, "SequenceNumber", 0))
+
+    @property
+    def parent_sequence_number(self) -> int:
+        """Return the sequence number of this record's parent reference, or ``0`` for 128-bit references."""
+        reference = self.record.ParentFileReferenceNumber
+        return int(getattr(reference, "SequenceNumber", 0))
+
     @cached_property
     def file(self) -> MftRecord | None:
         if self.usnjrnl.ntfs and self.usnjrnl.ntfs.mft:
@@ -142,3 +178,10 @@ class UsnRecord:
             parent_path = f"<broken_reference_0x{ref:x}#{self.record.ParentFileReferenceNumber.SequenceNumber}>"
 
         return f"{parent_path}\\{self.filename}"
+
+
+def _record_reference(reference: Any) -> int | bytes:
+    if hasattr(reference, "SegmentNumberLowPart"):
+        return segment_reference(reference)
+
+    return bytes(reference.Identifier)

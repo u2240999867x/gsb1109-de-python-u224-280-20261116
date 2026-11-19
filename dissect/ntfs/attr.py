@@ -401,6 +401,15 @@ class StandardInformation(AttributeRecord):
         """Return the ``$STANDARD_INFORMATION`` ``SecurityId``."""
         return self.attr.SecurityId
 
+    @property
+    def usn(self) -> int:
+        """Return the ``$STANDARD_INFORMATION`` ``Usn``.
+
+        This is the USN of the last change that was applied to this record. It can be used as the
+        snapshot side of a change journal handoff.
+        """
+        return self.attr.Usn
+
 
 class FileName(AttributeRecord):
     """Specific :class:`AttributeRecord` parser for ``$FILE_NAME``."""

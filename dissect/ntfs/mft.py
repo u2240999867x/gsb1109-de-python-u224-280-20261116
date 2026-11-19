@@ -309,6 +309,21 @@ class MftRecord:
         filenames = self.filenames()
         return filenames[0] if filenames else None
 
+    @property
+    def usn(self) -> int | None:
+        """Return the USN of the last change applied to this record, if available.
+
+        The USN is stored in the ``$STANDARD_INFORMATION`` attribute of the MFT record.
+        """
+        attrs = self.attributes[ATTRIBUTE_TYPE_CODE.STANDARD_INFORMATION]
+        if not attrs:
+            return None
+
+        try:
+            return int(attrs.attribute.usn)
+        except (AttributeError, ValueError):
+            return None
+
     def filenames(self, ignore_dos: bool = False) -> list[str]:
         """Return all file names of this record.
 

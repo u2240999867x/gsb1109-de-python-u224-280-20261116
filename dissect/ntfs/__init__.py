@@ -2,6 +2,19 @@ from __future__ import annotations
 
 from dissect.ntfs.attr import Attribute, AttributeHeader, AttributeRecord
 from dissect.ntfs.c_ntfs import ATTRIBUTE_TYPE_CODE, NTFS_SIGNATURE
+from dissect.ntfs.handoff import (
+    Change,
+    EventIdentity,
+    Gap,
+    Handoff,
+    HandoffBoundary,
+    HandoffReport,
+    Migration,
+    Snapshot,
+    SnapshotEntry,
+    build_handoff,
+    merge_snapshot_and_journal,
+)
 from dissect.ntfs.index import Index, IndexEntry
 from dissect.ntfs.mft import Mft, MftRecord
 from dissect.ntfs.ntfs import NTFS
@@ -17,12 +30,23 @@ __all__ = [
     "Attribute",
     "AttributeHeader",
     "AttributeRecord",
+    "Change",
+    "EventIdentity",
+    "Gap",
+    "Handoff",
+    "HandoffBoundary",
+    "HandoffReport",
     "Index",
     "IndexEntry",
     "Mft",
     "MftRecord",
+    "Migration",
     "Secure",
     "SecurityDescriptor",
+    "Snapshot",
+    "SnapshotEntry",
     "UsnJrnl",
     "UsnRecord",
+    "build_handoff",
+    "merge_snapshot_and_journal",
 ]
