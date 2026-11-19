@@ -65,10 +65,34 @@ dimension, you can do so with the *--time-var* (*-t*) and
 *--vector-var* (*-v*) options. Both options take a meta data key as an 
 argument.
 
-If there isn't an attribute that can be used with a simple ascending order to 
-sort along these dimensions, the *--time-order* or *--vector-order* options 
-can be used. The argument to the option should be a text file with one value 
-per line corresponding to the sorted order to use. 
+If there isn't an attribute that can be used with a simple ascending order to
+sort along these dimensions, the *--time-order* or *--vector-order* options
+can be used. The argument to the option should be a text file with one value
+per line corresponding to the sorted order to use.
+
+Declaring Dimensions for Mixed Directories
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+If one directory contains several time points, several echoes, and duplicate
+slices, declare the axes with *--dims* instead of relying on guessing. The
+argument is a comma separated list of meta data keys in time,vector order;
+leave an entry empty to skip that axis:
+
+.. code-block:: console
+
+    $ dcmstack mixed_dir --dims EchoTime --provenance-json
+
+With *--dims* the declared keys are not used for grouping, so the echoes and
+time points end up in a single stack. A retransmitted SOPInstanceUID is added
+only once (use *--keep-duplicate-sops* to override), and a missing slice
+position becomes a zero-filled placeholder marked as missing rather than an
+error (use *--no-allow-missing* to restore the strict behavior). A placeholder
+is never filled with a slice from another echo.
+
+*--provenance-json* writes a ``.provenance.json`` sidecar next to each output
+Nifti listing the file, SOPInstanceUID, slice position, and missing flag for
+every slice. The same values are embedded as per-slice meta data under the
+*DcmStack.** keys when *--embed* or *--dump* is used.
 
 Creating Uncompressed Niftis
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^

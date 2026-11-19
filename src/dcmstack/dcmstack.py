@@ -99,6 +99,7 @@ create the `default_meta_filter`.'''
 
 default_key_incl_res = ['ImageOrientationPatient',
                         'ImagePositionPatient',
+                        r'DcmStack\.',
                        ]
 '''A list of regexes passed to `make_key_regex_filter` as `force_include_res`
 to create the `default_meta_filter`.'''
@@ -191,6 +192,16 @@ class ImageCollisionError(Exception):
         return "The image collides with one already in the stack"
 
 
+class DicomOrderingError(Exception):
+    '''An exception denoting that a declared dimension key is not available,
+    or that its value cannot be used to order a data set.'''
+    def __init__(self, msg):
+        self.msg = msg
+
+    def __str__(self):
+        return "Unable to order the DICOM data sets: %s" % self.msg
+
+
 class NonImageDataSetError(Exception):
     '''The DICOM doesn't contain image data'''
     def __str__(self):
@@ -268,8 +279,21 @@ multi-dimensional array together.'''
 
 
 DEFAULT_CLOSE_KEYS = ('ImageOrientationPatient',)
-'''Default keys needing np.allclose instead of equaulity testing when grouping 
+'''Default keys needing np.allclose instead of equaulity testing when grouping
 '''
+
+
+# Meta data keys used to record where each assembled slice came from. The
+# values are injected into the per-file meta data and summarized into the
+# DcmMeta extension like any other meta data, so they end up as per-slice
+# values when a stack is embedded into a Nifti header.
+PROVENANCE_KEYS = (
+    'DcmStack.SourceFile',
+    'DcmStack.SOPInstanceUID',
+    'DcmStack.SlicePosition',
+    'DcmStack.Missing',
+)
+'''Meta data keys used to preserve the source of every assembled slice.'''
 
 
 _pix_tags = tuple(tag_for_keyword(x) for x in ('PixelData', 'FloatPixelData', 'DoubleFloatPixelData'))
@@ -305,10 +329,34 @@ class DicomStack(object):
         A callable that takes a meta data key and value, and returns True if
         that meta data element should be excluded from the DcmMeta extension.
 
+    dimensions : sequence or dict
+        Explicit declaration of the non-spatial dimensions. This can be a
+        dictionary mapping ``'time'`` and/or ``'vector'`` to DICOM keywords (or
+        `DicomOrdering` objects), or a sequence of one or two keywords which
+        are interpreted as the time and vector dimensions in that order. When
+        declared, the dimensions are used as-is and are never guessed. Each
+        distinct combination of the declared values defines one volume; the
+        slice position is always the innermost dimension.
+
+    allow_missing : bool
+        If True, slice positions that are absent for a given time/vector
+        combination are kept as empty placeholders instead of raising
+        `InvalidStackError`. Placeholders are filled with zeros and are marked
+        in the per-slice provenance. A slice is never borrowed from another
+        time point or echo to fill a gap. Defaults to True when `dimensions`
+        is provided and False otherwise.
+
+    dedupe_sop : bool
+        If True, a DICOM instance whose SOPInstanceUID has already been added
+        is ignored. This treats a retransmission of the same instance as a
+        single piece of material. Defaults to True when `dimensions` is
+        provided and False otherwise (to preserve the historical
+        `ImageCollisionError` behavior of `add_dcm`).
+
     Notes
     -----
-    If both time_order and vector_order are None, the time_order will be
-    guessed based off the data sets.
+    If `dimensions` is None and both time_order and vector_order are None, the
+    time_order will be guessed based off the data sets.
     '''
     OTHER_REQ_ATTRS = (
         'Rows',
@@ -323,7 +371,12 @@ class DicomStack(object):
 
     SORT_GUESSES = SORT_GUESSES[:]
 
-    def __init__(self, time_order=None, vector_order=None, meta_filter=None):
+    def __init__(self, time_order=None, vector_order=None, meta_filter=None,
+                 dimensions=None, allow_missing=None, dedupe_sop=None):
+        if dimensions is not None:
+            time_order, vector_order = self._parse_dimensions(
+                dimensions, time_order, vector_order
+            )
         if isinstance(time_order, str):
             self._time_order = DicomOrdering(time_order)
         else:
@@ -332,12 +385,46 @@ class DicomStack(object):
             self._vector_order = DicomOrdering(vector_order)
         else:
             self._vector_order = vector_order
+        self._explicit_dims = dimensions is not None
+        if allow_missing is None:
+            allow_missing = self._explicit_dims
+        self._allow_missing = allow_missing
+        if dedupe_sop is None:
+            dedupe_sop = self._explicit_dims
+        self._dedupe_sop = dedupe_sop
         if meta_filter is None:
             self._meta_filter = default_meta_filter
         else:
             self._meta_filter = meta_filter
         #Sets all the state variables to their defaults
         self.clear()
+
+    @staticmethod
+    def _parse_dimensions(dimensions, time_order, vector_order):
+        '''Normalize an explicit dimension declaration into time/vector
+        orderings.'''
+        if isinstance(dimensions, dict):
+            unknown = set(dimensions) - {'time', 'vector'}
+            if unknown:
+                raise ValueError("Unknown dimension(s): %s" %
+                                 ', '.join(sorted(unknown)))
+            time_decl = dimensions.get('time', time_order)
+            vector_decl = dimensions.get('vector', vector_order)
+        elif isinstance(dimensions, str):
+            time_decl, vector_decl = dimensions, vector_order
+        else:
+            decls = list(dimensions)
+            if len(decls) > 2:
+                raise ValueError("At most two dimensions can be declared")
+            if len(decls) > 0:
+                time_decl = decls[0]
+            else:
+                time_decl = time_order
+            if len(decls) > 1:
+                vector_decl = decls[1]
+            else:
+                vector_decl = vector_order
+        return time_decl, vector_decl
 
     @classmethod
     def get_min_req_meta(cls):
@@ -390,12 +477,24 @@ class DicomStack(object):
         ImageCollisionError
             The provided `dcm` has the same slice location and time/vector
             values.
-        
+
         NonImageDataSetError
             The provided `dcm` doesn't contain image data
+
+        Notes
+        -----
+        When `dedupe_sop` is enabled a dataset with an already seen
+        SOPInstanceUID is silently ignored (the first occurrence wins), so a
+        retransmission of the same instance contributes only one slice.
         '''
         if not is_image(dcm):
             raise NonImageDataSetError()
+        # Any placeholders from a previous assembly are stale once new data
+        # arrives; drop them so they can be recomputed from the full input set.
+        self._drop_missing_slices()
+        sop_uid = getattr(dcm, 'SOPInstanceUID', None)
+        if self._dedupe_sop and sop_uid is not None and sop_uid in self._sop_uids:
+            return False
         # Extract at least some minimal meta data
         if meta is None:
             from .extract import EXTRACTORS, ExtractionLevel
@@ -422,10 +521,22 @@ class DicomStack(object):
         time_val = None
         if self._time_order:
             time_val = self._time_order.get_ordinate(nii_wrp)
+            if self._explicit_dims and time_val is None:
+                raise DicomOrderingError(
+                    "Declared time dimension key '%s' is missing from %s" %
+                    (self._time_order.key,
+                     getattr(dcm, 'filename', 'the data set'))
+                )
         self._time_vals.add(time_val)
         vector_val = None
         if self._vector_order:
             vector_val = self._vector_order.get_ordinate(nii_wrp)
+            if self._explicit_dims and vector_val is None:
+                raise DicomOrderingError(
+                    "Declared vector dimension key '%s' is missing from %s" %
+                    (self._vector_order.key,
+                     getattr(dcm, 'filename', 'the data set'))
+                )
         self._vector_vals.add(vector_val)
         sorting_tuple = (vector_val, time_val, slice_pos)
         # Also check for collisions if we already know how to sort
@@ -434,12 +545,125 @@ class DicomStack(object):
             sorting_tuple in self._sorting_tuples
            ):
             raise ImageCollisionError()
+        # Record the source of this slice before adding it to the stack
+        source_file = getattr(dcm, 'filename', None)
+        if source_file is None:
+            source_file = getattr(dcm, 'source_path', None)
+        self._inject_provenance(nii_wrp.meta_ext, {
+            'DcmStack.SourceFile': source_file,
+            'DcmStack.SOPInstanceUID': sop_uid,
+            'DcmStack.SlicePosition': slice_pos,
+            'DcmStack.Missing': False,
+        })
+        # Remember the declared dimension values for this volume so that any
+        # empty slice slot can be labeled without borrowing another slice.
+        dim_values = {}
+        for order, val in ((self._time_order, time_val),
+                           (self._vector_order, vector_val)):
+            if order is None or val is None:
+                continue
+            raw_val = nii_wrp.get_meta(order.key)
+            if raw_val is not None:
+                dim_values[order.key] = raw_val
+        self._dim_values[(vector_val, time_val)] = dim_values
         # Add image to our internal set
         self._sorting_tuples.add(sorting_tuple)
         self._files_info.append((nii_wrp, sorting_tuple))
+        if sop_uid is not None:
+            self._sop_uids.add(sop_uid)
         if self._ref_input is None:
             self._ref_input = nii_wrp
         #Set the dirty flags
+        self._shape_dirty = True
+        self._meta_dirty = True
+        return True
+
+    @staticmethod
+    def _inject_provenance(meta_ext, values):
+        '''Record source provenance in a per-file meta data extension.'''
+        global_meta = meta_ext.get_class_dict(('global', 'const'))
+        for key, val in values.items():
+            global_meta[key] = val
+
+    def _make_missing_slice(self, sorting_tuple, slice_pos):
+        '''Create an empty placeholder for a missing slice.
+
+        The placeholder reuses only the spatial geometry (shape and orientation)
+        of the reference input. It does not copy the meta data of any other
+        slice, so no other echo or time point is used to fill the gap.
+        '''
+        ref = self._ref_input
+        data = np.zeros(ref.nii_img.shape, dtype=ref.nii_img.dataobj.dtype)
+        ref_affine = ref.nii_img.affine
+        slice_vec = ref_affine[2, :3]
+        norm = np.linalg.norm(slice_vec)
+        affine = ref_affine.copy()
+        if norm > 0:
+            unit_normal = slice_vec / norm
+            ref_pos = np.inner(ref_affine[:3, 3], unit_normal)
+            affine[:3, 3] += (slice_pos - ref_pos) * unit_normal
+        nii_img = nb.Nifti1Image(data, affine)
+        nii_img.header.set_dim_info(slice=2)
+        nii_wrp = NiftiWrapper(nii_img, make_empty=True)
+        nii_wrp.meta_ext.reorient_transform = np.eye(4)
+        nii_wrp.meta_ext.affine = affine
+        self._inject_provenance(nii_wrp.meta_ext, {
+            'DcmStack.SourceFile': None,
+            'DcmStack.SOPInstanceUID': None,
+            'DcmStack.SlicePosition': slice_pos,
+            'DcmStack.Missing': True,
+        })
+        # Label the empty slot with the declared dimension values of its own
+        # volume. These come from the other slices of the same volume, not
+        # from another time point or echo.
+        vector_val, time_val = sorting_tuple[0], sorting_tuple[1]
+        for key, val in self._dim_values.get((vector_val, time_val), {}).items():
+            nii_wrp.meta_ext.get_class_dict(('global', 'const'))[key] = val
+        return nii_wrp
+
+    def _drop_missing_slices(self):
+        '''Remove any placeholder slices so they can be recomputed.'''
+        if not self._files_info:
+            return
+        kept = [info for info in self._files_info
+                if not info[0].meta_ext.get_class_dict(
+                    ('global', 'const')).get('DcmStack.Missing', False)]
+        if len(kept) != len(self._files_info):
+            self._files_info = kept
+            self._sorting_tuples = set(info[1] for info in kept)
+            self._shape_dirty = True
+            self._meta_dirty = True
+
+    def _fill_missing_slices(self):
+        '''Insert placeholders for slice positions absent from a volume.
+
+        Only used when `allow_missing` is enabled. The expected positions are
+        the union of the positions that were actually declared by the input
+        data sets, so a gap is an explicit empty slot at a position that exists
+        in some other volume. Positions that no input declares are never
+        invented, and a gap is never filled with a slice from another echo or
+        time point.
+        '''
+        if not self._allow_missing or not self._slice_pos_vals:
+            return
+        slice_positions = sorted(self._slice_pos_vals)
+        time_vals = sorted(self._time_vals,
+                           key=lambda x: (x is None, x))
+        vector_vals = sorted(self._vector_vals,
+                             key=lambda x: (x is None, x))
+        present = set(info[1] for info in self._files_info)
+        filled = []
+        for vector_val in vector_vals:
+            for time_val in time_vals:
+                for slice_pos in slice_positions:
+                    sorting_tuple = (vector_val, time_val, slice_pos)
+                    if sorting_tuple in present:
+                        continue
+                    placeholder = self._make_missing_slice(
+                        sorting_tuple, slice_pos
+                    )
+                    filled.append((placeholder, sorting_tuple))
+        self._files_info.extend(filled)
         self._shape_dirty = True
         self._meta_dirty = True
 
@@ -449,6 +673,8 @@ class DicomStack(object):
         self._time_vals = set()
         self._vector_vals = set()
         self._sorting_tuples = set()
+        self._sop_uids = set()
+        self._dim_values = {}
         self._phase_enc_dirs = set()
         self._repetition_times = set()
         self._slope_inter = set()
@@ -512,6 +738,8 @@ class DicomStack(object):
         if not self._shape_dirty:
             return self._shape
         self._guessed_order = None
+        # Insert explicit placeholders for any missing slices
+        self._fill_missing_slices()
         #We need at least one file in the stack
         n_files = len(self._files_info)
         if n_files == 0:
@@ -520,7 +748,7 @@ class DicomStack(object):
         files_per_vol = len(self._slice_pos_vals)
         slice_positions = sorted(list(self._slice_pos_vals))
         #If more than one file per volume, check that slice spacing is equal
-        if files_per_vol > 1:
+        if files_per_vol > 1 and not self._allow_missing:
             spacings = []
             for idx in range(files_per_vol - 1):
                 spacings.append(slice_positions[idx+1] - slice_positions[idx])
@@ -695,6 +923,40 @@ class DicomStack(object):
 
     data = property(fget=get_data)
 
+    def get_slice_sources(self):
+        '''Get the source of every slice in the assembled stack.
+
+        Returns
+        -------
+        sources : list of dict
+            One dictionary per slice, in the same order as the slices in the
+            data array. Each dictionary has the keys ``file``,
+            ``sop_instance_uid``, ``slice_position``, and ``missing``. For an
+            empty placeholder (see `allow_missing`) ``file`` and
+            ``sop_instance_uid`` are None and ``missing`` is True.
+
+        Raises
+        ------
+        InvalidStackError
+            The stack is incomplete or invalid.
+        '''
+        # Compute the assembled order only if it has never been computed. If it
+        # has, reuse the current file order: reorientation may have reversed
+        # the slices to match the voxel data, and re-sorting here would
+        # desynchronize the provenance from the data array.
+        if self._shape is None:
+            self.shape
+        sources = []
+        for nii_wrp, sorting_tuple in self._files_info:
+            meta = nii_wrp.meta_ext.get_class_dict(('global', 'const'))
+            sources.append({
+                'file': meta.get('DcmStack.SourceFile'),
+                'sop_instance_uid': meta.get('DcmStack.SOPInstanceUID'),
+                'slice_position': sorting_tuple[-1],
+                'missing': bool(meta.get('DcmStack.Missing', False)),
+            })
+        return sources
+
     def get_affine(self):
         '''Get the affine transform for mapping row/column/slice indices
         to Nifti (RAS) patient space.
@@ -824,11 +1086,15 @@ class DicomStack(object):
                         None)
         if files_per_vol > 1 and has_acq_time:
             #Pull out the relative slice times for the first volume
-            slice_times = np.array([file_info[0]['SND.AcquisitionTimeStamp']
+            slice_times = np.array([file_info[0].get_meta('SND.AcquisitionTimeStamp')
                                     for file_info in self._files_info[:n_slices]]
                                   )
-            slice_times -= np.min(slice_times)
-
+            if None in slice_times:
+                has_acq_time = False
+            else:
+                slice_times = slice_times.astype(float)
+                slice_times -= np.min(slice_times)
+        if files_per_vol > 1 and has_acq_time:
             #If there is more than one volume, check if times are consistent
             is_consistent = True
             for vol_idx in range(1, n_vols):
@@ -836,9 +1102,13 @@ class DicomStack(object):
                 end_slice = start_slice + n_slices
                 slices_info = self._files_info[start_slice:end_slice]
                 vol_slc_times = \
-                    np.array([file_info[0]['SND.AcquisitionTimeStamp']
+                    np.array([file_info[0].get_meta('SND.AcquisitionTimeStamp')
                               for file_info in slices_info]
                             )
+                if None in vol_slc_times:
+                    is_consistent = False
+                    break
+                vol_slc_times = vol_slc_times.astype(float)
                 vol_slc_times -= np.min(vol_slc_times)
                 if not np.allclose(slice_times, vol_slc_times):
                     is_consistent = False
@@ -1081,7 +1351,26 @@ def parse_and_stack(src_paths, group_by=DEFAULT_GROUP_KEYS, extractor=None,
 
     stack_args : kwargs
         Keyword arguments to pass to the DicomStack constructor.
+
+    Notes
+    -----
+    When the ``dimensions`` stack argument is provided, the declared dimension
+    keys are removed from `group_by`. This keeps all of the time points and
+    echoes in a single assembly instead of splitting them into separate stacks
+    along an axis that is already declared.
     '''
+    dimensions = stack_args.get('dimensions')
+    if dimensions is not None:
+        if isinstance(dimensions, dict):
+            declared = [dimensions.get('time'), dimensions.get('vector')]
+        elif isinstance(dimensions, str):
+            declared = [dimensions]
+        else:
+            declared = list(dimensions)
+        declared = set(key for key in declared if isinstance(key, str))
+        if declared:
+            group_by = tuple(key for key in group_by
+                             if key not in declared)
     results = parse_and_group(src_paths,
                               group_by,
                               extractor,

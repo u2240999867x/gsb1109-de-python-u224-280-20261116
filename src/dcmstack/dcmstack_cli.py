@@ -1,5 +1,5 @@
 """Command line interface to dcmstack."""
-import os, sys, argparse, string
+import os, sys, argparse, string, json
 from glob import glob
 from datetime import datetime
 
@@ -133,6 +133,33 @@ def main(argv=sys.argv):
                            'for the values (one per line) of the attribute '
                            'used as the vector variable. This option is rarely '
                            'needed.'))
+    stack_opt.add_argument('--dims', default=None,
+                           help=('Explicitly declare the non-spatial dimensions '
+                           'as a comma separated list of DICOM keywords, in '
+                           'time,vector order. Declared dimensions are never '
+                           'guessed and are kept in a single stack. Use an '
+                           'empty entry to leave a dimension undeclared, e.g. '
+                           '"EchoTime," to declare only the time dimension.'))
+    stack_opt.add_argument('--allow-missing', default=None,
+                           action='store_true',
+                           help=('Keep missing slices as explicit empty '
+                           'placeholders (zero filled, marked in the '
+                           'provenance) instead of failing. Defaults to on '
+                           'when --dims is used.'))
+    stack_opt.add_argument('--no-allow-missing', dest='allow_missing',
+                           action='store_false',
+                           help=('Fail when a slice position is missing from a '
+                           'volume, even when --dims is used.'))
+    stack_opt.add_argument('--keep-duplicate-sops', default=False,
+                           action='store_true',
+                           help=('Add every occurrence of a SOPInstanceUID '
+                           'instead of treating a retransmission as a single '
+                           'piece of material. By default duplicates are '
+                           'dropped when --dims is used.'))
+    stack_opt.add_argument('--provenance-json', default=False,
+                           action='store_true',
+                           help=('Write a JSON sidecar listing the source of '
+                           'every slice next to each output Nifti.'))
 
     extr_opt = arg_parser.add_argument_group('Meta Data Extraction Options')
     extr_opt.add_argument("-l", "--level", default="more", 
@@ -248,6 +275,28 @@ def main(argv=sys.argv):
         group_by = args.group_by.split(',')
     else:
         group_by = DEFAULT_GROUP_KEYS
+    #Handle explicit dimension declaration
+    dimensions = None
+    if args.dims is not None:
+        dims = [dim.strip() for dim in args.dims.split(',')]
+        dimensions = {}
+        if len(dims) > 0 and dims[0]:
+            dimensions['time'] = dims[0]
+        if len(dims) > 1 and dims[1]:
+            dimensions['vector'] = dims[1]
+        if not dimensions:
+            dimensions = None
+    if dimensions is not None:
+        declared = set(dimensions.values())
+        group_by = [key for key in group_by if key not in declared]
+    stack_kwargs = {'time_order': time_order,
+                    'vector_order': vector_order,
+                    'meta_filter': meta_filter,
+                    'dedupe_sop': not args.keep_duplicate_sops}
+    if dimensions is not None:
+        stack_kwargs['dimensions'] = dimensions
+    if args.allow_missing is not None:
+        stack_kwargs['allow_missing'] = args.allow_missing
 
     # Process files in batches
     for src, src_paths in _gen_src_batches(args):
@@ -274,9 +323,7 @@ def main(argv=sys.argv):
                 start = datetime.now()
             stack = stack_group(group,
                                 warn_on_except=not args.strict,
-                                time_order=time_order,
-                                vector_order=vector_order,
-                                meta_filter=meta_filter)
+                                **stack_kwargs)
             if args.verbose:
                 delta = datetime.now() - start
                 print(f"DicomStack creation took: {delta}")
@@ -336,6 +383,17 @@ def main(argv=sys.argv):
                 print("Writing out stack to path %s" % out_path)
                 start = datetime.now()
             nii.to_filename(out_path)
+            if args.provenance_json:
+                path_tokens = out_path.split('.')
+                if path_tokens[-1] == 'gz':
+                    path_tokens = path_tokens[:-1]
+                if path_tokens[-1] == 'nii':
+                    path_tokens = path_tokens[:-1]
+                prov_path = '.'.join(path_tokens + ['provenance.json'])
+                if args.verbose:
+                    print(f"Writing slice provenance to: {prov_path}")
+                with open(prov_path, 'w') as prov_file:
+                    json.dump(stack.get_slice_sources(), prov_file, indent=4)
             if args.verbose:
                 end = datetime.now()
                 print(f"Writing / compression took: {end - start}")

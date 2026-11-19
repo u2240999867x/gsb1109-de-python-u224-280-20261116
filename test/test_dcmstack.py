@@ -685,6 +685,141 @@ class TestParseAndStack(object):
         assert stack_data.ndim == 4
 
 
+class TestDeclaredDimensions(object):
+    '''Tests for explicit dimension declarations, SOP deduplication, and
+    gap-tolerant assembly.'''
+
+    def setup_method(self, method):
+        self.data_dir = path.join(test_dir,
+                             'data',
+                             'dcmstack',
+                             '2D_16Echo_qT2')
+
+    def _read(self, fn):
+        return pydicom.dcmread(path.join(self.data_dir, fn))
+
+    def test_declaration_order(self):
+        stack = dcmstack.DicomStack(dimensions=['EchoTime'])
+        order = stack._time_order
+        assert isinstance(order, dcmstack.DicomOrdering)
+        assert order.key == 'EchoTime'
+        assert stack._vector_order is None
+        assert stack._allow_missing is True
+        assert stack._dedupe_sop is True
+
+    def test_declaration_dict(self):
+        stack = dcmstack.DicomStack(
+            dimensions={'time': 'EchoTime', 'vector': 'AcquisitionNumber'}
+        )
+        assert stack._time_order.key == 'EchoTime'
+        assert stack._vector_order.key == 'AcquisitionNumber'
+
+    def test_declaration_unknown_dimension(self):
+        with pytest.raises(ValueError):
+            dcmstack.DicomStack(dimensions={'echo': 'EchoTime'})
+        with pytest.raises(ValueError):
+            dcmstack.DicomStack(dimensions=['EchoTime', 'AcquisitionNumber',
+                                            'InstanceNumber'])
+
+    def test_declaration_uses_key_as_axis(self):
+        stack = dcmstack.DicomStack(dimensions=['EchoTime'])
+        for fn in ('TE_20_SlcPos_-33.707626341697.dcm',
+                   'TE_20_SlcPos_-23.207628249046.dcm',
+                   'TE_40_SlcPos_-33.707626341697.dcm',
+                   'TE_40_SlcPos_-23.207628249046.dcm'):
+            stack.add_dcm(self._read(fn))
+        assert stack.shape == (192, 192, 2, 2)
+        nii_wrp = dcmstack.NiftiWrapper(stack.to_nifti(embed_meta=True))
+        assert nii_wrp.meta_ext.time_dim == 'EchoTime'
+        assert nii_wrp.meta_ext.get_values('EchoTime') == [20.0, 40.0]
+
+    def test_declared_key_missing(self):
+        stack = dcmstack.DicomStack(dimensions=['NotAKey'])
+        with pytest.raises(dcmstack.DicomOrderingError):
+            stack.add_dcm(self._read('TE_20_SlcPos_-33.707626341697.dcm'))
+
+    def test_same_position_is_not_duplicate(self):
+        # Same slice location at a different echo is a distinct volume, not a
+        # duplicate slice.
+        stack = dcmstack.DicomStack(dimensions=['EchoTime'])
+        stack.add_dcm(self._read('TE_20_SlcPos_-33.707626341697.dcm'))
+        stack.add_dcm(self._read('TE_40_SlcPos_-33.707626341697.dcm'))
+        assert stack.shape == (192, 192, 1, 2)
+
+    def test_duplicate_sop_single_material(self):
+        dcm = self._read('TE_20_SlcPos_-33.707626341697.dcm')
+        stack = dcmstack.DicomStack(dimensions=['EchoTime'])
+        assert stack.add_dcm(dcm) is True
+        assert stack.add_dcm(dcm) is False
+        assert stack.shape == (192, 192, 1)
+        sources = stack.get_slice_sources()
+        assert len(sources) == 1
+        assert sources[0]['sop_instance_uid'] == dcm.SOPInstanceUID
+
+    def test_duplicate_sop_can_be_kept(self):
+        dcm = self._read('TE_20_SlcPos_-33.707626341697.dcm')
+        stack = dcmstack.DicomStack(dimensions=['EchoTime'], dedupe_sop=False)
+        stack.add_dcm(dcm)
+        with pytest.raises(dcmstack.ImageCollisionError):
+            stack.add_dcm(dcm)
+
+    def test_missing_slice_is_empty_placeholder(self):
+        stack = dcmstack.DicomStack(dimensions=['EchoTime'])
+        for fn in ('TE_20_SlcPos_-33.707626341697.dcm',
+                   'TE_20_SlcPos_-23.207628249046.dcm',
+                   'TE_20_SlcPos_-2.2076272953718.dcm',
+                   'TE_40_SlcPos_-23.207628249046.dcm'):
+            stack.add_dcm(self._read(fn))
+        assert stack.shape == (192, 192, 3, 2)
+        sources = stack.get_slice_sources()
+        assert len(sources) == 6
+        # The 40ms volume is missing both edge slices
+        missing = [src['missing'] for src in sources]
+        assert missing == [False, False, False, True, False, True]
+        for src in sources:
+            if src['missing']:
+                assert src['file'] is None
+                assert src['sop_instance_uid'] is None
+        data = stack.get_data()
+        assert data[:, :, 0, 1].max() == 0
+        assert data[:, :, 2, 1].max() == 0
+        assert data[:, :, 1, 1].max() > 0
+        # The present slices are not borrowed from the other echo
+        assert data[:, :, 1, 1].max() != data[:, :, 1, 0].max()
+
+    def test_missing_slice_strict_without_declaration(self):
+        stack = dcmstack.DicomStack(time_order='EchoTime')
+        for fn in ('TE_20_SlcPos_-33.707626341697.dcm',
+                   'TE_20_SlcPos_-23.207628249046.dcm',
+                   'TE_40_SlcPos_-33.707626341697.dcm'):
+            stack.add_dcm(self._read(fn))
+        with pytest.raises(dcmstack.InvalidStackError):
+            stack.shape
+
+    def test_provenance_in_meta(self):
+        stack = dcmstack.DicomStack(dimensions=['EchoTime'])
+        for fn in ('TE_20_SlcPos_-33.707626341697.dcm',
+                   'TE_40_SlcPos_-33.707626341697.dcm'):
+            stack.add_dcm(self._read(fn))
+        nii_wrp = dcmstack.NiftiWrapper(stack.to_nifti(embed_meta=True))
+        sources = nii_wrp.meta_ext.get_values('DcmStack.SourceFile')
+        assert sources[0].endswith('TE_20_SlcPos_-33.707626341697.dcm')
+        assert sources[1].endswith('TE_40_SlcPos_-33.707626341697.dcm')
+        # Constant values are summarized to a single value
+        assert nii_wrp.meta_ext.get_values('DcmStack.Missing') is False
+
+    def test_parse_and_stack_declared_keeps_echoes_together(self):
+        in_paths = [path.join(self.data_dir, fn)
+                    for fn in ('TE_20_SlcPos_-33.707626341697.dcm',
+                               'TE_20_SlcPos_-23.207628249046.dcm',
+                               'TE_40_SlcPos_-33.707626341697.dcm',
+                               'TE_40_SlcPos_-23.207628249046.dcm')]
+        res = dcmstack.parse_and_stack(in_paths, dimensions=['EchoTime'])
+        assert len(res) == 1
+        stack = list(res.values())[0]
+        assert stack.shape == (192, 192, 2, 2)
+
+
 def test_fsl_hack():
     ds = make_dicom({'BitsStored': 14, }, 2**14 - 1)
     stack = dcmstack.DicomStack()

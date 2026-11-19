@@ -38,11 +38,45 @@ to *parse_and_stack*.
 Specifying Time and Vector Order
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-By default, if there is more than one 3D volume in the stack the software 
-will try to guess the meta key to sort the fourth (time) dimension. To 
-specify the meta data key for the fourth dimension or stack along the fifth 
-(vector) dimension, use the *time_order* and *vector_order* arguments to the 
-*DicomStack* constructor. 
+By default, if there is more than one 3D volume in the stack the software
+will try to guess the meta key to sort the fourth (time) dimension. To
+specify the meta data key for the fourth dimension or stack along the fifth
+(vector) dimension, use the *time_order* and *vector_order* arguments to the
+*DicomStack* constructor.
+
+Declaring Dimensions Explicitly
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+When a directory mixes several time points, several echoes, and duplicate
+slices, guessing is ambiguous. Pass *dimensions* to declare the non-spatial
+axes instead. The argument is a list in time, vector order or a dictionary
+with *time* and/or *vector* keys:
+
+.. code-block:: python
+
+    >>> stack = dcmstack.DicomStack(dimensions={'time': 'EchoTime'})
+    >>> stack = dcmstack.DicomStack(dimensions=['EchoTime', 'AcquisitionNumber'])
+
+A declared key that is absent from an input raises *DicomOrderingError*
+instead of silently becoming a constant. With a declaration:
+
+* The declared keys are removed from the grouping keys, so all echoes and
+  time points are assembled into one stack.
+* A DICOM instance whose SOPInstanceUID was already added is ignored, so a
+  retransmission contributes one slice. Pass ``dedupe_sop=False`` to disable.
+* A missing slice position becomes an explicit, zero-filled placeholder
+  instead of an error. Pass ``allow_missing=False`` to restore the strict
+  behavior. A placeholder is never filled with a slice from another echo or
+  time point.
+
+Every slice records its source as per-slice meta data under the keys
+*DcmStack.SourceFile*, *DcmStack.SOPInstanceUID*, *DcmStack.SlicePosition*,
+and *DcmStack.Missing*. The same information is available directly:
+
+.. code-block:: python
+
+    >>> for src in stack.get_slice_sources():
+    ...     print(src['file'], src['slice_position'], src['missing'])
 
 Grouping Datasets
 ^^^^^^^^^^^^^^^^^
