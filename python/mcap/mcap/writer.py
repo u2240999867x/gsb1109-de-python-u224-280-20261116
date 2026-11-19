@@ -6,7 +6,7 @@ from importlib.metadata import PackageNotFoundError, version
 from io import BufferedWriter, RawIOBase
 from typing import IO, Any, Dict, List, OrderedDict, Union
 
-from .exceptions import UnsupportedCompressionError
+from .exceptions import McapError, UnsupportedCompressionError
 
 try:
     __version__ = version("mcap")
@@ -211,6 +211,15 @@ class Writer:
         statistics.message_count += 1
         chunk_builder = self.__chunk_builder
         if chunk_builder is not None:
+            # A record larger than the target chunk size cannot share a target-sized
+            # chunk. Finalize the chunk in progress first so the oversized record starts
+            # its own chunk, rather than truncating it or buffering messages while
+            # waiting for enough of them to fill a chunk.
+            message_size = (
+                MESSAGE_FIELDS_SIZE + memoryview(data).nbytes  # cspell:disable-line
+            )
+            if message_size > self.__chunk_size and chunk_builder.num_messages > 0:
+                self.__finalize_chunk()
             chunk_size = chunk_builder.add_message_fields(
                 channel_id, sequence, log_time, publish_time, data
             )
@@ -232,6 +241,42 @@ class Writer:
             )
             self.__write_data(header)
             self.__write_data(data)
+
+    def add_channel_record(self, channel: Channel) -> int:
+        """Writes a Channel record carrying its source id, without allocating a new id.
+
+        Use this only when reproducing an existing file's id assignments, such as a
+        lossless rewrite. Regular recordings should call :meth:`register_channel`, which
+        allocates ids itself. Re-registering an id raises :class:`McapError`.
+        """
+        if channel.id in self.__channels:
+            raise McapError(f"channel id {channel.id} is already registered")
+        self.__channels[channel.id] = channel
+        self.__statistics.channel_count += 1
+        if self.__chunk_builder:
+            self.__chunk_builder.add_channel(channel)
+            self.__maybe_finalize_chunk()
+        else:
+            channel.write(self.__record_builder)
+        return channel.id
+
+    def add_schema_record(self, schema: Schema) -> int:
+        """Writes a Schema record carrying its source id, without allocating a new id.
+
+        Use this only when reproducing an existing file's id assignments, such as a
+        lossless rewrite. Regular recordings should call :meth:`register_schema`, which
+        allocates ids itself. Re-registering an id raises :class:`McapError`.
+        """
+        if schema.id in self.__schemas:
+            raise McapError(f"schema id {schema.id} is already registered")
+        self.__schemas[schema.id] = schema
+        self.__statistics.schema_count += 1
+        if self.__chunk_builder:
+            self.__chunk_builder.add_schema(schema)
+            self.__maybe_finalize_chunk()
+        else:
+            schema.write(self.__record_builder)
+        return schema.id
 
     def add_metadata(self, name: str, data: Dict[str, str]):
         """
