@@ -4,9 +4,9 @@ from collections import defaultdict
 from enum import Enum, Flag, auto
 from importlib.metadata import PackageNotFoundError, version
 from io import BufferedWriter, RawIOBase
-from typing import IO, Any, Dict, List, OrderedDict, Union
+from typing import IO, Any, Dict, List, Optional, OrderedDict, Union
 
-from .exceptions import UnsupportedCompressionError
+from .exceptions import McapError, UnsupportedCompressionError
 
 try:
     __version__ = version("mcap")
@@ -131,6 +131,7 @@ class Writer:
         self.__enable_crcs = enable_crcs
         self.__enable_data_crcs = enable_data_crcs
         self.__data_section_crc = 0
+        self.__resumed = False
 
         # validate compression
         if self.__compression == CompressionType.LZ4:
@@ -141,6 +142,57 @@ class Writer:
                 raise UnsupportedCompressionError("zstandard")
             # One compressor for the whole file: its context is reused across chunks.
             self.__zstd_compressor = zstandard.ZstdCompressor()
+
+    @classmethod
+    def resume(
+        cls,
+        output: Union[str, IO[Any], BufferedWriter],
+        *,
+        schemas: List[Schema] = [],
+        channels: List[Channel] = [],
+        statistics: Optional[Statistics] = None,
+        chunk_indices: List[ChunkIndex] = [],
+        attachment_indexes: List[AttachmentIndex] = [],
+        metadata_indexes: List[MetadataIndex] = [],
+        data_section_crc: int = 0,
+        **kwargs: Any,
+    ) -> "Writer":
+        """
+        Creates a writer that continues an existing MCAP data section instead of
+        starting a new file, for example to complete a file whose original write
+        was interrupted. The output stream must already contain a valid prefix
+        (leading magic, the Header record and zero or more complete data section
+        records) and be positioned at its end. Unlike a fresh writer, no magic or
+        Header record is written, and :py:meth:`start` must not be called.
+
+        :param output: A filename or stream to append to.
+        :param schemas: Schema records already present in the existing prefix.
+        :param channels: Channel records already present in the existing prefix.
+        :param statistics: Statistics describing the existing prefix. Records
+            written afterwards accumulate onto it.
+        :param chunk_indices: ChunkIndex records for the chunks in the existing
+            prefix, rebuilt from their validated contents.
+        :param attachment_indexes: AttachmentIndex records for the existing prefix.
+        :param metadata_indexes: MetadataIndex records for the existing prefix.
+        :param data_section_crc: CRC-32 of the existing prefix, including the
+            leading magic. Only used when ``enable_data_crcs`` is on.
+        :param kwargs: Accepts the same options as the constructor.
+        """
+        writer = cls(output, **kwargs)
+        writer.__schemas = OrderedDict((schema.id, schema) for schema in schemas)
+        writer.__channels = OrderedDict((channel.id, channel) for channel in channels)
+        if statistics is not None:
+            statistics.channel_message_counts = defaultdict(
+                int, statistics.channel_message_counts
+            )
+            writer.__statistics = statistics
+        writer.__chunk_indices = list(chunk_indices)
+        writer.__attachment_indexes = list(attachment_indexes)
+        writer.__metadata_indexes = list(metadata_indexes)
+        if writer.__enable_data_crcs:
+            writer.__data_section_crc = data_section_crc
+        writer.__resumed = True
+        return writer
 
     def add_attachment(
         self, create_time: int, log_time: int, name: str, media_type: str, data: bytes
@@ -437,6 +489,8 @@ class Writer:
         :param library: Free-form string for writer to specify its name, version, or other
             information for use in debugging.
         """
+        if self.__resumed:
+            raise McapError("start() must not be called on a resumed writer")
         self.__stream.write(MCAP0_MAGIC)
         if self.__enable_data_crcs:
             self.__data_section_crc = zlib.crc32(MCAP0_MAGIC, self.__data_section_crc)
