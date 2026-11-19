@@ -48,6 +48,12 @@ from pynetdicom._globals import (
 )
 from pynetdicom.ae import ApplicationEntity as AE
 from pynetdicom.association import Association
+from pynetdicom.association_planning import (
+    AssociationPlanError,
+    AssociationProposal,
+    PlanningRequirement,
+    plan_associations,
+)
 from pynetdicom.presentation import (
     AllStoragePresentationContexts,
     ApplicationEventLoggingPresentationContexts,
@@ -97,6 +103,8 @@ def debug_logger() -> None:
 __all__ = [
     "AE",
     "ALL_TRANSFER_SYNTAXES",
+    "AssociationPlanError",
+    "AssociationProposal",
     "DEFAULT_TRANSFER_SYNTAXES",
     "PYNETDICOM_IMPLEMENTATION_UID",
     "PYNETDICOM_IMPLEMENTATION_VERSION",
@@ -114,6 +122,7 @@ __all__ = [
     "MediaStoragePresentationContexts",
     "ModalityPerformedPresentationContexts",
     "NonPatientObjectPresentationContexts",
+    "PlanningRequirement",
     "PrintManagementPresentationContexts",
     "ProcedureStepPresentationContexts",
     "ProtocolApprovalPresentationContexts",
@@ -130,5 +139,6 @@ __all__ = [
     "build_role",
     "debug_logger",
     "evt",
+    "plan_associations",
     "register_uid",
 ]
