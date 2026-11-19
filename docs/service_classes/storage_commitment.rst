@@ -101,3 +101,64 @@ N-EVENT-REPORT Statuses
 +------------------+----------+----------------------------------+
 | 0x0213           | Failure  | Resource limitation              |
 +------------------+----------+----------------------------------+
+
+
+.. _commitment_handover:
+
+Handover Archive
+----------------
+
+The :class:`~pynetdicom.handover.HandoverArchive` provides a persistent
+record that links a completed transfer to its later Storage Commitment
+result.  It is intended for the common workflow where C-STORE requests finish
+first and the commitment result (N-EVENT-REPORT) may arrive much later, or on
+a different association::
+
+    from pynetdicom.handover import HandoverArchive
+
+    archive = HandoverArchive("handover.json")
+
+    # Record the completed C-STORE batch
+    archive.record_transfer(
+        "1.2.826.0.1.3680043.9.3811.1",
+        [
+            ("1.2.840.10008.5.1.4.1.1.2", "1.2.3.1"),
+            ("1.2.840.10008.5.1.4.1.1.2", "1.2.3.2"),
+        ],
+        transferred_at="2026-01-01T10:00:00Z",
+        source_ae="STORESCU",
+        destination_ae="QRSCP",
+    )
+
+    # Record the later commitment result
+    archive.record_commitment_report_dataset(event.event_information)
+
+Each record is keyed by the (0008,1195) *Transaction UID* and keeps the
+original transfer time separate from the commitment time.  A report that
+arrives after the transfer changes the record's handover status but never
+rewrites ``transferred_at``.
+
+Committed and failed instances are kept in separate collections, so a
+partially successful commitment remains visible::
+
+    record = archive["1.2.826.0.1.3680043.9.3811.1"]
+    record.committed_instances  # tuple of SOPInstanceReference
+    record.failed_instances     # tuple of FailedSOPInstanceReference
+    record.status               # CommitmentStatus
+
+Matching rules
+~~~~~~~~~~~~~~
+
+* A commitment result is matched **only** by its *Transaction UID*.
+* A result whose transaction UID is unknown is retained separately in
+  :attr:`~pynetdicom.handover.HandoverArchive.unmatched_reports`.  It is never
+  attached to another transfer whose instance manifest happens to contain the
+  same SOP Instance UIDs.
+* A known transaction whose result references instances outside the
+  recorded manifest raises
+  :class:`~pynetdicom.handover.CommitmentReportMismatch`.
+* When a result arrives before its transfer was registered, recording the
+  transfer reconciles the pending result by transaction UID.
+
+Status values are ``transferred``, ``commitment_requested``, ``committed``,
+``partially_committed``, ``commitment_failed`` and ``commitment_incomplete``.

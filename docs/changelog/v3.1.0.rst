@@ -3,6 +3,13 @@
 3.1.0
 =====
 
+Enhancements
+------------
+
+* Added :mod:`pynetdicom.handover` for linking completed transfers to their
+  Storage Commitment results, including partial failures and late results
+* Added Storage Commitment support to the ``qrscp`` application
+
 Fixes
 -----
 

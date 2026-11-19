@@ -108,6 +108,8 @@ Database Options
             override the location of the database using file f
 ``--instance-location [d]irectory (str)``
             override the configured instance storage location to directory d
+``--handover-location [f]ile (str)``
+            override the configured Storage Commitment handover archive file
 ``--clean``
             remove all entries from the database and delete the corresponding
             stored instances
@@ -143,6 +145,8 @@ Destinations*:
     instance_location: instances
     # Location of sqlite3 database for the QR service's managed SOP Instances
     database_location: instances.sqlite
+    # Location of the Storage Commitment handover archive
+    handover_location: handover.json
 
     # Move Destination 1
     # The AE title of the move destination, as ASCII

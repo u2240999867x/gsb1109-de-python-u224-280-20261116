@@ -26,13 +26,18 @@ from pynetdicom.apps.qrscp.handlers import (
     handle_find,
     handle_get,
     handle_move,
+    handle_n_action,
+    handle_n_event_report,
+    handle_release,
     handle_store,
 )
+from pynetdicom.apps.qrscp.handover import HandoverManager
 from pynetdicom.sop_class import (
     ModalityWorklistInformationFind,
     PatientRootQueryRetrieveInformationModelFind,
     PatientRootQueryRetrieveInformationModelGet,
     PatientRootQueryRetrieveInformationModelMove,
+    StorageCommitmentPushModel,
     StudyRootQueryRetrieveInformationModelFind,
     StudyRootQueryRetrieveInformationModelGet,
     StudyRootQueryRetrieveInformationModelMove,
@@ -79,6 +84,7 @@ def _log_config(config, logger):
     logger.debug(f"    ACSE: {acse}, DIMSE: {dimse}, Network: {network}")
     logger.debug(f"  Storage directory: {app['instance_location']}")
     logger.debug(f"  Database location: {app['database_location']}")
+    logger.debug(f"  Handover location: {app.get('handover_location', '')}")
 
     if config.sections():
         logger.debug("  Move destinations: ")
@@ -210,6 +216,12 @@ def _setup_argparser(args=None):
         type=str,
     )
     db_opts.add_argument(
+        "--handover-location",
+        metavar="[f]ile",
+        help=("override the configured Storage Commitment handover archive file"),
+        type=str,
+    )
+    db_opts.add_argument(
         "--clean",
         help=(
             "remove all entries from the database and delete the "
@@ -320,6 +332,8 @@ def main(args=None):
         config["DEFAULT"]["database_location"] = args.database_location
     if args.instance_location:
         config["DEFAULT"]["instance_location"] = args.instance_location
+    if args.handover_location:
+        config["DEFAULT"]["handover_location"] = args.handover_location
 
     # Log configuration settings
     _log_config(config, APP_LOGGER)
@@ -358,6 +372,12 @@ def main(args=None):
     # Try to create the instance storage directory
     os.makedirs(instance_dir, exist_ok=True)
 
+    # Storage Commitment handover archive
+    handover_path = os.path.join(
+        current_dir, app_config.get("handover_location", "handover.json")
+    )
+    handover = HandoverManager(handover_path)
+
     ae = AE(app_config["ae_title"])
     ae.maximum_pdu_size = app_config.getint("max_pdu")
     ae.acse_timeout = app_config.getfloat("acse_timeout")
@@ -391,13 +411,29 @@ def main(args=None):
     # Modality Worklist SCP
     ae.add_supported_context(ModalityWorklistInformationFind)
 
+    # Storage Commitment SCP - accept and send N-ACTION/N-EVENT-REPORT
+    ae.add_supported_context(
+        StorageCommitmentPushModel,
+        ALL_TRANSFER_SYNTAXES,
+        scu_role=True,
+        scp_role=True,
+    )
+
     # Set our handler bindings
     handlers = [
         (evt.EVT_C_ECHO, handle_echo, [args, APP_LOGGER]),
         (evt.EVT_C_FIND, handle_find, [db_path, args, APP_LOGGER]),
         (evt.EVT_C_GET, handle_get, [db_path, args, APP_LOGGER]),
         (evt.EVT_C_MOVE, handle_move, [dests, db_path, args, APP_LOGGER]),
-        (evt.EVT_C_STORE, handle_store, [instance_dir, db_path, args, APP_LOGGER]),
+        (
+            evt.EVT_C_STORE,
+            handle_store,
+            [instance_dir, db_path, args, APP_LOGGER, handover],
+        ),
+        (evt.EVT_N_ACTION, handle_n_action, [handover, APP_LOGGER]),
+        (evt.EVT_N_EVENT_REPORT, handle_n_event_report, [handover, APP_LOGGER]),
+        (evt.EVT_RELEASED, handle_release, [handover]),
+        (evt.EVT_ABORTED, handle_release, [handover]),
     ]
 
     # Listen for incoming association requests

@@ -26,6 +26,7 @@ This API reference guide details the functions, modules and objects included in
    dul
    events
    fsm
+   handover
    presentation
    service_classes
    sop_classes

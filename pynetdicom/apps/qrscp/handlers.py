@@ -3,10 +3,12 @@
 import os
 
 from pydicom import dcmread
+from pydicom.dataset import Dataset
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from pynetdicom.apps.qrscp.db import Instance, InvalidIdentifier, add_instance, search
+from pynetdicom.sop_class import StorageCommitmentPushModel
 
 
 def handle_echo(event, cli_config, logger):
@@ -263,7 +265,7 @@ def handle_move(event, destinations, db_path, cli_config, logger):
         yield 0xFF00, ds
 
 
-def handle_store(event, storage_dir, db_path, cli_config, logger):
+def handle_store(event, storage_dir, db_path, cli_config, logger, handover=None):
     """Handler for evt.EVT_C_STORE.
 
     Parameters
@@ -278,6 +280,9 @@ def handle_store(event, storage_dir, db_path, cli_config, logger):
         A :class:`dict` containing configuration settings passed via CLI.
     logger : logging.Logger
         The application's logger.
+    handover : pynetdicom.apps.qrscp.handover.HandoverManager, optional
+        If supplied, the successfully stored instance is added to the current
+        transfer batch for later Storage Commitment correlation.
 
     Returns
     -------
@@ -346,4 +351,100 @@ def handle_store(event, storage_dir, db_path, cli_config, logger):
         finally:
             session.close()
 
+    if handover is not None:
+        handover.note_store(event.assoc, ds, event.timestamp)
+
     return 0x0000
+
+
+def handle_n_action(event, handover, logger):
+    """Handler for evt.EVT_N_ACTION.
+
+    A Storage Commitment N-ACTION request defines a transaction and its
+    instance manifest.  The request is recorded as the completed transfer for
+    the batch when the same association has just delivered C-STORE requests.
+
+    Returns
+    -------
+    int, pydicom.dataset.Dataset or None
+        The N-ACTION response *Status* and optional *Action Reply*.
+    """
+    requestor = event.assoc.requestor
+    timestamp = event.timestamp.strftime("%Y-%m-%d %H:%M:%S")
+    addr, port = requestor.address, requestor.port
+    logger.info(f"Received N-ACTION request from {addr}:{port} at {timestamp}")
+
+    if event.request.RequestedSOPClassUID != StorageCommitmentPushModel:
+        logger.warning("N-ACTION request is not for Storage Commitment")
+        return 0x0123, None
+
+    try:
+        record = handover.record_request(event)
+    except Exception:
+        logger.exception("Unable to record the Storage Commitment request")
+        return 0x0110, None
+
+    if record is None:
+        logger.warning("Storage Commitment request was not linked to a transfer")
+    else:
+        logger.info(
+            f"Storage Commitment request for transaction "
+            f"'{record.transaction_uid}' recorded"
+        )
+
+    reply = Dataset()
+    reply.TransactionUID = handover.request_transaction_uid(event)
+    return 0x0000, reply
+
+
+def handle_n_event_report(event, handover, logger):
+    """Handler for evt.EVT_N_EVENT_REPORT.
+
+    The commitment result is matched to its transfer by transaction UID only.
+    A result for an unknown transaction is retained by the archive as an
+    unmatched report.
+
+    Returns
+    -------
+    int, None
+        The N-EVENT-REPORT response *Status*.
+    """
+    requestor = event.assoc.requestor
+    timestamp = event.timestamp.strftime("%Y-%m-%d %H:%M:%S")
+    addr, port = requestor.address, requestor.port
+    logger.info(
+        f"Received N-EVENT-REPORT request from {addr}:{port} at {timestamp}"
+    )
+
+    if event.request.AffectedSOPClassUID != StorageCommitmentPushModel:
+        logger.warning("N-EVENT-REPORT request is not for Storage Commitment")
+        return 0x0113, None
+
+    try:
+        record = handover.record_report(event)
+    except Exception:
+        logger.exception("Unable to record the Storage Commitment result")
+        return 0x0110, None
+
+    if record is None:
+        logger.warning(
+            "Storage Commitment result is for an unknown transaction and "
+            "was retained separately"
+        )
+    else:
+        logger.info(
+            f"Storage Commitment result for transaction "
+            f"'{record.transaction_uid}' updated handover status to "
+            f"'{record.status.value}'"
+        )
+
+    return 0x0000, None
+
+
+def handle_release(event, handover):
+    """Handler for evt.EVT_RELEASED and evt.EVT_ABORTED.
+
+    Clears the temporary C-STORE batch associated with the closed
+    association.
+    """
+    handover.release(event.assoc)

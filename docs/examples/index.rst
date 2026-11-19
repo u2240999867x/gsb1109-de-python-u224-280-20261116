@@ -15,6 +15,7 @@ Code Examples
 
    basic_worklist
    display
+   handover
    mpps
    print
    qr_find
@@ -26,6 +27,7 @@ Code Examples
 
 * :doc:`Basic Worklist Management (C-FIND) <basic_worklist>`
 * :doc:`Display System Management (N-GET) <display>`
+* :doc:`Handover archive (Storage Commitment) <handover>`
 * Modality Performed Procedure Step Management
 
   * :doc:`MPPS (N-CREATE and N-SET) <mpps>`
