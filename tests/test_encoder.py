@@ -488,6 +488,141 @@ def test_dump_to_file(impl, tmpdir):
     assert path.read_binary() == b"\x82\x01\x0a"
 
 
+def test_shared_equivalence_merges_equal_tuples(impl):
+    """Distinct but equal tuples are merged when the predicate allows it."""
+    value = [tuple([1, 2, 3]), tuple([1, 2, 3])]
+    expected = unhexlify("d81c82d81c83010203d81d01")
+    assert impl.dumps(value, value_sharing=True, shared_equivalence=lambda v: True) == expected
+    decoded = impl.loads(expected)
+    assert decoded == [[1, 2, 3], [1, 2, 3]]
+    assert decoded[0] is decoded[1]
+
+
+def test_shared_equivalence_denied_keeps_distinct_objects(impl):
+    """When the predicate returns False, equal objects stay independent."""
+    left = tuple([1, 2, 3])
+    right = tuple([1, 2, 3])
+    assert left is not right
+    expected = unhexlify("d81c82d81c83010203d81c83010203")
+    serialized = impl.dumps(
+        [left, right], value_sharing=True, shared_equivalence=lambda v: False
+    )
+    assert serialized == expected
+    decoded = impl.loads(serialized)
+    assert decoded[0] is not decoded[1]
+
+
+def test_shared_equivalence_merges_equal_frozen_dicts(impl):
+    value = [FrozenDict({1: 2}), FrozenDict({1: 2})]
+    expected = unhexlify("d81c82d81ca10102d81d01")
+    assert impl.dumps(value, value_sharing=True, shared_equivalence=lambda v: True) == expected
+    decoded = impl.loads(expected)
+    assert decoded[0] is decoded[1]
+
+
+def test_shared_equivalence_never_merges_mutable_containers(impl):
+    """Equal lists or dicts must retain their separate object identities."""
+    value = [[1, 2], [1, 2]]
+    expected = unhexlify("d81c82d81c820102d81c820102")
+    serialized = impl.dumps(value, value_sharing=True, shared_equivalence=lambda v: True)
+    assert serialized == expected
+    decoded = impl.loads(serialized)
+    assert decoded[0] is not decoded[1]
+    assert decoded == [[1, 2], [1, 2]]
+
+
+def test_shared_equivalence_does_not_affect_identity_sharing(impl):
+    """The same object is always shared by identity even if the predicate says no."""
+    shared = [1]
+    expected = unhexlify("d81c82d81c8101d81d01")
+    serialized = impl.dumps(
+        [shared, shared], value_sharing=True, shared_equivalence=lambda v: False
+    )
+    assert serialized == expected
+    decoded = impl.loads(serialized)
+    assert decoded[0] is decoded[1]
+
+
+def test_shared_equivalence_with_cyclic_array(impl):
+    """Cyclic data must still be representable with equality sharing enabled."""
+    cyclic = []
+    cyclic.append(cyclic)
+    expected = unhexlify("d81c81d81d00")
+    assert impl.dumps(
+        cyclic, value_sharing=True, shared_equivalence=lambda v: True
+    ) == expected
+    decoded = impl.loads(expected)
+    assert decoded[0] is decoded
+
+
+def test_shared_equivalence_with_cyclic_tuple(impl):
+    holder = []
+    cyclic_tuple = (holder,)
+    holder.append(cyclic_tuple)
+    expected = unhexlify("d81c81d81c81d81d00")
+    assert impl.dumps(
+        cyclic_tuple, value_sharing=True, shared_equivalence=lambda v: True
+    ) == expected
+    decoded = impl.loads(expected)
+    assert decoded[0][0] is decoded
+
+
+def test_shared_equivalence_nested_tuples(impl):
+    """An equal tuple nested under different parents is still referenced."""
+    inner_a = tuple([1, 2])
+    inner_b = tuple([1, 2])
+    value = [[inner_a], [inner_b]]
+    serialized = impl.dumps(value, value_sharing=True, shared_equivalence=lambda v: True)
+    decoded = impl.loads(serialized)
+    assert decoded[0][0] is decoded[1][0]
+
+
+def test_shared_equivalence_widens_reference_index(impl):
+    """Reference indices above 23 must use the wider integer encoding."""
+    fillers = [tuple([i]) for i in range(24)]
+    repeated = tuple([99])
+    serialized = impl.dumps(
+        fillers + [repeated, repeated],
+        value_sharing=True,
+        shared_equivalence=lambda v: True,
+    )
+    # tag 29 followed by a one-byte unsigned integer (0x18 prefix)
+    assert b"\xd8\x1d\x18" in serialized
+    decoded = impl.loads(serialized)
+    assert decoded[-1] is decoded[-2]
+
+
+def test_shared_equivalence_with_string_referencing(impl):
+    value = [("aaaa",), ("aaaa",)]
+    serialized = impl.dumps(
+        value,
+        value_sharing=True,
+        string_referencing=True,
+        shared_equivalence=lambda v: True,
+    )
+    decoded = impl.loads(serialized)
+    assert decoded[0] is decoded[1]
+
+
+def test_shared_equivalence_requires_value_sharing(impl):
+    with pytest.raises(ValueError, match="value_sharing"):
+        impl.dumps([(1,)], shared_equivalence=lambda v: True)
+
+
+def test_shared_equivalence_must_be_callable(impl):
+    with pytest.raises(ValueError, match="callable"):
+        impl.dumps([(1,)], value_sharing=True, shared_equivalence=True)
+
+
+def test_shared_equivalence_defaults_to_disabled(impl):
+    """Without the predicate, distinct equal tuples are not merged."""
+    value = [tuple([1, 2]), tuple([1, 2])]
+    serialized = impl.dumps(value, value_sharing=True)
+    assert serialized == unhexlify("d81c82d81c820102d81c820102")
+    decoded = impl.loads(serialized)
+    assert decoded[0] is not decoded[1]
+
+
 @pytest.mark.parametrize(
     "value, expected",
     [

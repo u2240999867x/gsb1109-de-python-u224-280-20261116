@@ -34,6 +34,7 @@ typedef PyObject * (EncodeFunction)(CBOREncoderObject *, PyObject *);
 static int encode_semantic(CBOREncoderObject *, const uint64_t, PyObject *);
 static PyObject * encode_shared(CBOREncoderObject *, EncodeFunction *, PyObject *);
 static PyObject * encode_container(CBOREncoderObject *, EncodeFunction *, PyObject *);
+static PyObject * encode_immutable(CBOREncoderObject *, EncodeFunction *, PyObject *);
 
 static PyObject * CBOREncoder_encode_to_bytes(CBOREncoderObject *, PyObject *);
 static PyObject * CBOREncoder_encode_int(CBOREncoderObject *, PyObject *);
@@ -42,6 +43,7 @@ static PyObject * CBOREncoder_encode_float(CBOREncoderObject *, PyObject *);
 static int _CBOREncoder_set_fp(CBOREncoderObject *, PyObject *, void *);
 static int _CBOREncoder_set_default(CBOREncoderObject *, PyObject *, void *);
 static int _CBOREncoder_set_timezone(CBOREncoderObject *, PyObject *, void *);
+static int _CBOREncoder_set_shared_equivalence(CBOREncoderObject *, PyObject *, void *);
 
 
 // Constructors and destructors //////////////////////////////////////////////
@@ -56,6 +58,8 @@ CBOREncoder_traverse(CBOREncoderObject *self, visitproc visit, void *arg)
     Py_VISIT(self->tz);
     Py_VISIT(self->shared_handler);
     Py_VISIT(self->string_references);
+    Py_VISIT(self->shared_values);
+    Py_VISIT(self->shared_equivalence);
     return 0;
 }
 
@@ -69,6 +73,8 @@ CBOREncoder_clear(CBOREncoderObject *self)
     Py_CLEAR(self->tz);
     Py_CLEAR(self->shared_handler);
     Py_CLEAR(self->string_references);
+    Py_CLEAR(self->shared_values);
+    Py_CLEAR(self->shared_equivalence);
     return 0;
 }
 
@@ -106,6 +112,10 @@ CBOREncoder_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
         self->tz = Py_None;
         Py_INCREF(Py_None);
         self->string_references = Py_None;
+        Py_INCREF(Py_None);
+        self->shared_values = Py_None;
+        Py_INCREF(Py_None);
+        self->shared_equivalence = Py_None;
         self->enc_style = 0;
         self->timestamp_format = false;
         self->date_as_datetime = false;
@@ -120,23 +130,38 @@ CBOREncoder_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
 
 // CBOREncoder.__init__(self, fp=None, datetime_as_timestamp=0, timezone=None,
 //                      value_sharing=False, default=None, canonical=False,
-//                      date_as_datetime=False)
+//                      date_as_datetime=False, string_referencing=False,
+//                      shared_equivalence=None)
 int
 CBOREncoder_init(CBOREncoderObject *self, PyObject *args, PyObject *kwargs)
 {
     static char *keywords[] = {
         "fp", "datetime_as_timestamp", "timezone", "value_sharing", "default",
-        "canonical", "date_as_datetime", "string_referencing", NULL
+        "canonical", "date_as_datetime", "string_referencing",
+        "shared_equivalence", NULL
     };
-    PyObject *tmp, *fp = NULL, *default_handler = NULL, *tz = NULL;
+    PyObject *tmp, *fp = NULL, *default_handler = NULL, *tz = NULL,
+             *shared_equivalence = NULL;
     int value_sharing = 0, timestamp_format = 0, enc_style = 0,
 	date_as_datetime = 0, string_referencing = 0;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|pOpOppp", keywords,
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|pOpOpppO", keywords,
                 &fp, &timestamp_format, &tz, &value_sharing,
                 &default_handler, &enc_style, &date_as_datetime,
-                &string_referencing))
+                &string_referencing, &shared_equivalence))
         return -1;
+    if (shared_equivalence) {
+        if (!value_sharing) {
+            PyErr_SetString(PyExc_ValueError,
+                "shared_equivalence requires value_sharing to be enabled");
+            return -1;
+        }
+        if (!PyCallable_Check(shared_equivalence)) {
+            PyErr_SetString(PyExc_ValueError,
+                "shared_equivalence must be None or a callable");
+            return -1;
+        }
+    }
     // Predicate values are returned as ints, but need to be stored as bool or ubyte
     if (timestamp_format == 1)
 	self->timestamp_format = true;
@@ -149,6 +174,13 @@ CBOREncoder_init(CBOREncoderObject *self, PyObject *args, PyObject *kwargs)
     if (string_referencing == 1) {
         self->string_referencing = true;
         self->string_namespacing = true;
+    }
+    if (shared_equivalence) {
+        Py_INCREF(shared_equivalence);
+        self->shared_equivalence = shared_equivalence;
+    } else {
+        Py_INCREF(Py_None);
+        self->shared_equivalence = Py_None;
     }
 
 
@@ -165,6 +197,10 @@ CBOREncoder_init(CBOREncoderObject *self, PyObject *args, PyObject *kwargs)
 
     self->string_references = PyDict_New();
     if (!self->string_references)
+        return -1;
+
+    self->shared_values = PyDict_New();
+    if (!self->shared_values)
         return -1;
 
     if (!_CBOR2_default_encoders && init_default_encoders() == -1)
@@ -312,6 +348,48 @@ _CBOREncoder_get_canonical(CBOREncoderObject *self, void *closure)
         Py_RETURN_TRUE;
     else
         Py_RETURN_FALSE;
+}
+
+
+// CBOREncoder._get_shared_equivalence(self)
+static PyObject *
+_CBOREncoder_get_shared_equivalence(CBOREncoderObject *self, void *closure)
+{
+    Py_INCREF(self->shared_equivalence);
+    return self->shared_equivalence;
+}
+
+
+// CBOREncoder._set_shared_equivalence(self, value)
+static int
+_CBOREncoder_set_shared_equivalence(CBOREncoderObject *self, PyObject *value,
+                                    void *closure)
+{
+    PyObject *tmp;
+
+    if (!value) {
+        PyErr_SetString(PyExc_AttributeError,
+                        "cannot delete shared_equivalence attribute");
+        return -1;
+    }
+    if (value != Py_None) {
+        if (!self->value_sharing) {
+            PyErr_SetString(PyExc_ValueError,
+                "shared_equivalence requires value_sharing to be enabled");
+            return -1;
+        }
+        if (!PyCallable_Check(value)) {
+            PyErr_SetString(PyExc_ValueError,
+                "shared_equivalence must be None or a callable");
+            return -1;
+        }
+    }
+
+    tmp = self->shared_equivalence;
+    Py_INCREF(value);
+    self->shared_equivalence = value;
+    Py_DECREF(tmp);
+    return 0;
 }
 
 
@@ -1225,7 +1303,22 @@ encode_container(CBOREncoderObject *self, EncodeFunction *encoder,
             ret = Py_None;
         }
     } else {
-        ret = encode_shared(self, encoder, value);
+        if (self->value_sharing
+                && self->shared_equivalence != Py_None) {
+            int is_frozen;
+            if (!_CBOR2_FrozenDict && _CBOR2_init_FrozenDict() == -1)
+                return NULL;
+            is_frozen = PyObject_IsInstance(value, _CBOR2_FrozenDict);
+            if (is_frozen == -1)
+                return NULL;
+            if (PyTuple_Check(value) || is_frozen == 1) {
+                ret = encode_immutable(self, encoder, value);
+            } else {
+                ret = encode_shared(self, encoder, value);
+            }
+        } else {
+            ret = encode_shared(self, encoder, value);
+        }
     }
 
     self->string_namespacing = old_string_namespacing;
@@ -1278,6 +1371,68 @@ encode_shared(CBOREncoderObject *self, EncodeFunction *encoder,
             }
         }
         Py_DECREF(id);
+    }
+    return ret;
+}
+
+
+static PyObject *
+encode_immutable(CBOREncoderObject *self, EncodeFunction *encoder,
+                 PyObject *value)
+{
+    PyObject *ret, *allowed, *id, *entry, *shared_index;
+    Py_hash_t hashv;
+    int permitted;
+
+    // Only hashable values can carry a content based identity. An unhashable
+    // value (e.g. a tuple holding a mutable item) or a self-referential value
+    // falls back to identity based sharing, which still supports cycles.
+    hashv = PyObject_Hash(value);
+    if (hashv == -1) {
+        PyErr_Clear();
+        return encode_shared(self, encoder, value);
+    }
+
+    allowed = PyObject_CallFunctionObjArgs(
+            self->shared_equivalence, value, NULL);
+    if (!allowed)
+        return NULL;
+    permitted = PyObject_IsTrue(allowed);
+    Py_DECREF(allowed);
+    if (permitted == -1)
+        return NULL;
+    if (!permitted)
+        return encode_shared(self, encoder, value);
+
+    // A distinct, equal object has already been emitted; reference it.
+    ret = PyDict_GetItem(self->shared_values, value);
+    if (ret) {
+        if (encode_length(self, 6, 29) == 0)
+            return CBOREncoder_encode_int(self, ret);
+        return NULL;
+    }
+
+    ret = encode_shared(self, encoder, value);
+    if (!ret)
+        return NULL;
+
+    id = PyLong_FromVoidPtr(value);
+    if (!id) {
+        Py_DECREF(ret);
+        return NULL;
+    }
+    entry = PyDict_GetItem(self->shared, id);
+    Py_DECREF(id);
+    if (!entry) {
+        Py_DECREF(ret);
+        PyErr_SetString(PyExc_RuntimeError,
+                        "shared value missing from encoder registry");
+        return NULL;
+    }
+    shared_index = PyTuple_GET_ITEM(entry, 1);
+    if (PyDict_SetItem(self->shared_values, value, shared_index) == -1) {
+        Py_DECREF(ret);
+        return NULL;
     }
     return ret;
 }
@@ -2098,6 +2253,11 @@ static PyGetSetDef CBOREncoder_getsetters[] = {
     {"canonical",
         (getter) _CBOREncoder_get_canonical, NULL,
         "if True, then CBOR canonical encoding will be generated", NULL},
+    {"shared_equivalence",
+        (getter) _CBOREncoder_get_shared_equivalence,
+        (setter) _CBOREncoder_set_shared_equivalence,
+        "callable deciding which immutable values may be shared by "
+        "equality, or None to disable", NULL},
     {NULL}
 };
 
@@ -2208,6 +2368,10 @@ PyDoc_STRVAR(CBOREncoder__doc__,
 "    when True, use \"canonical\" CBOR representation; this typically\n"
 "    involves sorting maps, sets, etc. into a pre-determined order ensuring\n"
 "    that serializations are comparable without decoding\n"
+":param shared_equivalence:\n"
+"    callable that decides whether an immutable container may be replaced\n"
+"    by a reference to an earlier equal value; requires value_sharing to\n"
+"    be enabled\n"
 "\n"
 ".. _CBOR: https://cbor.io/\n"
 );

@@ -63,6 +63,34 @@ it possible to serialize such cyclic references, but value sharing has to be ena
     whether you want to enable it. It also causes some line overhead, as all potentially shareable
     values must be tagged as such.
 
+Equality based sharing of immutable values
+------------------------------------------
+
+With plain value sharing, only repeated occurrences of the *same* object are replaced by a
+reference. Two independently constructed objects that merely compare equal are encoded twice,
+even when they are immutable.
+
+When ``value_sharing=True`` is enabled, you can additionally pass a callable as
+``shared_equivalence``. It is called once for every immutable, hashable container (a ``tuple`` or
+:class:`~cbor2.FrozenDict`). When it returns ``True``, a later object that compares equal to an
+earlier one is emitted as a tag 29 reference to the first copy instead of being encoded again::
+
+    from cbor2 import dumps
+
+    value = [("alice", 1), ("alice", 1)]  # two distinct, equal tuples
+    dumps(value, value_sharing=True, shared_equivalence=lambda v: True)
+
+Mutable containers (``list`` and ``dict``) are never merged by equality, so two distinct
+mutable objects that compare equal keep their own identity regardless of the predicate. Sharing
+by object identity, including cyclic references, continues to work unchanged.
+
+The predicate lets the caller decide which values are safe to merge. Returning ``False`` for a
+value keeps that value independent even if an equal value was already encoded.
+
+.. warning:: Each shared value consumes an index in the shared value table, so a reference's
+    integer encoding widens (from one byte to two, three, five or nine bytes) as the table grows.
+    Merging a small value can therefore cost more than it saves once many values are shared.
+
 String references
 -----------------
 

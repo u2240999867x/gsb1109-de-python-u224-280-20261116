@@ -719,6 +719,36 @@ def test_cyclic_map(impl):
     assert decoded == {0: decoded}
 
 
+def test_shared_reference_to_nonempty_array(impl):
+    """A tag 29 reference resolves to the whole array, not its last item."""
+    # tag 28 outer array of two items:
+    #   tag 28, array containing integer 1
+    #   tag 29, reference to shared index 1
+    decoded = impl.loads(unhexlify("d81c82d81c8101d81d01"))
+    assert decoded == [[1], [1]]
+    assert decoded[0] is decoded[1]
+
+
+def test_shared_reference_to_nonempty_map(impl):
+    # tag 28 outer array of two items:
+    #   tag 28, map {1: 2}
+    #   tag 29, reference to shared index 1
+    decoded = impl.loads(unhexlify("d81c82d81ca10102d81d01"))
+    assert decoded == [{1: 2}, {1: 2}]
+    assert decoded[0] is decoded[1]
+
+
+def test_shared_frozen_dict_keeps_frozen_type(impl):
+    """A shared immutable map resolves to a FrozenDict, not a plain dict."""
+    # one map entry: key is a tag 28 map decoded in immutable mode, value is
+    # a tag 29 reference to the same shared index
+    decoded = impl.loads(unhexlify("a1d81ca10102d81d00"))
+    key, value = next(iter(decoded.items()))
+    assert isinstance(key, FrozenDict)
+    assert isinstance(value, FrozenDict)
+    assert key is value
+
+
 def test_string_ref(impl):
     decoded = impl.loads(unhexlify("d9010085656669727374d81900667365636f6e64d81900d81901"))
     assert isinstance(decoded, list)

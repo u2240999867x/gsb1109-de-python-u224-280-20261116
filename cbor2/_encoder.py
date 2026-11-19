@@ -11,7 +11,7 @@ from datetime import date, datetime, time, tzinfo
 from functools import wraps
 from io import BytesIO
 from sys import modules
-from typing import IO, TYPE_CHECKING, Any, cast
+from typing import IO, TYPE_CHECKING, Any
 
 from ._types import (
     CBOREncodeTypeError,
@@ -34,6 +34,31 @@ if TYPE_CHECKING:
         from collections.abc import Buffer
     else:
         from typing_extensions import Buffer
+
+#: Container types whose instances are immutable and therefore safe to merge
+#: with an equal earlier value when the caller permits equality based sharing.
+_IMMUTABLE_CONTAINER_TYPES = (tuple, FrozenDict)
+
+
+def _immutable_share_key(value: Any) -> Any:
+    """
+    Return the key under which an immutable value may be shared by equality.
+
+    Returns the value itself when it is an immutable, hashable container, or
+    ``None`` when the value may only be shared by object identity.
+    """
+    if not isinstance(value, _IMMUTABLE_CONTAINER_TYPES):
+        return None
+
+    try:
+        hash(value)
+    except (TypeError, RuntimeError):
+        # Unhashable, or a container that (against its type's contract)
+        # contains a reference to itself and cannot be hashed. Such a value
+        # must keep using identity based sharing, which still supports cycles.
+        return None
+
+    return value
 
 
 def shareable_encoder(
@@ -123,6 +148,8 @@ class CBOREncoder:
         "string_referencing",
         "string_namespacing",
         "_string_references",
+        "shared_equivalence",
+        "_shared_values",
     )
 
     _fp: IO[bytes]
@@ -138,6 +165,7 @@ class CBOREncoder:
         canonical: bool = False,
         date_as_datetime: bool = False,
         string_referencing: bool = False,
+        shared_equivalence: Callable[[Any], bool] | None = None,
     ):
         """
         :param fp:
@@ -168,6 +196,14 @@ class CBOREncoder:
         :param string_referencing:
             set to ``True`` to allow more efficient serializing of repeated string
             values
+        :param shared_equivalence:
+            optional callable that controls which *immutable* values may additionally
+            be shared by equality. It is called once for every immutable, hashable
+            container (a tuple or :class:`FrozenDict`); when it returns ``True``, an
+            earlier equal value is referenced instead of re-encoding the value.
+            Mutable containers (lists and dicts) are never merged by equality, so
+            distinct objects that compare equal keep their own identity. Requires
+            ``value_sharing=True``.
 
         """
         self.fp = fp
@@ -179,9 +215,21 @@ class CBOREncoder:
         self.string_namespacing = string_referencing
         self.default = default
         self._canonical = canonical
+        if shared_equivalence is not None:
+            if not value_sharing:
+                raise ValueError(
+                    "shared_equivalence requires value_sharing to be enabled"
+                )
+            if not callable(shared_equivalence):
+                raise ValueError("shared_equivalence must be None or a callable")
+
+        self.shared_equivalence = shared_equivalence
         self._shared_containers: dict[
             int, tuple[object, int | None]
         ] = {}  # indexes used for value sharing
+        # Maps immutable, hashable values that are allowed to be shared by
+        # equality to the index of the first emitted copy.
+        self._shared_values: dict[Any, int] = {}
         self._string_references: dict[str | bytes, int] = {}  # indexes used for string references
         self._encoders = default_encoders.copy()
         if canonical:
@@ -333,19 +381,26 @@ class CBOREncoder:
             self.encode_length(6, 256)
 
         with self.disable_string_namespacing():
-            self.encode_shared(encoder, value)
+            if (
+                self.value_sharing
+                and self.shared_equivalence is not None
+                and isinstance(value, _IMMUTABLE_CONTAINER_TYPES)
+            ):
+                self.encode_immutable(encoder, value)
+            else:
+                self.encode_shared(encoder, value)
 
     def encode_shared(self, encoder: Callable[[CBOREncoder, Any], Any], value: Any) -> None:
         value_id = id(value)
         try:
-            index = self._shared_containers[id(value)][1]
+            index = self._shared_containers[value_id][1]
         except KeyError:
             if self.value_sharing:
-                # Mark the container as shareable
-                self._shared_containers[value_id] = (
-                    value,
-                    len(self._shared_containers),
-                )
+                index = len(self._shared_containers)
+                # Mark the container as shareable so that another occurrence of
+                # the very same object (including a cyclic back reference) is
+                # emitted as a reference.
+                self._shared_containers[value_id] = (value, index)
                 self.encode_length(6, 0x1C)
                 encoder(self, value)
             else:
@@ -358,12 +413,42 @@ class CBOREncoder:
             if self.value_sharing:
                 # Generate a reference to the previous index instead of
                 # encoding this again
-                self.encode_length(6, 0x1D)
-                self.encode_int(cast(int, index))
+                self._emit_sharedref(index)
             else:
                 raise CBOREncodeValueError(
                     "cyclic data structure detected but value sharing is disabled"
                 )
+
+    def _emit_sharedref(self, index: int) -> None:
+        self.encode_length(6, 0x1D)
+        self.encode_int(index)
+
+    def encode_immutable(self, encoder: Callable[[CBOREncoder, Any], Any], value: Any) -> None:
+        """
+        Encode an immutable, hashable container with optional equality sharing.
+
+        When ``shared_equivalence`` permits this value, a second, distinct
+        object that compares equal to it is emitted as a reference (tag 29) to
+        the first emitted copy. Sharing by identity (tag 28/29) is handled by
+        :meth:`encode_shared`, so cyclic values are always representable.
+        """
+        key = _immutable_share_key(value)
+        allowed = key is not None and self.shared_equivalence(value)
+        if allowed:
+            index = self._shared_values.get(key)
+            if index is not None:
+                # An equal, independently constructed object has already been
+                # emitted; reuse it without allocating a new shared index.
+                self._emit_sharedref(index)
+                return
+
+        self.encode_shared(encoder, value)
+        if allowed:
+            # Register the freshly emitted value under its content key. If the
+            # same object appeared more than once while it was being encoded
+            # (a cyclic value), it was already registered by encode_shared()
+            # and this assignment is a harmless no-op.
+            self._shared_values.setdefault(key, self._shared_containers[id(value)][1])
 
     def _stringref(self, value: str | bytes) -> bool:
         """
@@ -699,6 +784,7 @@ def dumps(
     canonical: bool = False,
     date_as_datetime: bool = False,
     string_referencing: bool = False,
+    shared_equivalence: Callable[[Any], bool] | None = None,
 ) -> bytes:
     """
     Serialize an object to a bytestring.
@@ -730,6 +816,10 @@ def dumps(
         the default behavior in previous releases (cbor2 <= 4.1.2).
     :param string_referencing:
         set to ``True`` to allow more efficient serializing of repeated string values
+    :param shared_equivalence:
+        callable that decides whether an immutable container (tuple or
+        :class:`FrozenDict`) may be replaced by a reference to an earlier equal
+        value; requires ``value_sharing=True``
     :return: the serialized output
 
     """
@@ -743,6 +833,7 @@ def dumps(
             canonical=canonical,
             date_as_datetime=date_as_datetime,
             string_referencing=string_referencing,
+            shared_equivalence=shared_equivalence,
         ).encode(obj)
         return fp.getvalue()
 
@@ -757,6 +848,7 @@ def dump(
     canonical: bool = False,
     date_as_datetime: bool = False,
     string_referencing: bool = False,
+    shared_equivalence: Callable[[Any], bool] | None = None,
 ) -> None:
     """
     Serialize an object to a file.
@@ -790,6 +882,10 @@ def dump(
         the default behavior in previous releases (cbor2 <= 4.1.2).
     :param string_referencing:
         set to ``True`` to allow more efficient serializing of repeated string values
+    :param shared_equivalence:
+        callable that decides whether an immutable container (tuple or
+        :class:`FrozenDict`) may be replaced by a reference to an earlier equal
+        value; requires ``value_sharing=True``
 
     """
     CBOREncoder(
@@ -801,4 +897,5 @@ def dump(
         canonical=canonical,
         date_as_datetime=date_as_datetime,
         string_referencing=string_referencing,
+        shared_equivalence=shared_equivalence,
     ).encode(obj)

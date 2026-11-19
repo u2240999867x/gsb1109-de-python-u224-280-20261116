@@ -18,6 +18,8 @@ typedef struct {
     PyObject *string_references;
     PyObject *tz;       // renamed from timezone to avoid Python issue #24643
     PyObject *shared_handler;
+    PyObject *shared_values;        // content key -> shared index (equal-value sharing)
+    PyObject *shared_equivalence;   // user predicate, or Py_None when disabled
     uint8_t enc_style;  // 0=regular, 1=canonical, 2=custom
     bool timestamp_format;
     bool date_as_datetime;

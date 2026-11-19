@@ -5,6 +5,18 @@ Version history
 
 This library adheres to `Semantic Versioning <http://semver.org/>`_.
 
+**UNRELEASED**
+
+- Added the ``shared_equivalence`` option to ``CBOREncoder``, ``dump()`` and ``dumps()`` which,
+  when ``value_sharing`` is enabled, lets a caller permit distinct but equal immutable containers
+  (``tuple`` and ``FrozenDict``) to be emitted as shared value references (tags 28/29). Mutable
+  containers are never merged by equality, and cyclic data remains serializable
+- Fixed the pure Python decoder overwriting a shared value slot while decoding the children of an
+  array, so a tag 29 reference to a non-empty array or map resolves to the whole container instead
+  of its last item
+- Fixed the pure Python decoder storing the plain ``dict`` rather than the ``FrozenDict`` in the
+  shared value slot when decoding an immutable map
+
 **5.6.5** (2024-10-09)
 
 - Published binary wheels for Python 3.13
