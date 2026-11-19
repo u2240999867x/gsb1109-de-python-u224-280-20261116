@@ -21,6 +21,14 @@ from ._message_queue import KeyedMessage, LogTimeOrderQueue
 from .data_stream import ReadDataStream, RecordBuilder
 from .decoder import DecoderFactory
 from .exceptions import DecoderNotFoundError, McapError
+from .metadata_query import (
+    ClaimParser,
+    MetadataQueryResult,
+    PriorityRule,
+    TimeDomain,
+    TimeRange,
+    execute_metadata_query,
+)
 from .records import (
     Attachment,
     AttachmentIndex,
@@ -303,6 +311,66 @@ class McapReader(ABC):
         """Iterates through metadata records in the MCAP."""
         raise NotImplementedError()
 
+    def query_metadata(
+        self,
+        parser: ClaimParser,
+        *,
+        retraction_parser: Optional[ClaimParser] = None,
+        priority_rules: Iterable[PriorityRule] = (),
+        topics: Union[Iterable[str], str, None] = None,
+        time_domain: Optional[TimeDomain] = None,
+        log_time: Optional[TimeRange] = None,
+        publish_time: Optional[TimeRange] = None,
+    ) -> MetadataQueryResult:
+        """Resolves same-named Metadata declarations over a time range.
+
+        The reader supplies the Metadata records and its channel universe;
+        ``parser`` turns each record into a business
+        :class:`~mcap.metadata_query.MetadataClaim` carrying the applicable
+        channels, time domain, validity interval and stable claim id. Effective
+        values follow ``priority_rules`` rather than the records' physical order,
+        unresolvable ranges come back as conflicts, and retractions only remove
+        the projections they name.
+
+        :param parser: maps each Metadata record to a claim, or skips it by
+            returning ``None``.
+        :param retraction_parser: maps a record to a retraction claim, or skips
+            it. Retractions are classified before ``parser`` runs.
+        :param priority_rules: business ordering between claim ids.
+        :param topics: restrict the result to these channels.
+        :param time_domain: evaluate one timestamp axis only; both axes are
+            evaluated independently when ``None``.
+        :param log_time: log-time query bounds, applied to log-time claims only.
+        :param publish_time: publish-time query bounds, applied to publish-time
+            claims only and never mixed with log time.
+        """
+        raise NotImplementedError()
+
+    @staticmethod
+    def _run_metadata_query(
+        records: List[Metadata],
+        *,
+        parser: ClaimParser,
+        retraction_parser: Optional[ClaimParser],
+        priority_rules: Iterable[PriorityRule],
+        channel_universe: List[str],
+        topics: Union[Iterable[str], str, None],
+        time_domain: Optional[TimeDomain],
+        log_time: Optional[TimeRange],
+        publish_time: Optional[TimeRange],
+    ) -> MetadataQueryResult:
+        return execute_metadata_query(
+            records,
+            parser=parser,
+            retraction_parser=retraction_parser,
+            priority_rules=priority_rules,
+            channel_universe=channel_universe,
+            topics=topics,
+            time_domain=time_domain,
+            log_time=log_time,
+            publish_time=publish_time,
+        )
+
 
 def make_reader(
     stream: IO[bytes],
@@ -569,6 +637,44 @@ class SeekingReader(McapReader):
             else:
                 raise McapError(f"expected attachment record, got {type(record)}")
 
+    def query_metadata(
+        self,
+        parser: ClaimParser,
+        *,
+        retraction_parser: Optional[ClaimParser] = None,
+        priority_rules: Iterable[PriorityRule] = (),
+        topics: Union[Iterable[str], str, None] = None,
+        time_domain: Optional[TimeDomain] = None,
+        log_time: Optional[TimeRange] = None,
+        publish_time: Optional[TimeRange] = None,
+    ) -> MetadataQueryResult:
+        summary = self.get_summary()
+        if summary is None or len(summary.metadata_indexes) == 0:
+            # no metadata index available, fall back to a linear scan of the file.
+            self._stream.seek(0, io.SEEK_SET)
+            return NonSeekingReader(self._stream).query_metadata(
+                parser,
+                retraction_parser=retraction_parser,
+                priority_rules=priority_rules,
+                topics=topics,
+                time_domain=time_domain,
+                log_time=log_time,
+                publish_time=publish_time,
+            )
+        return self._run_metadata_query(
+            list(self.iter_metadata()),
+            parser=parser,
+            retraction_parser=retraction_parser,
+            priority_rules=priority_rules,
+            channel_universe=[
+                channel.topic for channel in summary.channels.values()
+            ],
+            topics=topics,
+            time_domain=time_domain,
+            log_time=log_time,
+            publish_time=publish_time,
+        )
+
 
 class NonSeekingReader(McapReader):
     """an McapReader for reading out of non-seekable data sources, such as a pipe or socket.
@@ -708,3 +814,34 @@ class NonSeekingReader(McapReader):
         for record in self._stream_reader.records:
             if isinstance(record, Metadata):
                 yield record
+
+    def query_metadata(
+        self,
+        parser: ClaimParser,
+        *,
+        retraction_parser: Optional[ClaimParser] = None,
+        priority_rules: Iterable[PriorityRule] = (),
+        topics: Union[Iterable[str], str, None] = None,
+        time_domain: Optional[TimeDomain] = None,
+        log_time: Optional[TimeRange] = None,
+        publish_time: Optional[TimeRange] = None,
+    ) -> MetadataQueryResult:
+        self._check_spent()
+        records: List[Metadata] = []
+        channels: List[str] = []
+        for record in self._stream_reader.records:
+            if isinstance(record, Metadata):
+                records.append(record)
+            elif isinstance(record, Channel):
+                channels.append(record.topic)
+        return self._run_metadata_query(
+            records,
+            parser=parser,
+            retraction_parser=retraction_parser,
+            priority_rules=priority_rules,
+            channel_universe=channels,
+            topics=topics,
+            time_domain=time_domain,
+            log_time=log_time,
+            publish_time=publish_time,
+        )
