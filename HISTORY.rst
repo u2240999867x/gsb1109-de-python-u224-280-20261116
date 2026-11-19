@@ -8,6 +8,16 @@ Version: 2.2.1 - (IN DEVELOPMENT)
 * 686: distribute wheel binaries, not only .tar.gz.
 * 689: Fix file existence check for certificate files
 * Add a SECURITY.md mechanism to report critical vulnerabilities.
+* [FTPHandler] when ``passive_ports`` is configured, the ports in the
+  range are leased out to the FTP sessions of the same server, tracked
+  by (address family, local address, port) with dual-stack IPv4/IPv6
+  overlaps taken into account.  If no port in the range is available,
+  the PASV/EPSV request is now explicitly rejected with a "425"
+  response instead of silently falling back to a kernel-assigned port
+  outside the configured range.  Leases are terminated on PASV/EPSV
+  renegotiation, on passive data channel timeout, and when the control
+  connection is closed; a failed bind() never leaves a "ghost" lease
+  behind.
 
 **Bug fixes**
 

@@ -35,6 +35,7 @@ from pyftpdlib.utils import strerror
 from .data import DTPHandler
 from .dispatchers import ActiveDTP
 from .dispatchers import PassiveDTP
+from .leases import PassivePortsExhausted
 from .producers import BufferedIteratorProducer
 from .producers import FileProducer
 
@@ -376,6 +377,11 @@ class FTPHandler(AsyncChat):
         Value expected is a list of integers (e.g. range(60000, 65535)).
         When configured pyftpdlib will no longer use kernel-assigned
         random ports (default None).
+        The configured ports are leased out to the FTP sessions of the
+        same server: if all of them are in use (or busy) when a
+        PASV/EPSV command is received, the request is explicitly
+        rejected with a "425" response instead of silently falling
+        back to a port outside the configured range.
 
      - (bool) use_gmt_times:
         when True causes the server to report all ls and MDTM times in
@@ -1255,7 +1261,18 @@ class FTPHandler(AsyncChat):
             return
 
         # open data channel
-        self._dtp_acceptor = self.passive_dtp(self, extmode)
+        try:
+            self._dtp_acceptor = self.passive_dtp(self, extmode)
+        except PassivePortsExhausted:
+            # All ports in the configured passive_ports range are
+            # leased out to other sessions (or busy): explicitly
+            # reject the request instead of silently falling back
+            # to a kernel-assigned port outside the configured range.
+            msg = (
+                "425 Can't open passive connection: no available port "
+                "in the configured passive_ports range."
+            )
+            self.respond_w_warning(msg)
 
     def ftp_PORT(self, line):
         """Start an active data channel by using IPv4."""

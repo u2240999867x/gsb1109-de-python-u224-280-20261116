@@ -1883,9 +1883,9 @@ class TestConfigurableOptions(PyftpdlibTestCase):
 
     @disable_log_warning
     def test_passive_ports_busy(self):
-        # If the ports in the configured range are busy it is expected
-        # that a kernel-assigned port gets chosen
-
+        # If all the ports in the configured range are busy the PASV
+        # request is explicitly rejected with a 425 response, and no
+        # "ghost" port lease is left behind.
         with contextlib.closing(socket.socket()) as s:
             s.settimeout(GLOBAL_TIMEOUT)
             s.bind((HOST, 0))
@@ -1894,8 +1894,51 @@ class TestConfigurableOptions(PyftpdlibTestCase):
             self.server.handler.passive_ports = [port]
             self.server.start()
             self.connect()
-            resulting_port = self.client.makepasv()[1]
-            assert port != resulting_port
+            with pytest.raises(ftplib.error_temp, match="425"):
+                self.client.makepasv()
+            assert len(self.server.server.passive_port_leases) == 0
+
+    @disable_log_warning
+    def test_passive_ports_exhausted(self):
+        # With a single-port passive range the port is leased to the
+        # first session asking for it; other sessions get an explicit
+        # 425 response until the lease is terminated (by a PASV
+        # renegotiation or by closing the control connection).
+        with contextlib.closing(socket.socket()) as s:
+            s.bind((HOST, 0))
+            port = s.getsockname()[1]
+        self.server = self.server_class()
+        self.server.handler.passive_ports = [port]
+        self.server.start()
+        self.connect()
+        other = self.client_class(timeout=GLOBAL_TIMEOUT)
+        try:
+            # lease the only available port
+            assert self.client.makepasv()[1] == port
+            assert len(self.server.server.passive_port_leases) == 1
+            # a second session cannot lease the same port
+            other.connect(self.server.host, self.server.port)
+            other.login(USER, PASSWD)
+            with pytest.raises(ftplib.error_temp, match="425"):
+                other.makepasv()
+            # renegotiating PASV on the owning session terminates the
+            # previous lease first, so it keeps working...
+            assert self.client.makepasv()[1] == port
+            assert len(self.server.server.passive_port_leases) == 1
+            # ...but the port is still not available to other sessions
+            with pytest.raises(ftplib.error_temp, match="425"):
+                other.makepasv()
+            # closing the control connection terminates the lease
+            self.client.quit()
+            stop_at = time.time() + GLOBAL_TIMEOUT
+            while time.time() < stop_at:
+                if len(self.server.server.passive_port_leases) == 0:
+                    break
+                time.sleep(0.01)
+            assert len(self.server.server.passive_port_leases) == 0
+            assert other.makepasv()[1] == port
+        finally:
+            close_client(other)
 
     def test_use_gmt_times(self):
         testfn = self.get_testfn()

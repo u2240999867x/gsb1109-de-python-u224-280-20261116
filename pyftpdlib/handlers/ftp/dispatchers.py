@@ -13,7 +13,15 @@ from pyftpdlib.ioloop import Connector
 from pyftpdlib.log import debug
 from pyftpdlib.log import logger
 
+from .leases import PassivePortInUse
+from .leases import PassivePortLeaseManager
+from .leases import PassivePortsExhausted
+
 __all__ = ["ActiveDTP", "PassiveDTP"]
+
+# Fallback lease registry used when the command channel is not
+# associated with an FTPServer instance (e.g. in unit tests).
+_default_lease_manager = PassivePortLeaseManager()
 
 
 class PassiveDTP(Acceptor):
@@ -40,6 +48,7 @@ class PassiveDTP(Acceptor):
         self.cmd_channel = cmd_channel
         self.log = cmd_channel.log
         self.log_exception = cmd_channel.log_exception
+        self._port_lease = None
         Acceptor.__init__(self, ioloop=cmd_channel.ioloop)
 
         local_ip = self.cmd_channel.socket.getsockname()[0]
@@ -65,38 +74,13 @@ class PassiveDTP(Acceptor):
             # free unprivileged random port.
             self.bind((local_ip, 0))
         else:
-            ports = list(self.cmd_channel.passive_ports)
-            while ports:
-                port = ports.pop(random.randint(0, len(ports) - 1))
-                self.set_reuse_addr()
-                try:
-                    self.bind((local_ip, port))
-                except PermissionError:
-                    self.cmd_channel.log(
-                        f"ignoring EPERM when bind()ing port {port}",
-                        logfun=logger.debug,
-                    )
-                except OSError as err:
-                    if err.errno == errno.EADDRINUSE:  # port already in use
-                        if ports:
-                            continue
-                        # If cannot use one of the ports in the configured
-                        # range we'll use a kernel-assigned port, and log
-                        # a message reporting the issue.
-                        # By using 0 as port number value we let kernel
-                        # choose a free unprivileged random port.
-                        else:
-                            self.bind((local_ip, 0))
-                            self.cmd_channel.log(
-                                "Can't find a valid passive port in the "
-                                "configured range. A random kernel-assigned "
-                                "port will be used.",
-                                logfun=logger.warning,
-                            )
-                    else:
-                        raise
-                else:
-                    break
+            try:
+                self._bind_passive_port(local_ip, af)
+            except Exception:
+                # Don't leave a half-initialized socket (nor a "ghost"
+                # port lease) behind.
+                self.close()
+                raise
         self.listen(self.backlog or self.cmd_channel.server.backlog)
 
         port = self.socket.getsockname()[1]
@@ -126,6 +110,65 @@ class PassiveDTP(Acceptor):
             )
         if self.timeout:
             self.call_later(self.timeout, self.handle_timeout)
+
+    # --- passive port leasing
+
+    def _lease_manager(self):
+        """Return the PassivePortLeaseManager shared by all the FTP
+        sessions of this server.
+        """
+        server = getattr(self.cmd_channel, "server", None)
+        manager = getattr(server, "passive_port_leases", None)
+        if manager is None:
+            manager = _default_lease_manager
+        return manager
+
+    def _bind_passive_port(self, local_ip, af):
+        """Lease and bind() a port picked from the configured
+        passive_ports range.
+
+        Raise PassivePortsExhausted if no port in the range could be
+        leased and bound, in which case no "ghost" lease is left
+        behind.
+        """
+        manager = self._lease_manager()
+        ports = list(self.cmd_channel.passive_ports)
+        while ports:
+            port = ports.pop(random.randint(0, len(ports) - 1))
+            self.set_reuse_addr()
+            try:
+                lease = manager.acquire(af, local_ip, port, owner=self)
+            except PassivePortInUse:
+                continue  # leased out to another session of this server
+            try:
+                self.bind((local_ip, port))
+            except PermissionError:
+                lease.release()
+                self.cmd_channel.log(
+                    f"ignoring EPERM when bind()ing port {port}",
+                    logfun=logger.debug,
+                )
+            except OSError as err:
+                lease.release()  # failed bind() must not leave a lease
+                if err.errno == errno.EADDRINUSE:  # port already in use
+                    continue
+                raise
+            else:
+                self._port_lease = lease
+                return
+        raise PassivePortsExhausted(
+            "no available port in the configured passive_ports range"
+        )
+
+    def _release_port_lease(self):
+        """Terminate the passive port lease, if any.  Called exactly
+        once on close(), no matter whether the listener is torn down
+        because of a PASV/EPSV renegotiation, a timeout, an accepted
+        data connection, or the control connection being closed.
+        """
+        lease, self._port_lease = self._port_lease, None
+        if lease is not None:
+            lease.release()
 
     # --- connection / overridden
 
@@ -195,7 +238,12 @@ class PassiveDTP(Acceptor):
 
     def close(self):
         debug("call: close()", inst=self)
-        Acceptor.close(self)
+        if not self._closed:
+            # Close the socket first, then terminate the lease, so
+            # that the endpoint is actually free by the time another
+            # session is allowed to lease it.
+            Acceptor.close(self)
+            self._release_port_lease()
 
 
 class ActiveDTP(Connector):

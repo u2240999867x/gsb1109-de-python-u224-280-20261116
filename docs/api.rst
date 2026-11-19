@@ -195,6 +195,10 @@ Control connection
     What TCP ports the FTP server will use for passive (PASV) data transfers.
     The value expected is a list of integers (e.g. ``list(range(60000, 65535))``).
     When configured, pyftpdlib will no longer use kernel-assigned random TCP ports.
+    The configured ports are leased out to the FTP sessions of the same server:
+    if all of them are in use (or busy) when a PASV/EPSV command is received,
+    the request is explicitly rejected with a ``425`` response instead of
+    silently falling back to a port outside the configured range.
     Default: ``None``.
 
   .. data:: use_gmt_times

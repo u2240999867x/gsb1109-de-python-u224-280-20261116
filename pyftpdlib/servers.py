@@ -42,6 +42,7 @@ import threading
 import time
 import traceback
 
+from .handlers.ftp.leases import PassivePortLeaseManager
 from .ioloop import Acceptor
 from .ioloop import AsyncChat
 from .log import PREFIX
@@ -106,6 +107,10 @@ class FTPServer(Acceptor):
         self.handler = handler
         self.backlog = backlog
         self.ip_map = []
+        # Registry of the passive (PASV/EPSV) port endpoints currently
+        # leased out to the FTP sessions of this server, used when
+        # handler.passive_ports is configured.
+        self.passive_port_leases = PassivePortLeaseManager()
         # in case of FTPS class not properly configured we want errors
         # to be raised here rather than later, when client connects
         if hasattr(handler, "get_ssl_context"):
