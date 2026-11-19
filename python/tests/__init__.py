@@ -9,6 +9,8 @@ from .phonenumbermatchertest import PhoneNumberMatchTest, PhoneNumberMatcherTest
 from .geocodertest import PhoneNumberGeocoderTest
 from .carriertest import PhoneNumberToCarrierMapperTest
 from .timezonetest import PhoneNumberToTimeZonesMapperTest
+from .cleaningcorpustest import (CorpusGenerationTest, SnapshotCorpusTest,
+                                 CorpusShrinkTest, SnapshotReproducibilityTest)
 
 if __name__ == '__main__':
     unittest.main()
