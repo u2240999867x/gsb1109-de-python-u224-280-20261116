@@ -35,6 +35,27 @@ timestamp_re = re.compile(
 incremental_utf8_decoder = getincrementaldecoder("utf-8")
 
 
+def _stringref_is_referenced(next_index: int, length: int) -> bool:
+    """
+    Return whether a string of the given byte length would be entered into the
+    string reference namespace, given the index it would receive.
+
+    This mirrors the encoder side rule: a string is only referenced when
+    encoding a reference to it would not be longer than encoding the string
+    itself.
+    """
+    if next_index < 24:
+        return length >= 3
+    elif next_index < 256:
+        return length >= 4
+    elif next_index < 65536:
+        return length >= 5
+    elif next_index < 4294967296:
+        return length >= 7
+    else:
+        return length >= 11
+
+
 class CBORDecoder:
     """
     The CBORDecoder class implements a fully featured `CBOR`_ decoder with
@@ -175,21 +196,10 @@ class CBORDecoder:
         return value
 
     def _stringref_namespace_add(self, string: str | bytes, length: int) -> None:
-        if self._stringref_namespace is not None:
-            next_index = len(self._stringref_namespace)
-            if next_index < 24:
-                is_referenced = length >= 3
-            elif next_index < 256:
-                is_referenced = length >= 4
-            elif next_index < 65536:
-                is_referenced = length >= 5
-            elif next_index < 4294967296:
-                is_referenced = length >= 7
-            else:
-                is_referenced = length >= 11
-
-            if is_referenced:
-                self._stringref_namespace.append(string)
+        if self._stringref_namespace is not None and _stringref_is_referenced(
+            len(self._stringref_namespace), length
+        ):
+            self._stringref_namespace.append(string)
 
     def read(self, amount: int) -> bytes:
         """

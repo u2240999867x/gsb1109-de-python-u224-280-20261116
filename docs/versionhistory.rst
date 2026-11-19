@@ -5,6 +5,15 @@ Version history
 
 This library adheres to `Semantic Versioning <http://semver.org/>`_.
 
+**UNRELEASED**
+
+- Added ``cbor2.StringRefArchiveIndex`` which scans an archive of concatenated CBOR
+  objects that share a running string reference table (tags 25/256) and builds a
+  random-access index over it. Any object can then be decoded directly from its
+  recorded offset against the local string table that was in effect when it started,
+  without decoding the archive from the beginning. The index is bound to the file
+  version it was built from and refuses to interpret a file that has changed since
+
 **5.6.5** (2024-10-09)
 
 - Published binary wheels for Python 3.13

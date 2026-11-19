@@ -7,6 +7,15 @@ from ._encoder import CBOREncoder as CBOREncoder
 from ._encoder import dump as dump
 from ._encoder import dumps as dumps
 from ._encoder import shareable_encoder as shareable_encoder
+from ._index import FileFingerprint as FileFingerprint
+from ._index import IndexFileChangedError as IndexFileChangedError
+from ._index import ObjectInfo as ObjectInfo
+from ._index import ResolvedReference as ResolvedReference
+from ._index import StringRefArchiveIndex as StringRefArchiveIndex
+from ._index import StringRefContextError as StringRefContextError
+from ._index import StringRefIndexError as StringRefIndexError
+from ._index import StringRefRangeError as StringRefRangeError
+from ._index import StringRefSource as StringRefSource
 from ._types import CBORDecodeEOF as CBORDecodeEOF
 from ._types import CBORDecodeError as CBORDecodeError
 from ._types import CBORDecodeValueError as CBORDecodeValueError

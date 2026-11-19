@@ -16,6 +16,16 @@ Decoding
 .. autofunction:: cbor2.load
 .. autoclass:: cbor2.CBORDecoder
 
+String reference archive indexing
+---------------------------------
+
+.. autoclass:: cbor2.StringRefArchiveIndex
+    :members:
+.. autoclass:: cbor2.ObjectInfo
+.. autoclass:: cbor2.StringRefSource
+.. autoclass:: cbor2.ResolvedReference
+.. autoclass:: cbor2.FileFingerprint
+
 Types
 -----
 
@@ -34,3 +44,7 @@ Exceptions
 .. autoexception:: cbor2.CBORDecodeError
 .. autoexception:: cbor2.CBORDecodeValueError
 .. autoexception:: cbor2.CBORDecodeEOF
+.. autoexception:: cbor2.StringRefIndexError
+.. autoexception:: cbor2.StringRefContextError
+.. autoexception:: cbor2.StringRefRangeError
+.. autoexception:: cbor2.IndexFileChangedError
