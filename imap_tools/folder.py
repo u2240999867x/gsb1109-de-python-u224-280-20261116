@@ -13,6 +13,7 @@ from .errors import (
     MailboxFolderUnselectError,
 )
 from .imap_utf7 import utf7_decode
+from .readonly import collect_readonly_evidence
 from .utils import StrOrBytes, check_command_status, encode_folder, pairs_to_dict
 
 
@@ -45,12 +46,18 @@ class MailBoxFolderManager:
     def __init__(self, mailbox) -> None:
         self.mailbox = mailbox
         self._current_folder = None
+        self._current_readonly = None
+        self._current_readonly_evidence = ()
 
     def set(self, folder: StrOrBytes, readonly: bool = False) -> tuple:
         """Select current folder"""
         result = self.mailbox.client.select(encode_folder(folder), readonly)
         check_command_status(result, MailboxFolderSelectError)
         self._current_folder = folder
+        self._current_readonly = bool(readonly)
+        self._current_readonly_evidence = ()
+        if readonly:
+            self._current_readonly_evidence = collect_readonly_evidence(self.mailbox.client, result[1])
         return result
 
     def unset(self) -> tuple:
@@ -60,7 +67,17 @@ class MailBoxFolderManager:
         result = self.mailbox.client._simple_command('UNSELECT')
         check_command_status(result, MailboxFolderUnselectError)
         self._current_folder = None
+        self._current_readonly = None
+        self._current_readonly_evidence = ()
         return result
+
+    def is_readonly(self) -> bool:
+        """Whether the current selection is known to be read-only (EXAMINE)."""
+        return self._current_readonly is True and bool(getattr(self.mailbox.client, 'is_readonly', False))
+
+    def readonly_evidence(self) -> tuple:
+        """Server responses that prove the current selection is READ-ONLY."""
+        return tuple(self._current_readonly_evidence)
 
     def exists(self, folder: str) -> bool:
         """Checks whether a folder exists on the server."""

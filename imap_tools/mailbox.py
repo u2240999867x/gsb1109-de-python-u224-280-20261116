@@ -23,6 +23,7 @@ from .errors import (
 from .folder import MailBoxFolderManager
 from .idle import IdleManager
 from .message import MailMessage
+from .readonly import ReadOnlyScope
 from .utils import (
     StrOrBytes,
     check_command_status,
@@ -73,6 +74,8 @@ class BaseMailBox:
         self.folder = self.folder_manager_class(self)
         self.idle = self.idle_manager_class(self)
         self.login_result = None
+        self._readonly_session: Optional[ReadOnlyScope] = None
+        self.last_readonly_report = None
 
     def __enter__(self: Self) -> Self:
         return self
@@ -129,6 +132,11 @@ class BaseMailBox:
             self.folder.set(initial_folder)
         self.login_result = result
         return self
+
+    def _refuse_readonly_write(self, operation: str) -> None:
+        scope = self._readonly_session
+        if scope is not None:
+            scope.refuse_write(operation)
 
     def logout(self) -> tuple:
         """Informs the server that the client is done with the connection"""
@@ -191,16 +199,19 @@ class BaseMailBox:
         check_command_status(uid_result, MailboxUidsError)
         return uid_result[1][0].decode().split() if uid_result[1][0] else []
 
-    def _fetch_by_one(self, uid_list: Sequence[str], message_parts: str) -> Iterator[list]:
+    def _fetch_by_one(self, uid_list: Sequence[str], message_parts: str, *,
+                      readonly_scope: Optional[ReadOnlyScope] = None) -> Iterator[list]:
         for uid in uid_list:
             fetch_result = self.client.uid('fetch', uid, message_parts)
             check_command_status(fetch_result, MailboxFetchError)
             if not fetch_result[1] or fetch_result[1][0] is None:
                 continue
+            if readonly_scope is not None:
+                readonly_scope._observe_fetch_raw_items(fetch_result[1], 'fetch')
             yield fetch_result[1]
 
-    def _fetch_in_bulk(self, uid_list: Sequence[str], message_parts: str, reverse: bool, bulk: int) \
-            -> Iterator[list]:
+    def _fetch_in_bulk(self, uid_list: Sequence[str], message_parts: str, reverse: bool, bulk: int, *,
+                       readonly_scope: Optional[ReadOnlyScope] = None) -> Iterator[list]:
         if not uid_list:
             return
 
@@ -216,15 +227,80 @@ class BaseMailBox:
             check_command_status(fetch_result, MailboxFetchError)
             if not fetch_result[1] or fetch_result[1][0] is None:
                 return
+            if readonly_scope is not None:
+                readonly_scope._observe_fetch_raw_items(fetch_result[1], 'fetch')
             for built_fetch_item in chunked((reversed if reverse else iter)(fetch_result[1]), 2):
                 yield built_fetch_item
+
+    def readonly(self, folder: Optional[StrOrBytes] = None, *, lazy: bool = True,
+                 require_evidence: bool = True, strict: bool = False) -> ReadOnlyScope:
+        """Open an explicit read-only trust scope for search, headers, bodies and attachments.
+
+        ``folder`` may be omitted only when the connection is already selected
+        read-only. A borrowed connection that is selected writable is refused,
+        never switched behind another task's back.
+
+        :param folder: folder to EXAMINE when the connection is authenticated but not selected
+        :param lazy: fetch headers first and load BODY.PEEK[] on first body/attachment access
+        :param require_evidence: refuse to start unless the server confirms READ-ONLY
+        :param strict: raise on scope exit when the guarantee is not complete
+        """
+        return ReadOnlyScope(
+            self, folder, lazy=lazy, require_evidence=require_evidence, strict=strict)
+
+    read_only = readonly
+
+    def preflight_readonly(self, folder: Optional[StrOrBytes] = None) -> dict:
+        """Check, without sending any command, whether a read-only scope can start.
+
+        Returns a queryable dict with ``can_enter``, ``state``, ``folder``,
+        ``readonly`` and ``reason``. Never changes the selection.
+        """
+        client = self.client
+        state = getattr(client, 'state', None)
+        current = self.folder.get()
+        result = {
+            'can_enter': False,
+            'state': state,
+            'folder': str(current) if current is not None else None,
+            'readonly': self.folder.is_readonly(),
+            'reason': None,
+        }
+        if self._readonly_session is not None:
+            result['reason'] = 'A read-only scope is already active on this connection.'
+        elif state == 'SELECTED' and current is None:
+            result['reason'] = 'Selected folder is unknown to imap_tools.'
+        elif state == 'SELECTED' and folder is not None and \
+                encode_folder(folder) != encode_folder(current):
+            result['reason'] = f'Connection is selected for {current!r}, not for {folder!r}.'
+        elif state == 'SELECTED' and not self.folder.is_readonly():
+            result['reason'] = f'Connection is selected writable for {current!r}.'
+        elif state == 'AUTH' and folder is None:
+            result['reason'] = 'Connection is not selected and no folder was supplied.'
+        elif state not in ('SELECTED', 'AUTH'):
+            result['reason'] = f'Connection state {state!r} does not allow a read-only scope.'
+        else:
+            result['can_enter'] = True
+        return result
+
+    readonly_preflight = preflight_readonly
+
+    @property
+    def readonly_report(self):
+        """Report from the most recently finalized read-only scope, or None."""
+        return self.last_readonly_report
+
+    @property
+    def readonly_complete(self) -> bool:
+        report = self.last_readonly_report
+        return bool(report is not None and report.complete)
 
     def fetch(self,
               criteria: Criteria = 'ALL',
               charset: Optional[str] = 'US-ASCII',
               *,
               limit: Optional[Union[int, slice]] = None,
-              mark_seen=True,
+              mark_seen: Optional[bool] = None,
               reverse=False,
               headers_only=False,
               bulk: Union[bool, int] = False,
@@ -238,7 +314,8 @@ class BaseMailBox:
                         Some servers reject an explicit CHARSET, use None for them
         :param limit: int | slice - limit number of read emails | slice emails range for read
                       useful for actions with a large number of messages, like "move" | paging
-        :param mark_seen: mark emails as seen on fetch
+        :param mark_seen: mark emails as seen on fetch. Defaults to True outside a read-only scope and
+                          is forced to False inside one; an explicit True there is a read-only violation
         :param reverse: in order from the larger date to the smaller, works at client side
         :param headers_only: get only email headers (without text, html, attachments)
         :param bulk:
@@ -249,8 +326,28 @@ class BaseMailBox:
         :param uid_list: UIDs for fetch. If set: (criteria, charset, sort) will be ignored, SEARCH will not be used.
         :return generator: MailMessage
         """
-        message_parts = \
-            f"(BODY{'' if mark_seen else '.PEEK'}[{'HEADER' if headers_only else ''}] UID FLAGS RFC822.SIZE)"
+        scope = self._readonly_session
+        if scope is not None:
+            scope.assert_read_context()
+            if mark_seen:
+                scope.refuse_write('FETCH with mark_seen=True')
+            mark_seen = False
+        elif mark_seen is None:
+            mark_seen = True
+        lazy_supported = isinstance(self.email_message_class, type) \
+            and issubclass(self.email_message_class, MailMessage) \
+            and isinstance(getattr(self.email_message_class, 'obj', None), property)
+        lazy_mode = scope is not None and scope.lazy and not headers_only and lazy_supported
+        if scope is not None and scope.lazy and headers_only and not lazy_supported:
+            # Custom message classes can not be lazily loaded; read headers only.
+            message_parts = "(BODY.PEEK[HEADER] UID FLAGS RFC822.SIZE)"
+        elif lazy_mode:
+            # Headers are fetched now; the full body is fetched later with
+            # BODY.PEEK[] through the same verified scope, never with BODY[].
+            message_parts = "(BODY.PEEK[HEADER] UID FLAGS RFC822.SIZE)"
+        else:
+            message_parts = \
+                f"(BODY{'' if mark_seen else '.PEEK'}[{'HEADER' if headers_only else ''}] UID FLAGS RFC822.SIZE)"
         limit_range = slice(0, limit) if type(limit) is int else limit or slice(None)
         if not isinstance(limit_range, slice):
             raise TypeError(f"slice expected, but received: {type(limit_range).__name__}")
@@ -259,14 +356,29 @@ class BaseMailBox:
         else:
             uids = self.uids(criteria, charset, sort)
         uids = tuple((reversed if reverse else iter)(uids))[limit_range]
-        if bulk:
-            message_generator = self._fetch_in_bulk(uids, message_parts, reverse, bulk)
-        else:
-            message_generator = self._fetch_by_one(uids, message_parts)
-        for fetch_item in message_generator:
-            yield self.email_message_class(fetch_item)
+        message_generator = \
+            self._fetch_in_bulk(uids, message_parts, reverse, bulk, readonly_scope=scope) \
+            if bulk else self._fetch_by_one(uids, message_parts, readonly_scope=scope)
+        try:
+            for fetch_item in message_generator:
+                message = self.email_message_class(fetch_item)
+                if lazy_mode:
+                    # The loader refuses to run after the scope ends and raises
+                    # if the server did not provide a UID to bind it to.
+                    message._lazy_loader = scope.body_loader(message.uid)
+                    message._lazy_loaded = False
+                yield message
+        except GeneratorExit:
+            if scope is not None:
+                scope.note_generator_closed()
+            raise
+        except Exception as exc:
+            if scope is not None:
+                scope._unverified(f'fetch failed: {exc}')
+            raise
 
     def expunge(self) -> tuple:
+        self._refuse_readonly_write('EXPUNGE')
         result = self.client.expunge()
         check_command_status(result, MailboxExpungeError)
         return result
@@ -280,6 +392,7 @@ class BaseMailBox:
         :param chunks: Number of UIDs to process at once, to avoid server errors on large set. Proc all at once if None.
         :return: None on empty uid_list, command results otherwise
         """
+        self._refuse_readonly_write('DELETE')
         cleaned_uid_list = clean_uids(uid_list)
         if not cleaned_uid_list:
             return None
@@ -301,6 +414,7 @@ class BaseMailBox:
         :param chunks: Number of UIDs to process at once, to avoid server errors on large set. Proc all at once if None.
         :return: None on empty uid_list, command results otherwise
         """
+        self._refuse_readonly_write('COPY')
         cleaned_uid_list = clean_uids(uid_list)
         if not cleaned_uid_list:
             return None
@@ -322,6 +436,7 @@ class BaseMailBox:
         :param chunks: Number of UIDs to process at once, to avoid server errors on large set. Proc all at once if None.
         :return: None on empty uid_list, command results otherwise
         """
+        self._refuse_readonly_write('MOVE')
         cleaned_uid_list = clean_uids(uid_list)
         if not cleaned_uid_list:
             return None
@@ -355,6 +470,7 @@ class BaseMailBox:
         :param chunks: Number of UIDs to process at once, to avoid server errors on large set. Proc all at once if None.
         :return: None on empty uid_list, command results otherwise
         """
+        self._refuse_readonly_write('FLAG')
         cleaned_uid_list = clean_uids(uid_list)
         if not cleaned_uid_list:
             return None
@@ -384,6 +500,7 @@ class BaseMailBox:
         :param flag_set: email message flags, no flags by default. System flags at consts.MailMessageFlags.all
         :return: command results
         """
+        self._refuse_readonly_write('APPEND')
         timezone = datetime.datetime.now().astimezone().tzinfo  # system timezone
         cleaned_flags = clean_flags(flag_set or [])
         typ, dat = self.client.append(

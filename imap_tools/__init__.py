@@ -23,15 +23,24 @@ from .errors import (
     MailboxLogoutError,
     MailboxMoveError,
     MailboxNumbersError,
+    MailboxReadOnlyConflictError,
+    MailboxReadOnlyError,
+    MailboxReadOnlyUnverifiedError,
+    MailboxReadOnlyViolationError,
     MailboxStarttlsError,
     MailboxTaggedResponseError,
     MailboxUidsError,
+    ReadOnlyConflictError,
+    ReadOnlyError,
+    ReadOnlyUnverifiedError,
+    ReadOnlyViolationError,
     UnexpectedCommandStatusError,
 )
 from .folder import FolderInfo, MailBoxFolderManager
 from .mailbox import BaseMailBox, MailBox, MailBoxStartTls, MailBoxUnencrypted
 from .message import LazyHeaders, MailAttachment, MailMessage
 from .query import AND, NOT, OR, A, H, Header, N, O, U, UidRange
+from .readonly import ExternalFlagChange, FlagObservation, ReadOnlyReport, ReadOnlyScope
 from .utils import EmailAddress
 
 __version__ = '1.16.0'
@@ -44,5 +53,9 @@ __all__ = [
     'MailboxFolderDeleteError', 'MailboxFolderRenameError', 'MailboxFolderSelectError', 'MailboxFolderStatusError',
     'MailboxFolderStatusValueError', 'MailboxFolderSubscribeError', 'MailboxLoginError', 'MailboxLogoutError',
     'MailboxMoveError', 'MailboxNumbersError', 'MailboxStarttlsError', 'MailboxTaggedResponseError', 'MailboxUidsError',
-    'N', 'NOT', 'O', 'OR', 'SortCriteria', 'U', 'UidRange', 'UnexpectedCommandStatusError', '__version__', 'LazyHeaders'
+    'N', 'NOT', 'O', 'OR', 'SortCriteria', 'U', 'UidRange', 'UnexpectedCommandStatusError', '__version__',
+    'LazyHeaders',
+    'ExternalFlagChange', 'FlagObservation', 'MailboxReadOnlyError', 'MailboxReadOnlyConflictError',
+    'MailboxReadOnlyViolationError', 'MailboxReadOnlyUnverifiedError', 'ReadOnlyReport', 'ReadOnlyScope',
+    'ReadOnlyError', 'ReadOnlyConflictError', 'ReadOnlyViolationError', 'ReadOnlyUnverifiedError',
 ]

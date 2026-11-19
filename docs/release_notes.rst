@@ -1,3 +1,14 @@
+Unreleased
+==========
+* Added: BaseMailBox.readonly(folder) - explicit read-only trust scope for search, headers, bodies
+  and lazy attachment access.
+* Added: BaseMailBox.preflight_readonly - side-effect free selection check before entering a scope.
+* Added: READ-ONLY evidence from EXAMINE, PEEK-only command guard, external flag-change observations
+  that are never restored, and an immutable verified ReadOnlyReport.
+* Added: MailMessage lazy body loading (BODY.PEEK[]) bound to the scope lifetime.
+* Added: Errors: MailboxReadOnlyError, MailboxReadOnlyConflictError, MailboxReadOnlyViolationError,
+  MailboxReadOnlyUnverifiedError.
+
 1.16.0
 ======
 * Fixed: silent no-op behavior at BaseMailBox.<action> when using iterables. (#274)

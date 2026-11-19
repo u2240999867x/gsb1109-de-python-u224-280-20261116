@@ -74,11 +74,45 @@ class LazyHeaders(Mapping):
 class MailMessage:
     """The email message"""
 
-    def __init__(self, fetch_data: list) -> None:
+    def __init__(self, fetch_data: list, *, lazy_loader=None) -> None:
         raw_message_data, raw_uid_data, raw_flag_data = self._get_message_data_parts(fetch_data)
         self._raw_uid_data = raw_uid_data
         self._raw_flag_data = raw_flag_data
-        self.obj: Message = email.message_from_bytes(raw_message_data)
+        self._obj: Message = email.message_from_bytes(raw_message_data)
+        self._lazy_loader = lazy_loader
+        self._lazy_loaded = lazy_loader is None
+        self._lazy_error: Optional[Exception] = None
+
+    @property
+    def obj(self) -> Message:
+        """Parsed email object. Loads the full body lazily in a read-only scope."""
+        self._ensure_loaded()
+        return self._obj
+
+    @obj.setter
+    def obj(self, value: Message) -> None:
+        self._obj = value
+        self._lazy_loaded = True
+        self._lazy_loader = None
+        self._lazy_error = None
+
+    def _ensure_loaded(self) -> None:
+        """Load full body on first access, through the scope's PEEK-only loader."""
+        if self._lazy_loaded:
+            return
+        if self._lazy_error is not None:
+            raise self._lazy_error
+        try:
+            raw_message_data = self._lazy_loader()
+            if not isinstance(raw_message_data, (bytes, bytearray)):
+                raise TypeError('lazy loader must return bytes')
+            self._obj = email.message_from_bytes(bytes(raw_message_data))
+        except Exception as exc:  # noqa: BLE001 - cached and re-raised for every attribute
+            self._lazy_error = exc
+            raise
+        else:
+            self._lazy_loaded = True
+            self._lazy_loader = None
 
     @classmethod
     def from_bytes(cls, raw_message_data: bytes):
@@ -149,15 +183,15 @@ class MailMessage:
     @cached_property
     def subject(self) -> str:
         """Message subject"""
-        if 'subject' in self.obj:
-            raw = self.obj['subject']
+        if 'subject' in self._obj:
+            raw = self._obj['subject']
             return ''.join(decode_value(*head_part) for head_part in decode_header(raw))
         return ''
 
     @cached_property
     def from_values(self) -> Optional[EmailAddress]:
         """Sender (all data)"""
-        result_set = parse_email_addresses(self.obj['From'] or '')
+        result_set = parse_email_addresses(self._obj['From'] or '')
         return result_set[0] if result_set else None
 
     @cached_property
@@ -168,7 +202,7 @@ class MailMessage:
     @cached_property
     def to_values(self) -> Tuple[EmailAddress, ...]:
         """Recipients (all data)"""
-        return tuple(chain(*(parse_email_addresses(i or '') for i in self.obj.get_all('To', []))))
+        return tuple(chain(*(parse_email_addresses(i or '') for i in self._obj.get_all('To', []))))
 
     @cached_property
     def to(self) -> Tuple[str, ...]:
@@ -178,7 +212,7 @@ class MailMessage:
     @cached_property
     def cc_values(self) -> Tuple[EmailAddress, ...]:
         """Carbon copy (all data)"""
-        return tuple(chain(*(parse_email_addresses(i or '') for i in self.obj.get_all('Cc', []))))
+        return tuple(chain(*(parse_email_addresses(i or '') for i in self._obj.get_all('Cc', []))))
 
     @cached_property
     def cc(self) -> Tuple[str, ...]:
@@ -188,7 +222,7 @@ class MailMessage:
     @cached_property
     def bcc_values(self) -> Tuple[EmailAddress, ...]:
         """Blind carbon copy (all data)"""
-        return tuple(chain(*(parse_email_addresses(i or '') for i in self.obj.get_all('Bcc', []))))
+        return tuple(chain(*(parse_email_addresses(i or '') for i in self._obj.get_all('Bcc', []))))
 
     @cached_property
     def bcc(self) -> Tuple[str, ...]:
@@ -198,7 +232,7 @@ class MailMessage:
     @cached_property
     def reply_to_values(self) -> Tuple[EmailAddress, ...]:
         """Reply-to emails (all data)"""
-        return tuple(chain(*(parse_email_addresses(i or '') for i in self.obj.get_all('Reply-To', []))))
+        return tuple(chain(*(parse_email_addresses(i or '') for i in self._obj.get_all('Reply-To', []))))
 
     @cached_property
     def reply_to(self) -> Tuple[str, ...]:
@@ -208,7 +242,7 @@ class MailMessage:
     @cached_property
     def date_str(self) -> str:
         """Message sent date string as is"""
-        return str(self.obj['Date'] or '')
+        return str(self._obj['Date'] or '')
 
     @cached_property
     def date(self) -> datetime.datetime:
@@ -246,7 +280,7 @@ class MailMessage:
         Headers not decoding by design:
         most of the time custom headers don't need this, typical header decoded at his properties.
         """
-        return LazyHeaders(self.obj)
+        return LazyHeaders(self._obj)
 
     @cached_property
     def attachments(self) -> List['MailAttachment']:

@@ -103,3 +103,26 @@ class MailboxAppendError(UnexpectedCommandStatusError):
 
 class MailboxTaggedResponseError(UnexpectedCommandStatusError):
     pass
+
+
+class MailboxReadOnlyError(ImapToolsError):
+    """Base error for read-only scope violations and unverifiable guarantees"""
+
+
+class MailboxReadOnlyConflictError(MailboxReadOnlyError):
+    """The borrowed connection is already selected or cannot be isolated safely"""
+
+
+class MailboxReadOnlyViolationError(MailboxReadOnlyError):
+    """A mutating command was attempted inside a read-only scope"""
+
+
+class MailboxReadOnlyUnverifiedError(MailboxReadOnlyError):
+    """Read-only state or absence of side effects could not be verified"""
+
+
+# Short aliases for the read-only scope errors
+ReadOnlyError = MailboxReadOnlyError
+ReadOnlyConflictError = MailboxReadOnlyConflictError
+ReadOnlyViolationError = MailboxReadOnlyViolationError
+ReadOnlyUnverifiedError = MailboxReadOnlyUnverifiedError

@@ -66,12 +66,63 @@ Docs for ``imap_tools`` are at: *this page*, docstrings,
 * *criteria* = 'ALL', message search criteria, `query builder <#search-criteria>`_
 * *charset* = 'US-ASCII', indicates charset of the strings that appear in the search criteria. See rfc2978
 * *limit* = None, limit on the number of read emails, useful for actions with a large number of messages, like "move". May be int or slice.
-* *mark_seen* = True, mark emails as seen on fetch
+* *mark_seen* = True outside a read-only scope, mark emails as seen on fetch. Inside ``mailbox.readonly(...)`` it is forced to False and an explicit True is refused.
 * *reverse* = False, in order from the larger date to the smaller, works at client side
 * *headers_only* = False, get only email headers (without text, html, attachments)
 * *bulk* = False, False - fetch each message separately per N commands - low memory consumption, slow; True - fetch all messages per 1 command - high memory consumption, fast; int - fetch all messages by bulks of the specified size, for 20 messages and bulk=5 -> 4 IMAP commands
 * *sort* = None, criteria for sort messages on server, use SortCriteria constants. Charset arg is important for sort
 * *uid_list* = None, UIDs for fetch. If set: (criteria, charset, sort) will be ignored, SEARCH will not be used.
+
+Read-only scope
+^^^^^^^^^^^^^^^
+``BaseMailBox.readonly(folder)`` is an explicit read-only trust scope covering search, headers,
+bodies and lazy attachment access. It is a context manager and it never publishes a guarantee
+that was not verified:
+
+.. code-block:: python
+
+    from imap_tools import MailBox, A
+
+    with MailBox('imap.my.moon').login('acc', 'pwd', initial_folder=None) as mailbox:
+        with mailbox.readonly('INBOX') as ro:
+            for msg in mailbox.fetch(A(seen=False)):
+                print(msg.subject)          # header fetch, BODY.PEEK[HEADER]
+                print(msg.text)             # lazy BODY.PEEK[] through the same scope
+                for att in msg.attachments:
+                    save(att.payload)       # still PEEK-only, never BODY[]
+
+        print(ro.report.readonly_complete)  # True only if absence of side effects was verified
+        print(ro.report.external_flag_changes)  # changes made by users/other clients, recorded only
+        print(ro.report.uid_guarantees)  # per-UID flags + verified flag
+
+Contract:
+
+* *Selection preflight*: ``readonly(folder)`` requires an authenticated connection with no current selection,
+  or a connection already selected read-only for the same folder. A borrowed connection that is selected
+  writable, or selected for another folder, raises ``MailboxReadOnlyConflictError`` **before any command is
+  sent**; the library never switches it behind another task's back. ``mailbox.preflight_readonly(folder)``
+  returns the same decision as a dict without sending anything.
+* *Server evidence*: entering the scope uses ``EXAMINE`` and keeps the server's ``[READ-ONLY]`` response.
+  If the server does not prove it, ``MailboxReadOnlyUnverifiedError`` is raised and no "read-only complete"
+  is ever published (``require_evidence=False`` allows reading with an unverified report).
+* *Command semantics*: while the scope is active, every command passes a guard. ``STORE``, ``COPY``,
+  ``MOVE``, ``APPEND``, ``EXPUNGE``, ``SELECT`` and unknown commands are refused with
+  ``MailboxReadOnlyViolationError``. Any ``FETCH`` item other than ``BODY.PEEK``/``RFC822.SIZE``/
+  ``RFC822.HEADER`` (for example bare ``BODY[]`` or ``RFC822``) is also refused. This applies to
+  every fetch in the scope, not only the first one - later body and attachment property access uses
+  the same guard and ``BODY.PEEK[]``.
+* *External observations*: flags returned by the server are recorded. A difference observed later,
+  including at scope exit or after a reconnect, is attributed to a user/other client and reported in
+  ``external_flag_changes``. Old values are never restored by the library.
+* *Guarantees after exits*: ``ro.report`` / ``mailbox.readonly_report`` is an immutable, serializable
+  report (``as_dict``). ``complete`` is True only when READ-ONLY evidence, final flag verification,
+  unchanged selection and an intact guard were all confirmed. Exceptions, early generator exit,
+  selection switching, reconnects and missing FLAGS make it explicitly unverified. ``strict=True``
+  raises at scope exit in that case instead of returning silently.
+* *Lazy access lifetime*: message bodies are loaded lazily. Accessing ``text``/``html``/``obj``/
+  ``attachments``/``att.payload`` after the scope ended raises ``MailboxReadOnlyError`` rather than
+  issuing a fetch against a selection that may now belong to another task. Fetch bodies with
+  ``headers_only=True`` or ``lazy=False`` keeps the old eager behaviour without any risk of a later fetch.
 
 ``BaseMailBox.uids`` - search mailbox for matching message uids in current folder, returns List[str], args:
 
