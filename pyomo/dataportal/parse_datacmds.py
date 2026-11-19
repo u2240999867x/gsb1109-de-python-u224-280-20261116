@@ -26,6 +26,17 @@ _re_number = r'[-+]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][-+]?[0-9]+)?'
 
 _parse_info = None
 
+
+class _Command(list):
+    """A parsed data command that remembers where it started."""
+
+    __slots__ = ('lineno',)
+
+    def __init__(self, values=(), lineno=None):
+        super().__init__(values)
+        self.lineno = lineno
+
+
 states = (('data', 'inclusive'),)
 
 reserved = {
@@ -155,7 +166,11 @@ def t_STRING(t):
     return t
 
 
-@lex.TOKEN(r'[a-zA-Z0-9_\.+\-]*\[[a-zA-Z0-9_\.+\-\*,\s]+\]')
+@lex.TOKEN(
+    r"[a-zA-Z0-9_\.+\-]*\["
+    r"(?:[a-zA-Z0-9_\.+\-\*,\s]|\"[^\"]*\"|'[^']*')+"
+    r"\]"
+)
 def t_data_BRACKETEDSTRING(t):
     # NO SPACES
     # a[1,_df,'foo bar']
@@ -218,7 +233,7 @@ def p_expr(p):
     if len(p) == 2:
         # print "STMTS",p[1]
         for stmt in p[1]:
-            if type(stmt) is list:
+            if isinstance(stmt, list):
                 _parse_info[None].append(stmt)
             else:
                 for key in stmt:
@@ -269,27 +284,32 @@ def p_statement(p):
     '''
     # print "STATEMENT",len(p), p[1:]
     stmt = p[1]
+    lineno = p.lineno(1)
     if stmt == 'set':
         if p[2][-1] == '[':
             # Just turn off the flatten_list and see what happens
-            p[0] = ['set', p[2][:-1], '['] + list(
+            values = ['set', p[2][:-1], '['] + list(
                 flatten_tuple([p[i] for i in range(3, len(p) - 1)])
             )
         else:
-            p[0] = list(flatten_tuple([p[i] for i in range(1, len(p) - 1)]))
+            values = list(flatten_tuple([p[i] for i in range(1, len(p) - 1)]))
     elif stmt == 'param':
-        p[0] = list(flatten_tuple([p[i] for i in range(1, len(p) - 1)]))
+        values = list(flatten_tuple([p[i] for i in range(1, len(p) - 1)]))
     elif stmt == 'include':
-        p[0] = [p[i] for i in range(1, len(p) - 1)]
+        values = [p[i] for i in range(1, len(p) - 1)]
     elif stmt == 'load':
-        p[0] = [p[1]] + p[2]
+        values = [p[1]] + p[2]
     elif stmt == 'store':
-        p[0] = [p[1]] + p[2]
+        values = [p[1]] + p[2]
     elif stmt == 'table':
-        p[0] = [p[1]] + [p[2]] + [p[4]]
+        values = [p[1]] + [p[2]] + [p[4]]
     else:
         # Not necessary, but nice to document how statement could end up None
+        values = None
+    if values is None:
         p[0] = None
+    else:
+        p[0] = _Command(values, lineno=lineno)
     # print(p[0])
 
 
@@ -565,6 +585,7 @@ def parse_data_commands(data=None, filename=None, debug=0):
     global _parse_info
     _parse_info = {None: []}
     dat_lexer.linepos = []
+    dat_lexer.lineno = 1
     #
     # Parse
     #

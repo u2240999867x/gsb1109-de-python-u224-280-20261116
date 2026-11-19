@@ -816,6 +816,17 @@ arguments (which have been ignored):"""
                     raise IOError(msg % namespace)
 
             #
+            # Validate the complete batch before publishing a new
+            # instance.  The batch (not the order in which individual
+            # data commands were loaded) determines legality, so this
+            # check must happen here, after all data sources have been
+            # merged.
+            #
+            validate = getattr(modeldata, '_validate_batch', None)
+            if validate is not None:
+                validate(namespaces)
+
+            #
             # Initialize each component in order.
             #
 

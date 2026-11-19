@@ -2274,5 +2274,138 @@ class TestTableCmd(unittest.TestCase):
         os.remove(currdir + 'loadComplex.dat')
 
 
+class BatchValidationTests(unittest.TestCase):
+    def _write(self, name, text):
+        path = os.path.abspath(currdir + name)
+        with open(path, 'w') as FILE:
+            FILE.write(text)
+        return path
+
+    def _model(self):
+        model = AbstractModel()
+        model.A = Set()
+        model.B = Set()
+        model.J = Set(within=model.A * model.B)
+        model.P = Param(model.J, within=Any)
+        return model
+
+    def _remove(self, *paths):
+        for path in paths:
+            os.remove(path)
+
+    def test_load_order_is_independent(self):
+        # The derived set J is populated before the sets it derives from.
+        path = self._write(
+            'batch_order.dat',
+            "set J := (a1,b1) (a2,b2);\n"
+            "set A := a1 a2;\n"
+            "set B := b1 b2;\n"
+            "param P := a1 b1 1 a2 b2 2;\n",
+        )
+        try:
+            instance = self._model().create_instance(path)
+            self.assertEqual(set(instance.J.data()), {('a1', 'b1'), ('a2', 'b2')})
+            self.assertEqual(
+                instance.P.extract_values(), {('a1', 'b1'): 1, ('a2', 'b2'): 2}
+            )
+        finally:
+            self._remove(path)
+
+    def test_member_without_domain_evidence(self):
+        path = self._write('batch_evidence.dat', "set J := (a1,b1);\n")
+        try:
+            with self.assertRaisesRegex(
+                ValueError, r"has no evidence.*batch_evidence\.dat"
+            ):
+                self._model().create_instance(path)
+        finally:
+            self._remove(path)
+
+    def test_member_outside_domain_cites_line(self):
+        path = self._write(
+            'batch_domain.dat',
+            "set A := a1 a2;\nset B := b1 b2;\nset J := (zz,b1);\n",
+        )
+        try:
+            with self.assertRaisesRegex(
+                ValueError, r"Cannot add value[\s\S]*domain A\*B[\s\S]*line 3"
+            ):
+                self._model().create_instance(path)
+        finally:
+            self._remove(path)
+
+    def test_member_arity_error_cites_line(self):
+        path = self._write(
+            'batch_arity.dat',
+            "set A := a1 a2;\nset B := b1 b2;\nset J := (a1,b1,x);\n",
+        )
+        try:
+            with self.assertRaisesRegex(
+                ValueError, r"3 dimensions.*dimen=2.*line 3"
+            ):
+                self._model().create_instance(path)
+        finally:
+            self._remove(path)
+
+    def test_dependency_cycle(self):
+        model = AbstractModel()
+        model.A = Set()
+        model.B = Set()
+        # Build a declaration cycle directly (the public Set constructor
+        # rejects forward references): A is indexed by B and B by A.
+        model.A._index_set = model.B
+        model.B._index_set = model.A
+        with self.assertRaisesRegex(ValueError, r"dependency cycle"):
+            model.create_instance(data={None: {}})
+
+    def test_failure_leaves_no_partial_batch(self):
+        model = self._model()
+        data = DataPortal(model=model)
+        path = self._write(
+            'batch_atomic.dat',
+            "set A := a1 a2;\nset B := b1 b2;\n"
+            "set A := zz;\nparam bad := ;\n",
+        )
+        try:
+            with self.assertRaises(Exception):
+                data.load(filename=path)
+            self.assertNotIn('A', data._data.get(None, {}))
+        finally:
+            self._remove(path)
+
+    def test_distinct_structural_keys_are_not_merged(self):
+        path = self._write(
+            'batch_keys.tab', 'I J P\n1 1 one\n"1" 1 two\n'
+        )
+        model = AbstractModel()
+        model.K = Set(dimen=2)
+        model.P = Param(model.K, within=Any)
+        data = DataPortal(model=model)
+        try:
+            data.load(filename=path, index='K', param='P')
+            instance = model.create_instance(data)
+            self.assertEqual(
+                set(instance.K.data()), {(1, 1), ('1', 1)}
+            )
+            self.assertEqual(
+                instance.P.extract_values(), {(1, 1): 'one', ('1', 1): 'two'}
+            )
+        finally:
+            self._remove(path)
+
+    def test_quoted_delimiter_is_not_an_index_dimension(self):
+        model = AbstractModel()
+        model.A = Set(dimen=2)
+        path = self._write(
+            'batch_quotes.dat',
+            "set A := ['a,b', c] ['x', 'y,z'];\n",
+        )
+        try:
+            instance = model.create_instance(path)
+            self.assertEqual(set(instance.A.data()), {('a,b', 'c'), ('x', 'y,z')})
+        finally:
+            self._remove(path)
+
+
 if __name__ == "__main__":
     unittest.main()

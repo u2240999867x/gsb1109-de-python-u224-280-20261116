@@ -15,6 +15,14 @@ import logging
 from pyomo.common.log import is_debug_set
 from pyomo.common.collections import Bunch, OrderedDict
 from pyomo.common.errors import ApplicationError
+from pyomo.dataportal._batch import (
+    ACTIVE_EXTERNAL_TABLE,
+    record_origin,
+    record_row_origin,
+    restore_source,
+    row_addressable,
+    set_source,
+)
 
 from pyomo.dataportal.parse_datacmds import parse_data_commands, _re_number
 from pyomo.dataportal.factory import DataManagerFactory, UnknownDataManager
@@ -56,6 +64,43 @@ def _guess_set_dimen(index):
     return d
 
 
+def _split_bracket_items(token):
+    """Split the contents of a ``[...]`` token on top-level commas.
+
+    Commas inside single- or double-quoted strings are part of the value,
+    not index separators.  Quote characters are preserved so that the
+    caller can distinguish ``'1'`` from ``1``.
+    """
+    items = []
+    current = []
+    quote = None
+    i = 0
+    text = token[1:-1]
+    n = len(text)
+    while i < n:
+        char = text[i]
+        if quote is not None:
+            current.append(char)
+            if char == quote:
+                if i + 1 < n and text[i + 1] == quote:
+                    # "escaped" quote (doubled)
+                    current.append(text[i + 1])
+                    i += 2
+                    continue
+                quote = None
+        elif char in ('"', "'"):
+            quote = char
+            current.append(char)
+        elif char == ',':
+            items.append(''.join(current).strip())
+            current = []
+        else:
+            current.append(char)
+        i += 1
+    items.append(''.join(current).strip())
+    return items
+
+
 def _process_token(token):
     # print("TOKEN:", token, type(token))
     if type(token) is tuple:
@@ -69,9 +114,8 @@ def _process_token(token):
         return token[1:-1]
     elif token[0] == '[' and token[-1] == ']':
         vals = []
-        token = token[1:-1]
-        for item in token.split(","):
-            if item[0] in '"\'' and item[0] == item[-1]:
+        for item in _split_bracket_items(token):
+            if item and item[0] in '"\'' and item[0] == item[-1] and len(item) >= 2:
                 vals.append(item[1:-1])
             elif _num_pattern.match(item):
                 _num = float(item)
@@ -212,7 +256,11 @@ def _process_set(cmd, _model, _data):
             ndx = ndx[0]
         if cmd[1] not in _data:
             _data[cmd[1]] = {}
-        _data[cmd[1]][ndx] = _process_set_data(cmd[4:], cmd[1], _model)
+        values = _process_set_data(cmd[4:], cmd[1], _model)
+        _data[cmd[1]][ndx] = values
+        if not ACTIVE_EXTERNAL_TABLE.get():
+            for value in values:
+                record_origin(cmd[1], value)
 
     elif cmd[2] == ":":
         #
@@ -231,13 +279,18 @@ def _process_set(cmd, _model, _data):
                 if cmd[i + j + 1] == "+":
                     # print("DATA %s %s" % (ndx1[j], cmd[i]))
                     _data[cmd[1]][None].append((ndx1[j], cmd[i]))
+                    record_origin(cmd[1], (ndx1[j], cmd[i]))
             i += len(ndx1) + 1
     else:
         #
         # Processing a general set
         #
         _data[cmd[1]] = {}
-        _data[cmd[1]][None] = _process_set_data(cmd[3:], cmd[1], _model)
+        values = _process_set_data(cmd[3:], cmd[1], _model)
+        _data[cmd[1]][None] = values
+        if not ACTIVE_EXTERNAL_TABLE.get():
+            for value in values:
+                record_origin(cmd[1], value)
 
 
 def _process_set_data(cmd, sname, _model):
@@ -285,6 +338,11 @@ def _process_set_data(cmd, sname, _model):
         i += 1
     if generate_debug_messages:
         logger.debug("DEBUG: _process_set_data(end) %s", ans)
+    if row_addressable():
+        # External tables supply one record per data row; row 1 is the
+        # header, so the first data row is row 2.
+        for offset, value in enumerate(ans):
+            record_row_origin(sname, value, row=offset + 2)
     return ans
 
 
@@ -345,6 +403,8 @@ def _process_param(cmd, _model, _data, _default, index=None, param=None, ncolumn
                     finaldata = _process_data_list(pname, _dim, cmd)
                 for key in finaldata:
                     _data[pname][key] = finaldata[key]
+                    if not ACTIVE_EXTERNAL_TABLE.get():
+                        record_origin(pname, key)
             else:
                 tmp = ["param", pname, ":="]
                 i = 1
@@ -622,6 +682,9 @@ def _process_data_list(param_name, dim, cmd):
         if cmd[i + dim] != ".":
             ans[ndx] = cmd[i + dim]
         i += dim + 1
+    if row_addressable():
+        for offset, key in enumerate(ans):
+            record_row_origin(param_name, key, row=offset + 2)
     return ans
 
 
@@ -647,25 +710,32 @@ def _process_include(cmd, _model, _data, _default, options=None):
         for cmd in scenarios[scenario]:
             if scenario not in _data:
                 _data[scenario] = {}
-            if cmd[0] in ('include', 'load'):
-                _tmpdata = {}
-                _process_data(cmd, _model, _tmpdata, _default, Filename, Lineno)
-                if scenario is None:
-                    for key in _tmpdata:
-                        if key in _data:
-                            _data[key].update(_tmpdata[key])
-                        else:
-                            _data[key] = _tmpdata[key]
+            cmd_line = getattr(cmd, 'lineno', Lineno)
+            tokens = set_source(Filename, cmd_line)
+            try:
+                if cmd[0] in ('include', 'load'):
+                    _tmpdata = {}
+                    _process_data(cmd, _model, _tmpdata, _default, Filename, cmd_line)
+                    if scenario is None:
+                        for key in _tmpdata:
+                            if key in _data:
+                                _data[key].update(_tmpdata[key])
+                            else:
+                                _data[key] = _tmpdata[key]
+                    else:
+                        for key in _tmpdata:
+                            if key is None:
+                                _data[scenario].update(_tmpdata[key])
+                            else:
+                                raise IOError(
+                                    "Cannot define a scenario within another scenario"
+                                )
                 else:
-                    for key in _tmpdata:
-                        if key is None:
-                            _data[scenario].update(_tmpdata[key])
-                        else:
-                            raise IOError(
-                                "Cannot define a scenario within another scenario"
-                            )
-            else:
-                _process_data(cmd, _model, _data[scenario], _default, Filename, Lineno)
+                    _process_data(
+                        cmd, _model, _data[scenario], _default, Filename, cmd_line
+                    )
+            finally:
+                restore_source(tokens)
     return True
 
 
@@ -787,6 +857,7 @@ def _process_table(cmd, _model, _data, _default, options=None):
         #
         _cmd = ['set', sname, ':=']
         i = 0
+        row_number = 2
         while i < Ldata:
             row = []
             # print("COLS %s  NCOLS %d" % (cols, ncolumns))
@@ -794,10 +865,16 @@ def _process_table(cmd, _model, _data, _default, options=None):
                 # print("Y %s %s" % (i, col))
                 row.append(data[i + col])
             if len(row) > 1:
-                _cmd.append(tuple(row))
+                member = tuple(row)
             else:
-                _cmd.append(row[0])
+                member = row[0]
+            if row_addressable():
+                record_row_origin(sname, member, row=row_number)
+            else:
+                record_origin(sname, member)
+            _cmd.append(member)
             i += ncolumns
+            row_number += 1
         # print("_data %s" % _data)
         _process_set(_cmd, _model, _data)
     #
@@ -829,11 +906,24 @@ def _process_table(cmd, _model, _data, _default, options=None):
         #
         _cmd = ['param', vname, ':=']
         i = 0
+        row_number = 2
         while i < Ldata:
             # print("HERE %s %s %s" % (i, cols, ncolumns))
+            key = []
+            for col in cols[:-1]:
+                key.append(data[i + col])
+            if len(cols) - 1 == 1:
+                key = key[0]
+            else:
+                key = tuple(key)
+            if row_addressable():
+                record_row_origin(vname, key, row=row_number)
+            else:
+                record_origin(vname, key)
             for col in cols:
                 _cmd.append(data[i + col])
             i += ncolumns
+            row_number += 1
         # print("HERE %s" % _cmd)
         # print("_data %s" % _data)
         _process_param(_cmd, _model, _data, None, ncolumns=len(cols))

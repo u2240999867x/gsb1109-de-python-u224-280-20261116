@@ -8,7 +8,31 @@
 # ____________________________________________________________________________________
 
 from pyomo.common.collections import Bunch
+from pyomo.dataportal._batch import (
+    enter_external_table,
+    record_row_origin,
+    restore_source,
+    row_addressable,
+)
 from pyomo.dataportal.process_data import _process_data
+
+
+def _column_index(headers, selector):
+    """Locate ``selector`` in ``headers`` without stringifying it.
+
+    Matching is attempted on the exact value first (so integer column
+    names are not silently converted to strings), then on the string
+    form for backwards compatibility with text/CSV headers.
+    """
+    try:
+        return headers.index(selector)
+    except (ValueError, TypeError):
+        pass
+    text = str(selector)
+    for i, header in enumerate(headers):
+        if str(header) == text:
+            return i
+    raise ValueError(text)
 
 
 class TableData:
@@ -83,17 +107,24 @@ class TableData:
             model = self.options.model
         if not self.options.namespace in data:
             data[self.options.namespace] = {}
-        return _process_data(
-            self._info,
-            model,
-            data[self.options.namespace],
-            default,
+        tokens = enter_external_table(
             self.filename,
-            index=self.options.index,
-            set=self.options.set,
-            param=self.options.param,
-            ncolumns=self.options.ncolumns,
+            row_addressable=self.options.format in ('set', 'table'),
         )
+        try:
+            return _process_data(
+                self._info,
+                model,
+                data[self.options.namespace],
+                default,
+                self.filename,
+                index=self.options.index,
+                set=self.options.set,
+                param=self.options.param,
+                ncolumns=self.options.ncolumns,
+            )
+        finally:
+            restore_source(tokens)
 
     def clear(self):
         """
@@ -112,8 +143,8 @@ class TableData:
         else:
             for i in self.options.select:
                 try:
-                    header_index.append(headers.index(str(i)))
-                except:
+                    header_index.append(_column_index(headers, i))
+                except ValueError:
                     print(
                         "Model declaration '%s' not found in returned query columns"
                         % str(i)
@@ -168,10 +199,17 @@ class TableData:
                 raise IOError(msg % str(self.options.index))
 
             self._info = ["set", self.options.set, ":="]
-            for row in rows:
+            addressable = row_addressable()
+            for row_number, row in enumerate(rows, start=2):
                 if self.options.ncolumns > 1:
+                    if addressable:
+                        record_row_origin(
+                            self.options.set, tuple(row), row=row_number
+                        )
                     self._info.append(tuple(row))
                 else:
+                    if addressable:
+                        record_row_origin(self.options.set, row[0], row=row_number)
                     self._info.extend(row)
 
         elif self.options.format == 'set_array':

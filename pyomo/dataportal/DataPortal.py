@@ -9,6 +9,11 @@
 
 import logging
 from pyomo.common.log import is_debug_set
+from pyomo.dataportal._batch import (
+    ACTIVE_NAMESPACE,
+    ACTIVE_PROVENANCE,
+    Provenance,
+)
 from pyomo.dataportal.factory import DataManagerFactory, UnknownDataManager
 
 logger = logging.getLogger('pyomo.core')
@@ -53,6 +58,10 @@ class DataPortal:
 
         # Map initialization data as follows: _data[namespace][symbol] -> data
         self._data = {}
+
+        # Source information for each loaded value: _provenance[namespace]
+        # maps a symbol / key back to the row or line that defined it.
+        self._provenance = Provenance()
 
         # This is the data that is imported from various sources
         self._default = {}
@@ -160,9 +169,36 @@ class DataPortal:
         #
         if is_debug_set(logger):  # pragma:nocover
             logger.debug("Processing data ...")
-        self._data_manager.read()
-        status = self._data_manager.process(self._model, self._data, self._default)
-        self._data_manager.clear()
+        #
+        # Read and stage the new data separately from the published data.
+        # A failure (syntax error, inconsistent member, bad binding, ...)
+        # must not leave a partially loaded batch behind.
+        #
+        staged = {}
+        staged_default = {}
+        staged_provenance = Provenance()
+        namespace_token = ACTIVE_NAMESPACE.set(self._data_manager.options.namespace)
+        provenance_token = ACTIVE_PROVENANCE.set(staged_provenance)
+        try:
+            self._data_manager.read()
+            self._data_manager.process(self._model, staged, staged_default)
+        finally:
+            ACTIVE_PROVENANCE.reset(provenance_token)
+            ACTIVE_NAMESPACE.reset(namespace_token)
+            if self._data_manager is not None:
+                self._data_manager.clear()
+        #
+        # Publish the staged data only after the whole batch validates.
+        #
+        for namespace, symbols in staged.items():
+            target = self._data.setdefault(namespace, {})
+            for name, values in symbols.items():
+                if name in target and isinstance(target[name], dict):
+                    target[name].update(values)
+                else:
+                    target[name] = values
+        self._default.update(staged_default)
+        self._provenance.update(staged_provenance)
         #
         # Disconnect
         #
@@ -170,6 +206,19 @@ class DataPortal:
             self.disconnect()
         if is_debug_set(logger):  # pragma:nocover
             logger.debug("Done.")
+
+    def _validate_batch(self, namespaces):
+        """Validate the complete accumulated batch before publication."""
+        if self._model is None:
+            return
+        from pyomo.dataportal._validate import validate_model_data
+
+        validate_model_data(
+            self._model,
+            self._data,
+            namespaces=namespaces,
+            provenance=self._provenance,
+        )
 
     def store(self, **kwds):
         """
