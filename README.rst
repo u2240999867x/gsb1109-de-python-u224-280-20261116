@@ -140,6 +140,49 @@ MailMessage and MailAttachment public attributes are cached by functools.cached_
         # imap_tools.EmailAddress example:
         # EmailAddress(name='Ya', email='im@ya.ru')  # has "full" property = 'Ya <im@ya.ru>'
 
+👥 Contact role table and delivery envelope
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+``msg.contact_roles`` builds a role table from the From/Sender/Reply-To/To/Cc/Bcc headers.
+Address groups, display names, duplicate headers and the original occurrence order are preserved;
+the same address used in several roles is recorded once per role. A header occurrence only says
+who the message *claims* to be for - it is never proof of delivery.
+
+.. code-block:: python
+
+    for record in msg.contact_roles:        # tuple: imap_tools.ContactRecord
+        record.role            # ContactRole: FROM / SENDER / REPLY_TO / TO / CC / BCC
+        record.name            # str: display name ('' if absent)
+        record.email           # str: usable addr-spec ('' for name-only/broken entries)
+        record.kind            # EntryKind: ADDRESS / NAME_ONLY / BROKEN
+        record.group           # str | None: address group name, never treated as a contact
+        record.defects         # tuple: e.g. ('unclosed_quote',), ('bad_encoded_word',)
+        record.header_index    # int: position among duplicated headers of the same role
+        record.order           # int: global occurrence order across all role headers
+
+    # one header parsed on its own: groups + ordered entries
+    parsed = parse_header_addresses('Team: a@x.com, b@x.com;, c@y.com')
+    parsed.groups              # tuple: (AddressGroup(name='Team', ...),)
+    parsed.entries             # tuple: (ParsedAddress, ...), broken fragments isolated
+
+Broken fragments (bad encoding, unclosed quote/angle/comment) are kept as ``BROKEN`` entries with
+their raw text instead of being dropped, and they never swallow the valid addresses after them.
+
+The delivery envelope is provided independently (SMTP RCPT TO data, log files, ...). With partial
+coverage an address missing from the envelope stays ``UNKNOWN`` rather than being marked undelivered;
+only an envelope that claims full coverage (``complete=True``) yields ``NOT_DELIVERED``.
+
+.. code-block:: python
+
+    envelope = parse_envelope(['a@x.com', {'name': 'B', 'email': 'b@x.com'}])  # partial by default
+    report = msg.check_delivery(envelope)
+    # report.delivered / report.not_delivered / report.unknown  -> tuple of ContactRecord
+    # report.extra_envelope_recipients  -> envelope addresses absent from all role headers (e.g. BCC)
+    # report.status_for(record)          -> DeliveryStatus: DELIVERED / NOT_DELIVERED / UNKNOWN
+
+    full_envelope = parse_envelope(['a@x.com'], complete=True)  # full coverage statement
+    msg.check_delivery(full_envelope).not_delivered              # header addresses not in the envelope
+
 🔍 Search criteria
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 

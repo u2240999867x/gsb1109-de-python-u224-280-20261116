@@ -11,6 +11,7 @@ from itertools import chain
 from typing import List, Optional, Tuple
 
 from .consts import CODECS_OFFICIAL_REPLACEMENT_CHAR, UID_PATTERN
+from .contacts import ROLE_HEADER_NAMES, ContactRecord, DeliveryReport, build_contact_roles, check_delivery
 from .utils import EmailAddress, decode_value, parse_email_addresses, parse_email_date, replace_html_ct_charset
 
 
@@ -204,6 +205,29 @@ class MailMessage:
     def reply_to(self) -> Tuple[str, ...]:
         """Reply-to emails"""
         return tuple(i.email for i in self.reply_to_values)
+
+    @cached_property
+    def contact_roles(self) -> Tuple[ContactRecord, ...]:
+        """
+        Contact role table built from From/Sender/Reply-To/To/Cc/Bcc headers.
+        Groups, display names, duplicate headers and original order are preserved;
+        header occurrence is a claim only, not proof of delivery.
+        """
+        # get_all returns decoded Header objects, unlike the raw (possibly surrogate-escaped)
+        # values in obj._headers; distinct names are visited in first physical occurrence order.
+        role_pairs = []
+        seen_names = set()
+        for name, _ in getattr(self.obj, '_headers', ()):
+            name_lower = name.lower()
+            if name_lower in ROLE_HEADER_NAMES and name_lower not in seen_names:
+                seen_names.add(name_lower)
+                for value in self.obj.get_all(name, []):
+                    role_pairs.append((name_lower, value))
+        return build_contact_roles(role_pairs)
+
+    def check_delivery(self, envelope, complete: bool = False) -> DeliveryReport:
+        """Check the header role table against an independently provided delivery envelope"""
+        return check_delivery(self.contact_roles, envelope, complete=complete)
 
     @cached_property
     def date_str(self) -> str:

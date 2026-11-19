@@ -1,3 +1,9 @@
+Unreleased
+==========
+* Added: MailMessage.contact_roles - contact role table built from From/Sender/Reply-To/To/Cc/Bcc headers, preserving groups, display names, duplicate headers and original order.
+* Added: MailMessage.check_delivery + parse_envelope - verify the header role table against the separately provided delivery envelope; partial coverage never implies non-delivery.
+* Added: parse_header_addresses and the contacts module (ContactRecord, ContactRole, EntryKind, Envelope, DeliveryStatus, ...); broken header fragments are isolated without losing the valid addresses after them.
+
 1.16.0
 ======
 * Fixed: silent no-op behavior at BaseMailBox.<action> when using iterables. (#274)

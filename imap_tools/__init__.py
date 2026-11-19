@@ -4,6 +4,22 @@
 # License: Apache-2.0
 
 from .consts import MailBoxFolderStatusOptions, MailMessageFlags, SortCriteria
+from .contacts import (
+    AddressGroup,
+    ContactRecord,
+    ContactRole,
+    DeliveryReport,
+    DeliveryStatus,
+    EntryKind,
+    Envelope,
+    EnvelopeRecipient,
+    HeaderAddresses,
+    ParsedAddress,
+    build_contact_roles,
+    check_delivery,
+    parse_envelope,
+    parse_header_addresses,
+)
 from .errors import (
     ImapToolsError,
     MailboxAppendError,
@@ -37,12 +53,18 @@ from .utils import EmailAddress
 __version__ = '1.16.0'
 
 __all__ = [
-    'A', 'AND', 'BaseMailBox', 'EmailAddress', 'FolderInfo', 'H', 'Header', 'ImapToolsError', 'MailAttachment',
-    'MailBox', 'MailBoxFolderManager', 'MailBoxFolderStatusOptions', 'MailBoxStartTls', 'MailBoxUnencrypted',
-    'MailMessage', 'MailMessageFlags', 'MailboxAppendError', 'MailboxCopyError', 'MailboxDeleteError',
-    'MailboxExpungeError', 'MailboxFetchError', 'MailboxFlagError', 'MailboxFolderCreateError',
-    'MailboxFolderDeleteError', 'MailboxFolderRenameError', 'MailboxFolderSelectError', 'MailboxFolderStatusError',
-    'MailboxFolderStatusValueError', 'MailboxFolderSubscribeError', 'MailboxLoginError', 'MailboxLogoutError',
-    'MailboxMoveError', 'MailboxNumbersError', 'MailboxStarttlsError', 'MailboxTaggedResponseError', 'MailboxUidsError',
-    'N', 'NOT', 'O', 'OR', 'SortCriteria', 'U', 'UidRange', 'UnexpectedCommandStatusError', '__version__', 'LazyHeaders'
+    'A', 'AND', 'AddressGroup', 'BaseMailBox', 'ContactRecord', 'ContactRole',
+    'DeliveryReport', 'DeliveryStatus', 'EmailAddress', 'Envelope', 'EnvelopeRecipient',
+    'EntryKind', 'FolderInfo', 'H', 'Header', 'HeaderAddresses', 'ImapToolsError',
+    'MailAttachment', 'MailBox', 'MailBoxFolderManager', 'MailBoxFolderStatusOptions',
+    'MailBoxStartTls', 'MailBoxUnencrypted', 'MailMessage', 'MailMessageFlags',
+    'MailboxAppendError', 'MailboxCopyError', 'MailboxDeleteError', 'MailboxExpungeError',
+    'MailboxFetchError', 'MailboxFlagError', 'MailboxFolderCreateError',
+    'MailboxFolderDeleteError', 'MailboxFolderRenameError', 'MailboxFolderSelectError',
+    'MailboxFolderStatusError', 'MailboxFolderStatusValueError', 'MailboxFolderSubscribeError',
+    'MailboxLoginError', 'MailboxLogoutError', 'MailboxMoveError', 'MailboxNumbersError',
+    'MailboxStarttlsError', 'MailboxTaggedResponseError', 'MailboxUidsError', 'N', 'NOT', 'O',
+    'OR', 'ParsedAddress', 'SortCriteria', 'U', 'UidRange', 'UnexpectedCommandStatusError',
+    '__version__', 'LazyHeaders', 'build_contact_roles', 'check_delivery', 'parse_envelope',
+    'parse_header_addresses',
 ]
