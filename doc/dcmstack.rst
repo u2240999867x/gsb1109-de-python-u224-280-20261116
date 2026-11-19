@@ -29,3 +29,10 @@ dcmstack Package
     :members:
     :show-inheritance:
 
+:mod:`metasum` Module
+---------------------
+
+.. automodule:: dcmstack.metasum
+    :members:
+    :show-inheritance:
+
