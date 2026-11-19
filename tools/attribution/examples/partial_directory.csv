@@ -1,0 +1,5 @@
+masked_id,masked_number,region,ref
+P1,+49301234????,,Berlin customer, suffix masked
+P2,+49*12345678,,same tail digits, city unknown
+P3,030 12345678 ext 42,DE,main number known, extension concrete
+P4,+4989123400??,,Munich customer

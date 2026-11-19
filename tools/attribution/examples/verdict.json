@@ -1,0 +1,230 @@
+{
+  "candidates": [
+    {
+      "alternative_contact_count": 2,
+      "certainty": "candidate",
+      "contact_id": "C1",
+      "contact_record_range": [
+        0,
+        2
+      ],
+      "masked_id": "P1",
+      "reason": "legal match but another allocation exists"
+    },
+    {
+      "alternative_contact_count": 2,
+      "certainty": "candidate",
+      "contact_id": "C5",
+      "contact_record_range": [
+        0,
+        1
+      ],
+      "masked_id": "P1",
+      "reason": "legal match but another allocation exists"
+    },
+    {
+      "alternative_contact_count": 2,
+      "certainty": "candidate",
+      "contact_id": "C1",
+      "contact_record_range": [
+        0,
+        2
+      ],
+      "masked_id": "P2",
+      "reason": "legal match but another allocation exists"
+    },
+    {
+      "alternative_contact_count": 2,
+      "certainty": "candidate",
+      "contact_id": "C4",
+      "contact_record_range": [
+        0,
+        2
+      ],
+      "masked_id": "P2",
+      "reason": "legal match but another allocation exists"
+    },
+    {
+      "alternative_contact_count": 2,
+      "certainty": "candidate",
+      "contact_id": "C5",
+      "contact_record_range": [
+        0,
+        1
+      ],
+      "masked_id": "P2",
+      "reason": "legal match but another allocation exists"
+    }
+  ],
+  "confirmed": [
+    {
+      "alternative_contact_count": 2,
+      "certainty": "confirmed",
+      "contact_id": "C2",
+      "contact_record_range": [
+        1,
+        1
+      ],
+      "masked_id": "P1",
+      "reason": "forced by every feasible allocation"
+    },
+    {
+      "alternative_contact_count": 0,
+      "certainty": "confirmed",
+      "contact_id": "C5",
+      "contact_record_range": [
+        0,
+        1
+      ],
+      "masked_id": "P3",
+      "reason": "forced by every feasible allocation"
+    },
+    {
+      "alternative_contact_count": 0,
+      "certainty": "confirmed",
+      "contact_id": "C3",
+      "contact_record_range": [
+        0,
+        2
+      ],
+      "masked_id": "P4",
+      "reason": "forced by every feasible allocation"
+    }
+  ],
+  "conflicts": [],
+  "contacts": [
+    {
+      "calling_code": 49,
+      "contact_id": "C1",
+      "e164": "+493012345678",
+      "extension": null,
+      "leading_zeros": 0,
+      "national_format": "030 12345678",
+      "record_range": [
+        0,
+        2
+      ],
+      "ref": "Berlin main line",
+      "region": "DE",
+      "significant_number": "3012345678"
+    },
+    {
+      "calling_code": 49,
+      "contact_id": "C2",
+      "e164": "+493012345699",
+      "extension": null,
+      "leading_zeros": 0,
+      "national_format": "030 12345699",
+      "record_range": [
+        1,
+        1
+      ],
+      "ref": "Berlin second line",
+      "region": "DE",
+      "significant_number": "3012345699"
+    },
+    {
+      "calling_code": 49,
+      "contact_id": "C3",
+      "e164": "+498912340077",
+      "extension": null,
+      "leading_zeros": 0,
+      "national_format": "089 12340077",
+      "record_range": [
+        0,
+        2
+      ],
+      "ref": "Munich line",
+      "region": "DE",
+      "significant_number": "8912340077"
+    },
+    {
+      "calling_code": 49,
+      "contact_id": "C4",
+      "e164": "+494012345678",
+      "extension": null,
+      "leading_zeros": 0,
+      "national_format": "040 12345678",
+      "record_range": [
+        0,
+        2
+      ],
+      "ref": "Hamburg line sharing C1 tail digits",
+      "region": "DE",
+      "significant_number": "4012345678"
+    },
+    {
+      "calling_code": 49,
+      "contact_id": "C5",
+      "e164": "+493012345678",
+      "extension": "42",
+      "leading_zeros": 0,
+      "national_format": "030 12345678",
+      "record_range": [
+        0,
+        1
+      ],
+      "ref": "Berlin main line with extension 42",
+      "region": "DE",
+      "significant_number": "3012345678"
+    }
+  ],
+  "input_errors": [],
+  "masked_entries": [
+    {
+      "calling_code": 49,
+      "extension_glob": null,
+      "leading_zeros": 0,
+      "main_glob": "301234????",
+      "masked_id": "P1",
+      "raw": "+49301234????",
+      "ref": "Berlin customer",
+      "region": "DE",
+      "zero_kind": "none"
+    },
+    {
+      "calling_code": 49,
+      "extension_glob": null,
+      "leading_zeros": 0,
+      "main_glob": "*12345678",
+      "masked_id": "P2",
+      "raw": "+49*12345678",
+      "ref": "same tail digits",
+      "region": "DE",
+      "zero_kind": "none"
+    },
+    {
+      "calling_code": 49,
+      "extension_glob": "42",
+      "leading_zeros": 1,
+      "main_glob": "3012345678",
+      "masked_id": "P3",
+      "raw": "030 12345678 ext 42",
+      "ref": "main number known",
+      "region": "DE",
+      "zero_kind": "prefix"
+    },
+    {
+      "calling_code": 49,
+      "extension_glob": null,
+      "leading_zeros": 0,
+      "main_glob": "89123400??",
+      "masked_id": "P4",
+      "raw": "+4989123400??",
+      "ref": "Munich customer",
+      "region": "DE",
+      "zero_kind": "none"
+    }
+  ],
+  "rule_basis": [
+    "region and calling code must agree",
+    "leading zeros are validated per region (embedded vs trunk prefix)",
+    "main-number glob matches E.164 significant digit positions without enumeration",
+    "extension glob is evaluated separately from the main number",
+    "equal tail digits alone never merge two contacts",
+    "only numbers present in the complete directory are candidates"
+  ],
+  "status": "feasible",
+  "unmatched_masked_entries": [],
+  "warnings": []
+}

@@ -1,0 +1,6 @@
+contact_id,number,region,ref
+C1,+493012345678,,Berlin main line
+C2,+493012345699,,Berlin second line
+C3,+498912340077,,Munich line
+C4,+494012345678,,Hamburg line sharing C1 tail digits
+C5,+493012345678 ext 42,,Berlin main line with extension 42
