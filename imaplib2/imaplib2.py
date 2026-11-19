@@ -63,6 +63,16 @@ import binascii, calendar, errno, os, queue, random, re, select, socket, sys, ti
 
 select_module = select
 
+
+def _mailbox_module():
+    """Import the mailbox catalogue lazily to avoid import cycles."""
+
+    try:
+        from . import mailbox
+    except (ImportError, ValueError):        # direct script execution
+        import imaplib2.mailbox as mailbox
+    return mailbox
+
 #       Globals
 
 CRLF = b'\r\n'
@@ -421,6 +431,122 @@ class IMAP4(object):
         if attr in Commands:
             return getattr(self, attr.lower())
         raise AttributeError("Unknown IMAP4 command: '%s'" % attr)
+
+
+    def mailbox_encoding(self):
+        """Return the mailbox name convention for this connection.
+
+        ``"utf-8"`` once ``ENABLE UTF8=ACCEPT`` succeeded, otherwise
+        ``"modified-utf7"``.  The value follows the negotiated connection
+        state; callers should not pick an encoding independently.
+        """
+
+        mailbox_module = _mailbox_module()
+        if self.utf8_enabled:
+            return mailbox_module.UTF8
+        return mailbox_module.MODIFIED_UTF7
+
+
+    def decode_mailbox_name(self, raw, **kw):
+        """Decode one protocol mailbox name for this connection."""
+
+        return _mailbox_module().decode_mailbox_name(
+            raw, self.mailbox_encoding(), **kw)
+
+
+    def encode_mailbox_name(self, text):
+        """Encode one Unicode mailbox name for this connection."""
+
+        return _mailbox_module().encode_mailbox_name(
+            text, self.mailbox_encoding())
+
+
+    def mailbox_catalog(self, directory='""', pattern='*', **kw):
+        """catalog = mailbox_catalog(directory='""', pattern='*')
+
+        Build a MailboxCatalog from NAMESPACE and LIST using this
+        connection's negotiated convention.
+        """
+
+        return _mailbox_module().MailboxCatalog.from_imap(
+            self, directory=directory, pattern=pattern, **kw)
+
+
+    def select_mailbox(self, target, readonly=False, catalog=None, **kw):
+        """(typ, [data]) = select_mailbox(target, readonly=False)
+
+        Select through a MailboxCatalog entry, directory id, or a Unicode
+        name the catalogue proves safe to re-encode.  Every path sends the
+        archived protocol bytes, so names that cannot round-trip are still
+        addressable by identity and never by a misleading text spelling.
+        """
+
+        target = self._catalog_protocol_name(target, catalog)
+        return self.select(mailbox=target, readonly=readonly, **kw)
+
+
+    def append_to(self, target, flags, date_time, message, catalog=None, **kw):
+        """(typ, [data]) = append_to(target, flags, date_time, message)
+
+        Append through a catalogue entry/directory id or safe Unicode name.
+        """
+
+        target = self._catalog_protocol_name(target, catalog)
+        return self.append(target, flags, date_time, message, **kw)
+
+
+    def _catalog_protocol_name(self, target, catalog):
+        mailbox_module = _mailbox_module()
+        if isinstance(target, mailbox_module.MailboxEntry):
+            return target.raw
+        if isinstance(target, bytes):
+            return target
+        if not isinstance(target, str):
+            raise mailbox_module.MailboxCatalogError(
+                "unsupported mailbox target %r" % (target,))
+        if catalog is not None:
+            return catalog.protocol_name(catalog.resolve(target))
+        try:
+            return target.encode('ascii')
+        except UnicodeEncodeError:
+            raise mailbox_module.MailboxCatalogError(
+                "a MailboxCatalog is required to address %r" % (target,))
+
+
+    def list_decoded(self, directory='""', pattern='*', **kw):
+        """(typ, [MailboxListing, ...]) = list_decoded(directory='""', pattern='*')
+
+        Run LIST and decode every name with this connection's negotiated
+        convention, keeping each server-declared delimiter.
+        """
+
+        mailbox_module = _mailbox_module()
+        kw['untagged_response'] = 'LIST'
+        typ, data = self._simple_command('LIST', directory, pattern, **kw)
+        if typ != 'OK':
+            return typ, data
+        encoding = self.mailbox_encoding()
+        result = []
+        for item in mailbox_module.parse_list_response(data, encoding):
+            result.append(mailbox_module.MailboxListing(
+                mailbox_module.decode_mailbox_name(item.raw_name, encoding),
+                item.delimiter, item.flags))
+        return typ, result
+
+
+    def namespace_parsed(self, **kw):
+        """(typ, NamespaceSet) = namespace_parsed()
+
+        Run NAMESPACE and parse prefixes and delimiters with this
+        connection's negotiated convention.
+        """
+
+        mailbox_module = _mailbox_module()
+        typ, data = self.namespace(**kw)
+        if typ != 'OK':
+            return typ, data
+        return typ, mailbox_module.parse_namespace_response(
+            data, self.mailbox_encoding())
 
 
     def __enter__(self):

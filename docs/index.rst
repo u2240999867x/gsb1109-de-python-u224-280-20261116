@@ -339,6 +339,67 @@ response. Returns response appropriate to *command*.
 ``IMAP4`` instances have a variable, ``PROTOCOL_VERSION``, that is set
 to the most recent supported protocol in the CAPABILITY response.
 
+Mailbox names and Unicode catalogues
+------------------------------------
+
+Servers send mailbox names in modified UTF-7 (RFC 3501) until
+``ENABLE UTF8=ACCEPT`` is accepted, at which point names are UTF-8
+(RFC 6855). The convention belongs to the connection, so callers should
+not choose it independently. ``IMAP4.mailbox_encoding()`` returns the
+convention in force, and ``IMAP4.decode_mailbox_name()`` /
+``IMAP4.encode_mailbox_name()`` apply it to one name.
+
+The ``imaplib2.mailbox`` module exports the archive used to hand names to
+a directory that stores only Unicode and later address the original
+mailboxes again:
+
+``MailboxCatalog``\ (*namespaces=*\ ``None``\ *, encoding=*\ ``"modified-utf7"``\ *, normalization=*\ ``"NFC"``\ *)
+   Archive protocol names. ``add(raw)`` returns a ``MailboxEntry`` with
+   the original bytes, the decode state, the server-declared namespace
+   prefix and delimiter, the relative name, hierarchy ``segments``, and a
+   stable ``directory_id``. Encoding is taken per connection.
+
+``MailboxCatalog.from_imap``\ (*imap, directory='""', pattern='*'*)
+   Build a catalogue from NAMESPACE and LIST using the connection's
+   negotiated convention. The per-name LIST delimiter wins if it differs
+   from the namespace delimiter.
+
+``MailboxCatalog.protocol_name``\ (*entry_or_directory_id*)
+   Return the exact archived bytes for an entry or its id. This works for
+   names that cannot be re-encoded.
+
+``MailboxCatalog.protocol_name_for_text``\ (*text*)
+   Return bytes for a Unicode spelling only when it is unambiguous,
+   round-trips, and re-encodes to the archived bytes. Otherwise raise
+   ``MailboxConflictError`` or ``MailboxNotAddressableError``.
+
+``MailboxCatalog.export``\ ()
+   Return ``MailboxRecord`` objects (``export_dicts()`` gives JSON-safe
+   dictionaries) that contain no protocol bytes, only text plus
+   ``decode_state``, namespace boundary, and ``round_trip`` flags.
+   ``restore_catalog(records)`` rebuilds a catalogue and verifies that
+   each ``directory_id`` still belongs to the same bytes.
+
+Users can also call ``IMAP4.mailbox_catalog()``, ``IMAP4.select_mailbox()``,
+``IMAP4.append_to()``, ``IMAP4.list_decoded()`` and
+``IMAP4.namespace_parsed()`` directly.
+
+Conflict and boundary rules:
+
+- Two distinct protocol names whose decoded or normalized text is equal
+  get different ``directory_id`` values and a shared ``conflict_group``.
+  Neither replaces the other, and lookup by that text raises
+  ``MailboxConflictError`` listing the candidates.
+- The hierarchy delimiter is whatever the server declared in LIST or
+  NAMESPACE. A literal ``/`` inside a name whose delimiter is ``.`` stays
+  inside one segment; it is not split into levels.
+- A name that cannot round-trip (invalid under the convention, decoded via
+  the optional UTF-8 fallback, or containing encoded printable ASCII) is
+  archived with its bytes and identity, but it is not addressable by text.
+- When no namespace matches, the name is kept unqualified with a warning.
+  When several namespaces match with different kinds or delimiters, the
+  entry is marked ``namespace_ambiguous`` and no namespace is chosen.
+
 Usage
 -----
 
