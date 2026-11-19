@@ -38,6 +38,8 @@ from typing import (
 from mpd.base import (
     ERROR_PREFIX,
     SUCCESS,
+    BinaryChunk,
+    Delivered,
     CommandError,
     CommandListError,
     ConnectionError,
@@ -107,22 +109,6 @@ class CommandResult(BaseCommandResult):
             raise error
 
 
-class BinaryCommandResult(asyncio.Future):
-    # Unlike the regular commands that defer to any callback that may be
-    # defined for them, this uses the predefined _read_binary mechanism of the
-    # mpdclient
-    async def _feed_from(self, mpdclient: "MPDClient") -> None:
-        # Data must be pulled out no matter whether will later be ignored or not
-        binary = await mpdclient._read_binary()
-        if self.cancelled():
-            pass
-        else:
-            self.set_result(binary)
-
-    def _feed_error(self, error: Exception) -> None:
-        return CommandResult._feed_error(cast(CommandResult, self), error)
-
-
 class CommandResultIterable(BaseCommandResult):
     """Variant of CommandResult where the underlying callback is an
     asynchronous` generator, and can thus interpret lines as they come along.
@@ -171,6 +157,351 @@ class CommandResultIterable(BaseCommandResult):
         return self._callback(self.__spooled_lines).__aiter__()
 
 
+class BinaryStreamResult(asyncio.Future):
+    """Command-queue entry that feeds one binary response into a stream.
+
+    The run loop calls :meth:`_feed_from`; payload pieces are pushed to the
+    stream's queue as they arrive rather than after the whole image has been
+    read.
+    """
+
+    def __init__(self, stream: "AsyncBinaryStream") -> None:
+        super().__init__()
+        self._stream = stream
+
+    async def _feed_from(self, mpdclient: "MPDClient") -> None:
+        try:
+            await self._stream._read_into_queue(mpdclient)
+        except CommandError as error:
+            self._stream._phase = "idle"
+            if self._stream._boundary_unknown:
+                # The payload of the current response has not been consumed.
+                self._stream._abandon()
+                mpdclient.disconnect()
+            self._stream._push_error(error)
+
+    def _feed_error(self, error: Exception) -> None:
+        self._stream._phase = "idle"
+        self._stream._push_error(error)
+
+
+class AsyncBinaryStream:
+    """Asynchronous incremental variant of :class:`mpd.base.BinaryStream`.
+
+    Use it with ``async for``::
+
+        async with client.albumart_stream(uri) as stream:
+            async for chunk in stream:
+                consume(chunk.data, chunk.offset, chunk.total)
+
+    Pieces are delivered while a server response is still being read.  The
+    announced payload length is always consumed exactly, so arbitrary binary
+    data (including newlines and ``OK``-looking bytes) is never misinterpreted.
+
+    Leaving the loop (or cancelling) does not corrupt the connection: the run
+    loop keeps draining the response in flight before the next command, and a
+    partially delivered image is never reported as complete.  If the boundary
+    cannot be established, the connection is disconnected.
+    """
+
+    _END = object()
+
+    def __init__(
+        self,
+        client: "MPDClient",
+        command: str,
+        uri: str,
+        chunk_size: Optional[int] = None,
+    ) -> None:
+        if chunk_size is not None and chunk_size <= 0:
+            raise ValueError("chunk_size must be greater than zero")
+        self._client = client
+        self._command = command
+        self._uri = uri
+        self._chunk_size = chunk_size or 65536
+        self._offset = 0
+        self._read_offset = 0
+        self._total: Optional[int] = None
+        self._metadata: Optional[Dict[str, Any]] = None
+        self._phase = "idle"
+        self._payload_remaining = 0
+        self._queue: asyncio.Queue[Any] = asyncio.Queue()
+        self._closed = False
+        self._abandoned = False
+        self._no_picture = False
+        self._boundary_unknown = False
+        if not client.connected:
+            raise ConnectionError("Can not send command to disconnected client")
+        client._begin_binary_stream(self)  # type: ignore[arg-type]
+
+    @property
+    def uri(self) -> str:
+        return self._uri
+
+    @property
+    def offset(self) -> int:
+        """Number of bytes yielded so far (the end of :attr:`delivered`)."""
+        return self._offset
+
+    @property
+    def delivered(self) -> Delivered:
+        """The range yielded so far: ``(0, offset)``."""
+        return Delivered(0, self._offset)
+
+    @property
+    def delivered_range(self) -> range:
+        return range(0, self._offset)
+
+    @property
+    def delivered_length(self) -> int:
+        return self._offset
+
+    delivered_bytes = delivered_length
+
+    @property
+    def total(self) -> Optional[int]:
+        return self._total
+
+    @property
+    def declared_total(self) -> Optional[int]:
+        return self._total
+
+    total_length = declared_total
+    declared_length = declared_total
+    size = declared_total
+
+    @property
+    def remaining(self) -> Optional[int]:
+        if self._total is None:
+            return None
+        return max(0, self._total - self._offset)
+
+    @property
+    def metadata(self) -> Dict[str, Any]:
+        return dict(self._metadata or {})
+
+    @property
+    def type(self) -> Optional[str]:
+        value = (self._metadata or {}).get("type")
+        return value if isinstance(value, str) else None
+
+    @property
+    def mime_type(self) -> Optional[str]:
+        return self.type
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    @property
+    def has_picture(self) -> bool:
+        return self._total is not None
+
+    @property
+    def complete(self) -> bool:
+        return (
+            self._closed
+            and not self._abandoned
+            and self._total is not None
+            and self._offset >= self._total
+        )
+
+    def __aiter__(self) -> "AsyncBinaryStream":
+        return self
+
+    async def __anext__(self) -> BinaryChunk:
+        try:
+            while True:
+                if self._queue.empty():
+                    if self._closed:
+                        raise StopAsyncIteration
+                    if self._phase == "idle":
+                        if self._total is not None and self._offset >= self._total:
+                            self._finish()
+                            raise StopAsyncIteration
+                        await self._issue()
+                item = await self._queue.get()
+                if item is self._END:
+                    if self._no_picture:
+                        self._finish()
+                        raise StopAsyncIteration
+                    if self._total is not None and self._offset >= self._total:
+                        self._finish()
+                        raise StopAsyncIteration
+                    continue
+                if isinstance(item, BaseException):
+                    self._finish()
+                    raise item
+                self._offset = max(self._offset, item.end)
+                return item
+        except asyncio.CancelledError:
+            # The run loop keeps draining the response in flight; only the
+            # completeness claim is dropped.  This is deliberately synchronous
+            # so cancellation completes immediately.
+            self.close()
+            raise
+
+    async def _issue(self) -> None:
+        result = BinaryStreamResult(self)
+        self._phase = "reading"
+        self._client._queue_binary_stream(
+            result, self._command, self._uri, self._read_offset
+        )
+
+    async def _read_into_queue(self, mpdclient: "MPDClient") -> None:
+        """Read exactly one response, yielding payload pieces as they arrive."""
+        metadata: Dict[str, Any] = {}
+        length: Optional[int] = None
+        while True:
+            line = await mpdclient._read_line()
+            if line is None:
+                break
+            key, value = mpdclient._parse_pair(line, ": ")
+            if key == "binary":
+                length = int(value)
+                break
+            metadata[key] = value
+
+        if length is None:
+            if self._metadata is None and not metadata:
+                # readpicture: the song exists but has no picture.
+                self._phase = "idle"
+                self._no_picture = True
+                self._queue.put_nowait(self._END)
+                return
+            raise CommandError("Binary field vanished during binary transfer")
+
+        if self._metadata is None:
+            self._metadata = metadata
+            value = metadata.get("size")
+            if value is None:
+                # Older MPD versions return the whole image in one response
+                # without a size header; the announced payload is the total.
+                self._total = self._read_offset + length
+            else:
+                try:
+                    self._total = int(value)
+                except (TypeError, ValueError):
+                    self._boundary_unknown = True
+                    raise CommandError("Size data unsuitable for binary transfer")
+                if self._total < 0:
+                    self._boundary_unknown = True
+                    raise CommandError("Size data unsuitable for binary transfer")
+        elif metadata != self._metadata:
+            self._boundary_unknown = True
+            raise CommandError("Metadata of binary data changed during transfer")
+
+        if self._total is not None and self._read_offset + length > self._total:
+            self._boundary_unknown = True
+            raise CommandListError("Binary data announced size exceeded")
+        if (
+            self._total is not None
+            and self._read_offset + length < self._total
+            and length == 0
+        ):
+            self._boundary_unknown = True
+            raise CommandError("Binary transfer made no progress")
+
+        remaining = length
+        while remaining > 0:
+            amount = min(self._chunk_size, remaining)
+            data = await mpdclient._read_chunk(amount)
+            if len(data) != amount:
+                raise ConnectionError(
+                    "Connection lost while reading binary data: "
+                    "expected %d bytes, got %d" % (amount, len(data))
+                )
+            start = self._read_offset
+            self._read_offset += amount
+            remaining -= amount
+            if not self._abandoned:
+                self._queue.put_nowait(self._make_chunk(data, start, self._total))
+
+        # newline after the binary payload, then the terminating OK line
+        if await mpdclient._read_chunk(1) != b"\n":
+            raise ConnectionError("Connection lost while reading binary line")
+        while True:
+            line = await mpdclient._read_line()
+            if line is None:
+                break
+
+        if length == 0 and not self._has_yielded_payload():
+            if not self._abandoned:
+                self._queue.put_nowait(
+                    self._make_chunk(b"", self._read_offset, self._total)
+                )
+        self._phase = "idle"
+        if self._total is None:
+            # No size header: this single response is the whole image.
+            self._total = self._read_offset
+        if not self._abandoned:
+            self._queue.put_nowait(self._END)
+
+    def _has_yielded_payload(self) -> bool:
+        return self._read_offset > 0
+
+    def _make_chunk(
+        self, data: bytes, offset: int, total: Optional[int]
+    ) -> BinaryChunk:
+        metadata = dict(self._metadata or {})
+        metadata.pop("binary", None)
+        mime_type = metadata.get("type")
+        if not isinstance(mime_type, str):
+            mime_type = None
+        return BinaryChunk(
+            data,
+            offset,
+            total,
+            mime_type=mime_type,
+            metadata=metadata,
+            complete=total is not None and offset + len(data) >= total,
+        )
+
+    def _push_error(self, error: Exception) -> None:
+        self._queue.put_nowait(error)
+
+    def _finish(self) -> None:
+        self._closed = True
+        self._abandoned = False
+        self._client._end_binary_stream(self)  # type: ignore[arg-type]
+
+    def _abandon(self) -> None:
+        self._closed = True
+        self._abandoned = True
+        while not self._queue.empty():
+            self._queue.get_nowait()
+        # Release a consumer that is currently waiting for the next piece.
+        self._queue.put_nowait(self._END)
+        self._client._end_binary_stream(self)  # type: ignore[arg-type]
+
+    async def aclose(self) -> None:
+        """Stop delivering chunks.
+
+        The run loop drains any response still in flight before the next
+        command is processed, so the connection stays reusable.  Pending
+        payload pieces are discarded and the image is not reported complete.
+        """
+        if not self._closed:
+            self._abandon()
+
+    def close(self) -> None:
+        if not self._closed:
+            self._abandon()
+
+    async def __aenter__(self) -> "AsyncBinaryStream":
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        await self.aclose()
+
+    def __del__(self) -> None:
+        try:
+            if not self._closed:
+                self._abandon()
+        except Exception:
+            pass
+
+
 @mpd_command_provider
 class MPDClient(MPDClientBase):
     __run_task = None  # doubles as indicator for being connected
@@ -206,7 +537,7 @@ class MPDClient(MPDClientBase):
     # processor on the queue and then send the command, and commands are of
     # limited size, this is practically creating backpressure.)
     __command_queue: Optional[
-        "asyncio.Queue[Union[BaseCommandResult, BinaryCommandResult]]"
+        "asyncio.Queue[Union[BaseCommandResult, BinaryStreamResult]]"
     ] = None
 
     #: Construction size of __command_queue. The default limit is high enough
@@ -278,6 +609,9 @@ class MPDClient(MPDClientBase):
             self.__run_task.cancel()
         if self.__wfile is not None:
             self.__wfile.close()
+        stream = self._binary_stream
+        if stream is not None:
+            stream.close()
         self.__rfile = self.__wfile = None
         self.__run_task = None
         self.__command_queue = None
@@ -512,89 +846,88 @@ class MPDClient(MPDClientBase):
     async def _execute_binary(
         self, command: str, args: Iterable[Any]
     ) -> Dict[str, Union[str, bytes]]:
-        # Fun fact: By fetching data in lockstep, this is a bit less efficient
-        # than it could be (which would be "after having received the first
-        # chunk, guess that the other chunks are of equal size and request at
-        # several multiples concurrently, ensuring the TCP connection can stay
-        # full), but at the other hand it leaves the command queue empty so
-        # that more time critical commands can be executed right away
-
-        data = None
+        # Fetching data in lockstep leaves the command queue empty so that
+        # more time critical commands can be executed right away.
         args = list(args)
         assert len(args) == 1
-        args.append(0)
-        final_metadata = None
+        stream = AsyncBinaryStream(self, command, args[0])
+        data: Optional[bytes] = None
+        if args[0] is None:
+            raise ValueError("uri must not be None")
+        try:
+            async for chunk in stream:
+                if data is None:
+                    data = chunk.data
+                else:
+                    data += chunk.data
+        finally:
+            await stream.aclose()
+        metadata = stream.metadata
+        metadata.pop("size", None)
+        if data is not None:
+            metadata["binary"] = data
+        return metadata
+
+    def _queue_binary_stream(
+        self,
+        result: BinaryStreamResult,
+        command: str,
+        uri: str,
+        offset: int,
+    ) -> None:
         if self.__command_queue is None:
             raise ConnectionError("Can not send command to disconnected client")
-        while True:
-            partial_result = BinaryCommandResult()
-            await self.__command_queue.put(partial_result)
-            self._end_idle()
-            self._write_command(command, args)
-            metadata = await partial_result
-            chunk = metadata.pop("binary", None)
-
-            if final_metadata is None:
-                data = chunk
-                final_metadata = metadata
-                if not data:
-                    break
-                try:
-                    size = int(final_metadata["size"])
-                except KeyError:
-                    size = len(chunk)
-                except ValueError:
-                    raise CommandError("Size data unsuitable for binary transfer")
-            else:
-                if metadata != final_metadata:
-                    raise CommandError(
-                        "Metadata of binary data changed during transfer"
-                    )
-                if chunk is None:
-                    raise CommandError("Binary field vanished changed during transfer")
-                data += chunk
-            args[-1] = len(data)
-            if len(data) > size:
-                breakpoint()
-                raise CommandListError("Binary data announced size exceeded")
-            elif len(data) == size:
-                break
-
-        if data is not None:
-            final_metadata["binary"] = data
-
-        final_metadata.pop("size", None)
-
-        return final_metadata
-
-    # omits _read_chunk checking because the async version already
-    # raises; otherwise it's just awaits sprinkled in
-    async def _read_binary(self) -> Dict[str, Union[str, bytes]]:
-        obj = {}
-
-        while True:
-            line = await self._read_line()
-            if line is None:
-                break
-
-            value: Union[str, bytes]
-            key, value = self._parse_pair(line, ": ")
-
-            if key == "binary":
-                chunk_size = int(value)
-                value = await self._read_chunk(chunk_size)
-                if self.__rfile is None:
-                    raise ConnectionError("Can not read from a disconnected client")
-
-                if await self.__rfile.readexactly(1) != b"\n":
-                    # newline after binary content
-                    self.disconnect()
-                    raise ConnectionError("Connection lost while reading line")
-
-            obj[key] = value
-        return obj
+        try:
+            self.__command_queue.put_nowait(result)
+        except asyncio.QueueFull:
+            raise ConnectionError(
+                "Command queue overflowing while starting a binary stream"
+            )
+        self._end_idle()
+        # Careful: There can't be any await points between the queue
+        # appending and the write.
+        try:
+            self._write_command(command, [uri, offset])
+        except BaseException:
+            self.disconnect()
+            raise
 
     # command provider interface
+    def albumart_stream(
+        self, uri: str, chunk_size: Optional[int] = None
+    ) -> "AsyncBinaryStream":
+        """Return album art for *uri* as an asynchronous chunk iterator.
+
+        Each iteration yields a :class:`mpd.base.BinaryChunk` carrying the
+        delivered byte range and MPD's declared total length.  Pieces are
+        delivered while the server response is still being read; leaving the
+        loop early keeps the connection reusable and never marks the image
+        complete.
+        """
+        return AsyncBinaryStream(self, "albumart", uri, chunk_size)
+
+    def readpicture_stream(
+        self, uri: str, chunk_size: Optional[int] = None
+    ) -> "AsyncBinaryStream":
+        """Return the embedded picture for *uri* as an async chunk iterator."""
+        return AsyncBinaryStream(self, "readpicture", uri, chunk_size)
+
+    # Convenience aliases for the chunked entry points.
+    def binary_stream(
+        self, command: str, uri: str, chunk_size: Optional[int] = None
+    ) -> "AsyncBinaryStream":
+        """Async chunked iterator for a binary command."""
+        return AsyncBinaryStream(self, command, uri, chunk_size)
+
+    albumart_chunks = albumart_stream
+    albumart_iter = albumart_stream
+    iter_albumart = albumart_stream
+    stream_albumart = albumart_stream
+    readpicture_chunks = readpicture_stream
+    readpicture_iter = readpicture_stream
+    iter_readpicture = readpicture_stream
+    stream_readpicture = readpicture_stream
+
     @classmethod
     def add_command(cls: Any, name: str, callback: CallableWithCommands) -> None:
         if callback.mpd_commands_binary:

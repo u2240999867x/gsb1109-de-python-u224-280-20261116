@@ -617,6 +617,37 @@ The music database
     The returned value is a dictionary containing the album art image in its
     ``'binary'`` entry. If the given URI is invalid, or the song does not have
     an album cover art file that MPD recognizes, a CommandError is thrown.
+
+.. function:: MPDClient.albumart_stream(uri[, chunk_size=65536])
+
+
+    Returns the album art image for the given song as an iterator of chunks.
+
+    Chunks are delivered while the image is still being transferred, so it is
+    not necessary to wait for the complete picture.  Each chunk is a
+    :class:`mpd.BinaryChunk` (a :class:`bytes` subclass) with the delivered
+    byte range and the total length announced by MPD::
+
+        for chunk in client.albumart_stream("song.mp3"):
+            print(chunk.delivered, chunk.total)
+            sink.write(chunk.data)
+
+    ``chunk.delivered`` is the half-open ``(start, end)`` range covered by this
+    chunk, and ``chunk.total`` is the declared total length (``None`` until MPD
+    announces it).  ``chunk.data``/``bytes(chunk)`` is the payload.
+
+    The exact announced length is always consumed, so newlines and bytes that
+    look like an ``OK`` line inside the image are treated as data.  A consumer
+    may stop early: ``close()`` (or leaving a ``with`` block) drains the
+    response in flight so the connection can be reused for other commands.  If
+    that boundary cannot be established, the connection is disconnected.  A
+    partially consumed image is never reported as complete.
+
+    ``chunk_size`` only controls the maximum size of locally yielded pieces;
+    the protocol itself is unaffected.  A generic entry point is available as
+    ``MPDClient.binary_stream(command, uri[, chunk_size])``.
+
+    The asyncio client offers the same interfaces as ``async for`` iterators.
 .. function:: MPDClient.count(tag, needle[, ..., "group", grouptype])
 
 
@@ -764,6 +795,14 @@ The music database
     If the given URI is invalid, a CommandError is thrown. If the given song URI exists,
     but the song does not have an embedded cover image that MPD recognizes, an empty
     dictionary is returned.
+
+.. function:: MPDClient.readpicture_stream(uri[, chunk_size=65536])
+
+
+    Chunked variant of :func:`MPDClient.readpicture`.  It yields
+    :class:`mpd.BinaryChunk` objects in the same way as
+    :func:`MPDClient.albumart_stream`, including the ``type`` metadata.  If the
+    song exists but has no embedded picture, the iterator yields nothing.
 
 
 .. function:: MPDClient.search(type, what[, ..., startend])

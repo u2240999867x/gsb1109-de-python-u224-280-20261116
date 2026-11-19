@@ -202,6 +202,26 @@ class MPDClientBase:
     def _reset(self) -> None:
         self.mpd_version: Optional[str] = None
         self._command_list: Optional[list[Any]] = None
+        self._binary_stream: Optional[Any] = None
+
+    def _begin_binary_stream(self, stream: Any) -> None:
+        if getattr(self, "_iterating", False) or self._command_list is not None:
+            raise IteratingError(
+                "Cannot execute '{}' with command lists".format(stream._command)
+            )
+        previous = self._binary_stream
+        if previous is not None and previous is not stream:
+            previous.close()
+        self._binary_stream = stream
+
+    def _end_binary_stream(self, stream: Any) -> None:
+        if self._binary_stream is stream:
+            self._binary_stream = None
+
+    def _close_binary_stream(self) -> None:
+        stream = self._binary_stream
+        if stream is not None:
+            stream.close()
 
     def _parse_pair(self, line: str, separator: str = ": ") -> List[str]:
         pair = line.split(separator, 1)
@@ -507,6 +527,618 @@ class _NotConnected:
         raise ConnectionError("Not connected")
 
 
+class Delivered(tuple):
+    """Half-open byte range ``(start, stop)``.
+
+    It is a tuple (so unpacking and tuple comparisons work) and also compares
+    equal to an equivalent :class:`range` or two-element list.
+    """
+
+    __slots__ = ()
+
+    def __new__(cls, start: int, stop: int) -> "Delivered":
+        return super().__new__(cls, (start, stop))
+
+    @property
+    def start(self) -> int:
+        return self[0]
+
+    @property
+    def stop(self) -> int:
+        return self[1]
+
+    def __eq__(self, other: Any) -> bool:
+        if isinstance(other, range):
+            return (self.start, self.stop) == (other.start, other.stop)
+        if isinstance(other, tuple):
+            return tuple.__eq__(self, other)
+        if isinstance(other, list) and len(other) == 2:
+            return self.start == other[0] and self.stop == other[1]
+        return NotImplemented
+
+    def __ne__(self, other: Any) -> bool:
+        result = self.__eq__(other)
+        if result is NotImplemented:
+            return result
+        return not result
+
+    __hash__ = tuple.__hash__
+
+
+class BinaryChunk(bytes):
+    """A single piece of a binary response.
+
+    The object is a :class:`bytes` instance and can be used anywhere a bytes
+    object is expected.  In addition it carries the position at which the
+    piece was delivered and the total length announced by MPD (if any).
+    """
+    def __new__(
+        cls,
+        data: bytes,
+        offset: int,
+        total: Optional[int],
+        *,
+        mime_type: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        complete: bool = False,
+    ) -> "BinaryChunk":
+        chunk = super().__new__(cls, data)
+        chunk._offset = offset
+        chunk._total = total
+        chunk._mime_type = mime_type
+        chunk._metadata = dict(metadata or {})
+        chunk._complete = complete
+        return chunk
+
+    @property
+    def data(self) -> bytes:
+        """The delivered bytes."""
+        return bytes(self)
+
+    @property
+    def binary(self) -> bytes:
+        """Alias of :attr:`data`, matching the one-shot response key."""
+        return bytes(self)
+
+    @property
+    def payload(self) -> bytes:
+        """Alias of :attr:`data`."""
+        return bytes(self)
+
+    @property
+    def offset(self) -> int:
+        """Offset of the first delivered byte."""
+        return self._offset
+
+    start = offset
+
+    @property
+    def end(self) -> int:
+        """Offset just after the last delivered byte."""
+        return self._offset + len(self)
+
+    stop = end
+
+    @property
+    def delivered(self) -> Delivered:
+        """The half-open range covered by this chunk: ``(start, end)``."""
+        return Delivered(self._offset, self.end)
+
+    @property
+    def delivered_range(self) -> range:
+        """The delivered range as a :class:`range` object."""
+        return range(self._offset, self.end)
+
+    @property
+    def range(self) -> range:
+        """Alias of :attr:`delivered_range`."""
+        return self.delivered_range
+
+    @property
+    def length(self) -> int:
+        """Number of bytes in this chunk."""
+        return len(self)
+
+    @property
+    def total(self) -> Optional[int]:
+        """Declared total length of the binary payload, if MPD supplied it."""
+        return self._total
+
+    @property
+    def declared_total(self) -> Optional[int]:
+        """Alias of :attr:`total`."""
+        return self._total
+
+    @property
+    def total_length(self) -> Optional[int]:
+        """Alias of :attr:`total`."""
+        return self._total
+
+    @property
+    def declared_length(self) -> Optional[int]:
+        """Alias of :attr:`total`."""
+        return self._total
+
+    @property
+    def size(self) -> Optional[int]:
+        """Alias of :attr:`total` (the ``size`` metadata value)."""
+        return self._total
+
+    @property
+    def remaining(self) -> Optional[int]:
+        """Number of bytes still to be delivered after this chunk."""
+        if self._total is None:
+            return None
+        return max(0, self._total - self.end)
+
+    @property
+    def complete(self) -> bool:
+        """Whether the payload is complete at the end of this chunk."""
+        if self._complete:
+            return True
+        return self._total is not None and self.end >= self._total
+
+    @property
+    def type(self) -> Optional[str]:
+        """MIME type reported by MPD, if any."""
+        return self._mime_type
+
+    @property
+    def mime_type(self) -> Optional[str]:
+        """Alias of :attr:`type`."""
+        return self._mime_type
+
+    @property
+    def metadata(self) -> Dict[str, Any]:
+        """Metadata that accompanied this chunk (without the binary value)."""
+        return dict(self._metadata)
+
+    def as_dict(self) -> Dict[str, Any]:
+        """Return a dictionary representation of the chunk."""
+        return {
+            "binary": self.data,
+            "data": self.data,
+            "offset": self.offset,
+            "start": self.offset,
+            "end": self.end,
+            "delivered": self.delivered,
+            "delivered_range": self.delivered_range,
+            "total": self.total,
+            "declared_total": self.total,
+            "total_length": self.total,
+            "declared_length": self.total,
+            "size": self.total,
+            "length": self.length,
+            "remaining": self.remaining,
+            "type": self.type,
+            "mime_type": self.type,
+            "complete": self.complete,
+            "metadata": self.metadata,
+        }
+
+    def _field(self, key: str) -> Any:
+        fields = {
+            "binary": self.data,
+            "data": self.data,
+            "offset": self.offset,
+            "start": self.start,
+            "end": self.end,
+            "stop": self.stop,
+            "delivered": self.delivered,
+            "delivered_range": self.delivered_range,
+            "range": self.delivered_range,
+            "total": self.total,
+            "declared_total": self.declared_total,
+            "total_length": self.total_length,
+            "declared_length": self.declared_length,
+            "size": self.size,
+            "length": self.length,
+            "remaining": self.remaining,
+            "type": self.type,
+            "mime_type": self.mime_type,
+            "complete": self.complete,
+            "metadata": self.metadata,
+        }
+        try:
+            return fields[key]
+        except KeyError:
+            raise KeyError(key)
+
+    def __getitem__(self, key: Any) -> Any:
+        if isinstance(key, str):
+            return self._field(key)
+        return bytes.__getitem__(self, key)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        try:
+            return self._field(key)
+        except KeyError:
+            return default
+
+    def keys(self) -> Tuple[str, ...]:
+        return (
+            "binary",
+            "data",
+            "offset",
+            "start",
+            "end",
+            "delivered",
+            "delivered_range",
+            "total",
+            "declared_total",
+            "size",
+            "length",
+            "remaining",
+            "type",
+            "mime_type",
+            "complete",
+        )
+
+    def items(self) -> Iterable[Tuple[str, Any]]:
+        for key in self.keys():
+            yield key, self._field(key)
+
+    def __contains__(self, key: Any) -> bool:
+        if isinstance(key, str):
+            return key in self.keys()
+        return bytes.__contains__(self, key)
+
+    def __repr__(self) -> str:
+        return (
+            "BinaryChunk(data={!r}, offset={}, total={!r}, complete={})".format(
+                self.data, self.offset, self.total, self.complete
+            )
+        )
+
+
+class BinaryStream:
+    """Iterate over an ``albumart`` or ``readpicture`` response piece by piece.
+
+    Each iteration yields a :class:`BinaryChunk` as soon as bytes arrive, even
+    while a single server-side ``binary:`` response is still being read.  The
+    payload length announced by MPD is always consumed exactly, so newlines and
+    ``OK``-looking bytes inside the image are never mistaken for protocol
+    boundaries.
+
+    A consumer may stop iterating at any time.  :meth:`close` drains the
+    remainder of the response in flight so the connection can be reused; if
+    that boundary cannot be established, the connection is disconnected.
+    """
+
+    _DEFAULT_PIECE = 65536
+
+    def __init__(
+        self,
+        client: Any,
+        command: str,
+        uri: str,
+        chunk_size: Optional[int] = None,
+    ) -> None:
+        if chunk_size is not None and chunk_size <= 0:
+            raise ValueError("chunk_size must be greater than zero")
+        self._client = client
+        self._command = command
+        self._uri = uri
+        self._chunk_size = chunk_size or self._DEFAULT_PIECE
+        self._offset = 0
+        self._total: Optional[int] = None
+        self._metadata: Optional[Dict[str, Any]] = None
+        self._payload_remaining = 0
+        self._phase = "idle"
+        self._closed = False
+        self._abandoned = False
+        self._boundary_unknown = False
+        client._begin_binary_stream(self)
+
+    @property
+    def uri(self) -> str:
+        return self._uri
+
+    @property
+    def offset(self) -> int:
+        """Number of bytes yielded so far (the end of :attr:`delivered`)."""
+        return self._offset
+
+    @property
+    def delivered(self) -> Delivered:
+        """The range yielded so far: ``(0, offset)``."""
+        return Delivered(0, self._offset)
+
+    @property
+    def delivered_range(self) -> range:
+        """The range yielded so far as a :class:`range` object."""
+        return range(0, self._offset)
+
+    @property
+    def delivered_length(self) -> int:
+        """Number of bytes yielded so far."""
+        return self._offset
+
+    delivered_bytes = delivered_length
+
+    @property
+    def total(self) -> Optional[int]:
+        """The total length declared by MPD, if it has been announced yet."""
+        return self._total
+
+    @property
+    def declared_total(self) -> Optional[int]:
+        """Alias of :attr:`total`."""
+        return self._total
+
+    total_length = declared_total
+    declared_length = declared_total
+    size = declared_total
+
+    @property
+    def remaining(self) -> Optional[int]:
+        if self._total is None:
+            return None
+        return max(0, self._total - self._offset)
+
+    @property
+    def metadata(self) -> Dict[str, Any]:
+        return dict(self._metadata or {})
+
+    @property
+    def type(self) -> Optional[str]:
+        if self._metadata is None:
+            return None
+        value = self._metadata.get("type")
+        return value if isinstance(value, str) else None
+
+    @property
+    def mime_type(self) -> Optional[str]:
+        return self.type
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    @property
+    def has_picture(self) -> bool:
+        """Whether MPD reported a picture at all (False for empty readpicture)."""
+        return self._total is not None
+
+    @property
+    def complete(self) -> bool:
+        return (
+            self._closed
+            and not self._abandoned
+            and self._total is not None
+            and self._offset >= self._total
+        )
+
+    def __iter__(self) -> "BinaryStream":
+        return self
+
+    def __next__(self) -> BinaryChunk:
+        if self._closed:
+            raise StopIteration
+        try:
+            while True:
+                if self._phase == "idle":
+                    if self._total is not None and self._offset >= self._total:
+                        self._finish()
+                        raise StopIteration
+                    self._phase = "header"
+                    self._request()
+                elif self._phase == "header":
+                    metadata, length = self._read_header()
+                    if length is None:
+                        if self._metadata is None and not metadata:
+                            # readpicture: the song exists but has no picture.
+                            self._finish()
+                            raise StopIteration
+                        raise CommandError(
+                            "Binary field vanished during binary transfer"
+                        )
+                    self._apply_metadata(metadata, length)
+                    self._payload_remaining = length
+                    self._phase = "payload"
+                    if length == 0:
+                        offset = self._offset
+                        self._finish_tail()
+                        self._phase = "idle"
+                        if self._total is None:
+                            self._total = 0
+                        self._finish()
+                        return self._make_chunk(b"", offset, self._total)
+                elif self._phase == "payload":
+                    amount = min(self._chunk_size, self._payload_remaining)
+                    data = self._client._read_chunk(amount)
+                    if len(data) != amount:
+                        raise ConnectionError(
+                            "Connection lost while reading binary data: "
+                            "expected %d bytes, got %d" % (amount, len(data))
+                        )
+                    start = self._offset
+                    self._offset += amount
+                    self._payload_remaining -= amount
+                    if self._payload_remaining == 0:
+                        self._phase = "tail"
+                    return self._make_chunk(data, start, self._total)
+                elif self._phase == "tail":
+                    self._finish_tail()
+                    self._phase = "idle"
+                    if self._total is None:
+                        # No size header: the one response is the whole image.
+                        self._total = self._offset
+                        self._finish()
+                        raise StopIteration
+        except (CommandError, CommandListError):
+            if self._boundary_unknown:
+                self._abandon()
+                self._client.disconnect()
+            else:
+                # The full error line has been consumed; boundary is known.
+                self._finish()
+            raise
+        except StopIteration:
+            raise
+        except BaseException:
+            # Anything else may leave unread binary data in the stream.
+            self._abandon()
+            self._client.disconnect()
+            raise
+
+    def _request(self) -> None:
+        self._client._write_command(
+            self._command, [self._uri, self._offset]
+        )
+
+    def _read_header(self) -> Tuple[Dict[str, Any], Optional[int]]:
+        metadata: Dict[str, Any] = {}
+        while True:
+            line = self._client._read_line()
+            if line is None:
+                return metadata, None
+            key, value = self._client._parse_pair(line, ": ")
+            if key == "binary":
+                return metadata, int(value)
+            metadata[key] = value
+
+    def _apply_metadata(self, metadata: Dict[str, Any], length: int) -> None:
+        if self._metadata is None:
+            self._metadata = metadata
+            value = metadata.get("size")
+            if value is None:
+                # Older MPD versions return the whole image in one response
+                # without a size header; the announced payload is the total.
+                self._total = self._offset + length
+            else:
+                try:
+                    self._total = int(value)
+                except (TypeError, ValueError):
+                    self._boundary_unknown = True
+                    raise CommandError("Size data unsuitable for binary transfer")
+                if self._total < 0:
+                    self._boundary_unknown = True
+                    raise CommandError("Size data unsuitable for binary transfer")
+        elif metadata != self._metadata:
+            self._boundary_unknown = True
+            raise CommandError("Metadata of binary data changed during transfer")
+        if self._total is not None and self._offset + length > self._total:
+            self._boundary_unknown = True
+            raise CommandListError("Binary data announced size exceeded")
+        if (
+            self._total is not None
+            and self._offset + length < self._total
+            and length == 0
+        ):
+            self._boundary_unknown = True
+            raise CommandError("Binary transfer made no progress")
+
+    def _finish_tail(self) -> None:
+        if self._client._read_chunk(1) != b"\n":
+            raise ConnectionError("Connection lost while reading binary data")
+        # Consume the terminating OK line (and any trailing metadata lines).
+        while True:
+            line = self._client._read_line()
+            if line is None:
+                return
+
+    def _make_chunk(
+        self, data: bytes, offset: int, total: Optional[int]
+    ) -> BinaryChunk:
+        metadata = dict(self._metadata or {})
+        metadata.pop("binary", None)
+        mime_type = metadata.get("type")
+        if not isinstance(mime_type, str):
+            mime_type = None
+        return BinaryChunk(
+            data,
+            offset,
+            total,
+            mime_type=mime_type,
+            metadata=metadata,
+            complete=total is not None and offset + len(data) >= total,
+        )
+
+    def _drain(self) -> bool:
+        """Consume the rest of the response in flight, if that is safe."""
+        try:
+            if self._phase == "header":
+                metadata, length = self._read_header()
+                if length is None:
+                    self._phase = "idle"
+                    return True
+                if self._metadata is None:
+                    self._metadata = metadata
+                self._payload_remaining = length
+                self._phase = "payload"
+            if self._phase == "payload":
+                while self._payload_remaining > 0:
+                    amount = min(self._chunk_size, self._payload_remaining)
+                    data = self._client._read_chunk(amount)
+                    if len(data) != amount:
+                        return False
+                    self._payload_remaining -= amount
+                self._phase = "tail"
+            if self._phase == "tail":
+                self._finish_tail()
+                self._phase = "idle"
+        except CommandError:
+            # A complete ACK line ends the response; the boundary is known.
+            self._phase = "idle"
+            return True
+        except BaseException:
+            return False
+        return True
+
+    def _finish(self) -> None:
+        self._closed = True
+        self._abandoned = False
+        self._client._end_binary_stream(self)
+
+    def _abandon(self) -> None:
+        """Mark the stream as unusable without claiming completeness."""
+        self._closed = True
+        self._abandoned = True
+        self._client._end_binary_stream(self)
+
+    def close(self) -> None:
+        """Stop the stream and establish a reusable protocol boundary.
+
+        A response that is still in flight is drained (by exact announced
+        lengths).  If it cannot be drained, the connection is disconnected
+        rather than leaving unknown bytes for the next command.
+        """
+        if self._closed:
+            return
+        drained = True
+        if self._phase != "idle":
+            drained = self._drain()
+        if (
+            drained
+            and not self._abandoned
+            and self._total is not None
+            and self._offset >= self._total
+        ):
+            self._finish()
+        else:
+            # A partially read image never counts as complete.
+            self._abandon()
+        if not drained:
+            self._client.disconnect()
+
+    def __enter__(self) -> "BinaryStream":
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        self.close()
+
+    def __del__(self) -> None:
+        # Do not perform blocking I/O during finalization.  While the stream is
+        # still registered with the client it is kept alive by that reference;
+        # once replaced or explicitly closed, the boundary has been handled.
+        try:
+            if not self._closed:
+                self._abandon()
+        except Exception:
+            pass
+
+
 @mpd_command_provider
 class MPDClient(MPDClientBase):
     idletimeout = None
@@ -537,13 +1169,62 @@ class MPDClient(MPDClientBase):
         super().__init__()
 
     def _reset(self) -> None:
+        stream = getattr(self, "_binary_stream", None)
         super()._reset()
+        if stream is not None:
+            stream._abandon()
         self._iterating = False
         self._sock: Optional[socket.socket] = None
         self._rbfile: Union[IO[bytes], _NotConnected] = _NotConnected()
         self._wfile: Union[IO[str], _NotConnected] = _NotConnected()
 
+    def _end_binary_stream(self, stream: "BinaryStream") -> None:
+        if self._binary_stream is stream:
+            self._binary_stream = None
+
+    def _close_binary_stream(self) -> None:
+        stream = self._binary_stream
+        if stream is not None:
+            stream.close()
+
+    def albumart_stream(
+        self, uri: str, chunk_size: Optional[int] = None
+    ) -> "BinaryStream":
+        """Return album art for *uri* as a chunked iterator.
+
+        Each iteration yields a :class:`BinaryChunk` carrying the delivered
+        byte range and MPD's declared total length.  Pieces are delivered while
+        a server response is still being read, so a large image can be consumed
+        without waiting for the complete picture.
+        """
+        return BinaryStream(self, "albumart", uri, chunk_size)
+
+    def readpicture_stream(
+        self, uri: str, chunk_size: Optional[int] = None
+    ) -> "BinaryStream":
+        """Return the embedded picture for *uri* as a chunked iterator."""
+        return BinaryStream(self, "readpicture", uri, chunk_size)
+
+    # Convenience aliases for the chunked entry points.
+    def binary_stream(
+        self, command: str, uri: str, chunk_size: Optional[int] = None
+    ) -> "BinaryStream":
+        """Chunked iterator for a binary command (``albumart``/``readpicture``)."""
+        return BinaryStream(self, command, uri, chunk_size)
+
+    albumart_chunks = albumart_stream
+    albumart_iter = albumart_stream
+    iter_albumart = albumart_stream
+    stream_albumart = albumart_stream
+    readpicture_chunks = readpicture_stream
+    readpicture_iter = readpicture_stream
+    iter_readpicture = readpicture_stream
+    stream_readpicture = readpicture_stream
+
     def _execute(self, command: str, args: List[Any], retval: Any) -> Any:
+        # Yield points of a binary stream are response boundaries, so an
+        # abandoned stream can simply be closed before the next command.
+        self._close_binary_stream()
         if self._iterating:
             raise IteratingError("Cannot execute '{}' while iterating".format(command))
         if self._command_list is not None:
@@ -668,63 +1349,32 @@ class MPDClient(MPDClientBase):
     def _execute_binary(
         self, command: str, args: List[Any]
     ) -> Dict[str, Union[str, bytes]]:
-        """Execute a command repeatedly with an additional offset argument,
-        keeping all the identical returned dictionary items and concatenating
-        the binary chunks following the binary item into one of exactly size.
+        """Execute a binary command and collect all chunks into one response.
 
-        This differs from _execute in that rather than passing the lines to the
-        callback which'd then call on something like _parse_objects, it builds
-        a parsed object on its own (as a prerequisite to the chunk driving
-        process) and then joins together the chunks into a single big response."""
+        The chunked :class:`BinaryStream` is used underneath; this keeps the
+        historic one-shot behavior (a ``binary`` entry holding the complete
+        image) while sharing the protocol handling with the streaming API."""
         if self._iterating or self._command_list is not None:
             raise IteratingError(
                 "Cannot execute '{}' with command lists".format(command)
             )
-        data = None
         args = list(args)
         assert len(args) == 1
-        args.append(0)
-        final_metadata = None
-        while True:
-            self._write_command(command, args)
-            metadata = self._read_binary()
-            chunk = metadata.pop("binary", None)
-
-            if final_metadata is None:
-                data = chunk
-                final_metadata = metadata
-                if not data:
-                    break
-                try:
-                    size = int(final_metadata["size"])
-                except KeyError:
-                    if chunk is None:
-                        raise CommandError(
-                            "Binary field vanished changed during transfer"
-                        )
-                    size = len(chunk)
-                except ValueError:
-                    raise CommandError("Size data unsuitable for binary transfer")
-            else:
-                if metadata != final_metadata:
-                    raise CommandError(
-                        "Metadata of binary data changed during transfer"
-                    )
-                if chunk is None:
-                    raise CommandError("Binary field vanished changed during transfer")
-                data += chunk
-            args[-1] = len(data)
-            if len(data) > size:
-                raise CommandListError("Binary data announced size exceeded")
-            elif len(data) == size:
-                break
-
+        stream = BinaryStream(self, command, args[0])
+        data: Optional[bytes] = None
+        try:
+            for chunk in stream:
+                if data is None:
+                    data = chunk.data
+                else:
+                    data += chunk.data
+        finally:
+            stream.close()
+        metadata = stream.metadata
+        metadata.pop("size", None)
         if data is not None:
-            final_metadata["binary"] = data
-
-        final_metadata.pop("size", None)
-
-        return final_metadata
+            metadata["binary"] = data
+        return metadata
 
     def _read_command_list(self) -> Iterator[Dict[str, str]]:
         try:

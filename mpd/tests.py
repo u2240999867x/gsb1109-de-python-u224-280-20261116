@@ -957,6 +957,169 @@ class TestMPDClientSocket(unittest.TestCase):
             b'readpicture "song.mp3" "0"\nreadpicture "song.mp3" "16"\n'
         )
 
+    def test_albumart_stream_basic(self) -> None:
+        payload = bytes(range(32))
+        self.MPDWillReturnBinary(
+            b"size: 32\nbinary: 10\n"
+            + payload[0:10]
+            + b"\nOK\nsize: 32\nbinary: 22\n"
+            + payload[10:32]
+            + b"\nOK\n"
+        )
+
+        stream = self.client.albumart_stream("a/full/path.mp3")
+        chunks = list(stream)
+
+        self.assertEqual([c.data for c in chunks], [payload[0:10], payload[10:32]])
+        self.assertEqual([c.delivered for c in chunks], [(0, 10), (10, 32)])
+        self.assertEqual([c.total for c in chunks], [32, 32])
+        self.assertFalse(chunks[0].complete)
+        self.assertTrue(chunks[1].complete)
+        self.assertTrue(stream.complete)
+
+        self.assertMPDReceived(
+            b'albumart "a/full/path.mp3" "0"\nalbumart "a/full/path.mp3" "10"\n'
+        )
+
+    def test_albumart_stream_binary_contains_newlines_and_ok(self) -> None:
+        payload = b"ab\nOK\nbinary: 3\ncd\r\nOK\n"
+        self.MPDWillReturnBinary(
+            b"size: %d\nbinary: %d\n" % (len(payload), len(payload))
+            + payload
+            + b"\nOK\n"
+        )
+
+        stream = self.client.albumart_stream("song.mp3")
+        chunks = list(stream)
+
+        self.assertEqual(b"".join(chunks), payload)
+        self.assertTrue(stream.complete)
+        self.assertEqual([(c.offset, c.end) for c in chunks], [(0, len(payload))])
+
+    def test_albumart_stream_short_reads_are_completed(self) -> None:
+        payload = b"\x00\x01\nOK\x00\x02\n"
+        self.MPDWillReturnBinary(
+            b"size: %d\nbinary: %d\n" % (len(payload), len(payload))
+        )
+        for part in (payload[0:2], payload[2:5], payload[5:6], payload[6:]):
+            self.MPDWillReturnBinary(part)
+        self.MPDWillReturnBinary(b"\nOK\n")
+
+        chunks = list(self.client.albumart_stream("song.mp3"))
+
+        self.assertEqual(b"".join(chunks), payload)
+        self.assertEqual(chunks[0].total, len(payload))
+
+    def test_albumart_stream_client_chunking(self) -> None:
+        payload = bytes(range(20))
+        self.MPDWillReturnBinary(b"size: 20\nbinary: 20\n" + payload + b"\nOK\n")
+
+        chunks = list(self.client.albumart_stream("song.mp3", chunk_size=6))
+
+        self.assertEqual(
+            [c.data for c in chunks],
+            [payload[0:6], payload[6:12], payload[12:18], payload[18:20]],
+        )
+        self.assertEqual(
+            [c.delivered for c in chunks], [(0, 6), (6, 12), (12, 18), (18, 20)]
+        )
+        self.assertEqual([c.total for c in chunks], [20] * 4)
+        self.assertMPDReceived(b'albumart "song.mp3" "0"\n')
+
+    def test_albumart_stream_early_exit_does_not_mark_complete(self) -> None:
+        payload = bytes(range(32))
+        with self.client.albumart_stream("song.mp3") as stream:
+            self.MPDWillReturnBinary(
+                b"size: 32\nbinary: 16\n" + payload[0:16] + b"\nOK\n"
+            )
+            chunk = next(iter(stream))
+            self.assertEqual(chunk.data, payload[0:16])
+            self.assertFalse(stream.complete)
+
+        self.assertFalse(stream.complete)
+        self.assertTrue(stream.closed)
+        self.assertEqual(stream.delivered, (0, 16))
+
+    def test_albumart_stream_early_exit_then_reuse_connection(self) -> None:
+        payload = bytes(range(32))
+        self.MPDWillReturnBinary(
+            b"size: 32\nbinary: 16\n" + payload[0:16] + b"\nOK\n"
+        )
+
+        stream = self.client.albumart_stream("song.mp3")
+        first = next(iter(stream))
+        self.assertEqual(first.data, payload[0:16])
+        stream.close()
+        self.assertFalse(stream.complete)
+        self.assertEqual(stream.delivered, (0, 16))
+
+        # No second albumart request was sent, so the connection is clean.
+        # A follow-up status query must see only its own response.
+        self.MPDWillReturnBinary(b"volume: 70\nstate: play\nOK\n")
+        self.assertEqual(self.client.status(), {"volume": "70", "state": "play"})
+
+        self.assertMPDReceived(b'albumart "song.mp3" "0"\nstatus\n')
+
+    def test_albumart_stream_close_mid_payload_then_reuse_connection(self) -> None:
+        payload = bytes(range(64))
+        self.MPDWillReturnBinary(
+            b"size: 64\nbinary: 64\n" + payload + b"\nOK\n"
+        )
+
+        stream = self.client.albumart_stream("song.mp3", chunk_size=16)
+        first = next(iter(stream))
+        self.assertEqual(first.data, payload[0:16])
+        stream.close()
+
+        # 48 payload bytes plus the trailing newline/OK were drained.
+        self.assertFalse(stream.complete)
+        self.assertEqual(stream.delivered, (0, 16))
+
+        self.MPDWillReturnBinary(b"volume: 70\nOK\n")
+        self.assertEqual(self.client.status(), {"volume": "70"})
+        self.assertMPDReceived(b'albumart "song.mp3" "0"\nstatus\n')
+
+    def test_albumart_stream_break_without_close_is_drained(self) -> None:
+        payload = bytes(range(32))
+        self.MPDWillReturnBinary(
+            b"size: 32\nbinary: 32\n" + payload + b"\nOK\n"
+        )
+
+        for chunk in self.client.albumart_stream("song.mp3", chunk_size=8):
+            break
+
+        # No explicit close: issuing the next command drains the response.
+        self.MPDWillReturnBinary(b"volume: 70\nOK\n")
+        self.assertEqual(self.client.status(), {"volume": "70"})
+        self.assertMPDReceived(b'albumart "song.mp3" "0"\nstatus\n')
+
+    def test_albumart_stream_short_read_mid_payload_disconnects(self) -> None:
+        payload = bytes(range(32))
+        self.MPDWillReturnBinary(b"size: 32\nbinary: 16\n" + payload[0:8])
+
+        stream = self.client.albumart_stream("song.mp3", chunk_size=8)
+        first = next(iter(stream))
+        self.assertEqual(first.data, payload[0:8])
+        self.assertRaises(socket.timeout, lambda: next(iter(stream)))
+        self.assertIs(self.client._sock, None)
+        self.assertFalse(stream.complete)
+
+    def test_albumart_stream_empty_payload(self) -> None:
+        self.MPDWillReturnBinary(b"size: 0\nbinary: 0\n\nOK\n")
+
+        chunks = list(self.client.albumart_stream("song.mp3"))
+
+        self.assertEqual([c.data for c in chunks], [b""])
+        self.assertTrue(chunks[0].complete)
+        self.assertEqual(chunks[0].total, 0)
+
+    def test_albumart_stream_error_is_raised_and_boundary_kept(self) -> None:
+        self.MPDWillReturnBinary(b"ACK [50@0] {albumart} No file exists\n")
+
+        stream = self.client.albumart_stream("song.mp3")
+        self.assertRaises(mpd.CommandError, lambda: next(iter(stream)))
+        self.assertFalse(stream.complete)
+
 
 class MockTransport(object):
     def __init__(self) -> None:
@@ -1522,6 +1685,254 @@ class TestAsyncioMPD(unittest.IsolatedAsyncioTestCase):
         art = await self.client.readpicture("x.mp3")
 
         self.assertEqual(art, {})
+
+    async def test_albumart_stream(self) -> None:
+        await self.init_client()
+        payload = bytes(range(32))
+        self.mockserver.expect_exchange(
+            [b'albumart "x.mp3" "0"\n'],
+            [
+                b"size: 32\n",
+                b"binary: 16\n",
+                payload[0:16],
+                b"\n",
+                b"OK\n",
+            ],
+        )
+        self.mockserver.expect_exchange(
+            [b'albumart "x.mp3" "16"\n'],
+            [
+                b"size: 32\n",
+                b"binary: 16\n",
+                payload[16:32],
+                b"\n",
+                b"OK\n",
+            ],
+        )
+
+        stream = self.client.albumart_stream("x.mp3")
+        chunks = [chunk async for chunk in stream]
+
+        self.assertEqual([c.data for c in chunks], [payload[0:16], payload[16:32]])
+        self.assertEqual([c.delivered for c in chunks], [(0, 16), (16, 32)])
+        self.assertEqual([c.total for c in chunks], [32, 32])
+        self.assertTrue(stream.complete)
+
+    async def test_albumart_stream_early_exit_then_reuse_connection(self) -> None:
+        await self.init_client()
+        payload = bytes(range(32))
+        self.mockserver.expect_exchange(
+            [b'albumart "x.mp3" "0"\n'],
+            [
+                b"size: 32\n",
+                b"binary: 16\n",
+                payload[0:16],
+                b"\n",
+                b"OK\n",
+            ],
+        )
+        self.mockserver.expect_exchange(
+            [b"status\n"],
+            [
+                b"volume: 70\n",
+                b"OK\n",
+            ],
+        )
+
+        stream = self.client.albumart_stream("x.mp3")
+        first = await stream.__anext__()
+        self.assertEqual(first.data, payload[0:16])
+        await stream.aclose()
+
+        # Only one albumart request was made; the remaining payload of that
+        # response is drained by the run loop before the next command, so the
+        # following status must see only its own response.
+        status = await self.client.status()
+        self.assertEqual(status, {"volume": "70"})
+        self.assertFalse(stream.complete)
+        self.assertEqual(stream.delivered, (0, 16))
+
+    async def test_albumart_stream_early_exit_mid_payload(self) -> None:
+        await self.init_client()
+        payload = bytes(range(64))
+        self.mockserver.expect_exchange(
+            [b'albumart "x.mp3" "0"\n'],
+            [
+                b"size: 64\n",
+                b"binary: 64\n",
+                payload[0:16],
+                payload[16:32],
+                payload[32:48],
+                payload[48:64],
+                b"\n",
+                b"OK\n",
+            ],
+        )
+        self.mockserver.expect_exchange(
+            [b"status\n"],
+            [b"volume: 70\n", b"OK\n"],
+        )
+
+        stream = self.client.albumart_stream("x.mp3", chunk_size=16)
+        first = await stream.__anext__()
+        self.assertEqual(first.data, payload[0:16])
+        await stream.aclose()
+
+        # The rest of the binary payload is drained by the run loop, not
+        # exposed as delivered chunks.
+        status = await self.client.status()
+        self.assertEqual(status, {"volume": "70"})
+        self.assertFalse(stream.complete)
+        self.assertEqual(stream.delivered, (0, 16))
+        self.assertEqual(stream.offset, 16)
+
+    async def test_albumart_stream_mid_payload_error_disconnects(self) -> None:
+        await self.init_client()
+        payload = bytes(range(32))
+        self.mockserver.expect_exchange(
+            [b'albumart "x.mp3" "0"\n'],
+            [
+                b"size: 32\n",
+                b"binary: 16\n",
+                payload[0:8],
+                payload[8:16],
+                b"\n",
+                b"OK\n",
+            ],
+        )
+        self.mockserver.expect_exchange(
+            [b'albumart "x.mp3" "16"\n'],
+            [
+                b"size: 32\n",
+                # first response was complete, this one announces too much
+                b"binary: 99\n",
+                payload[16:32],
+                b"\n",
+                b"OK\n",
+            ],
+        )
+
+        stream = self.client.albumart_stream("x.mp3", chunk_size=8)
+        await stream.__anext__()
+        with self.assertRaises(mpd.CommandListError):
+            async for _ in stream:
+                pass
+
+        # The over-long payload was not consumed, so the boundary is unknown.
+        self.assertFalse(self.client.connected)
+        self.assertFalse(stream.complete)
+
+    async def test_albumart_stream_cancel_is_not_complete(self) -> None:
+        await self.init_client()
+        payload = bytes(range(32))
+        self.mockserver.expect_exchange(
+            [b'albumart "x.mp3" "0"\n'],
+            [
+                b"size: 32\n",
+                b"binary: 16\n",
+                payload[0:16],
+                b"\n",
+                b"OK\n",
+            ],
+        )
+
+        stream = self.client.albumart_stream("x.mp3")
+        first = await stream.__anext__()
+        self.assertEqual(first.data, payload[0:16])
+        await stream.aclose()
+
+        self.assertFalse(stream.complete)
+        self.assertTrue(stream.closed)
+        self.assertEqual(stream.delivered_length, 16)
+
+    async def test_albumart_stream_task_cancel_then_reuse_connection(self) -> None:
+        await self.init_client()
+        payload = bytes(range(32))
+        self.mockserver.expect_exchange(
+            [b'albumart "x.mp3" "0"\n'],
+            [b"size: 32\n", b"binary: 16\n", payload[0:16], b"\n", b"OK\n"],
+        )
+        # No follow-up albumart request is issued after the cancellation.
+        self.mockserver.expect_exchange(
+            [b"status\n"],
+            [b"volume: 70\n", b"OK\n"],
+        )
+
+        stream = self.client.albumart_stream("x.mp3")
+        task = asyncio.ensure_future(stream.__anext__())
+        await asyncio.sleep(0)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+
+        # Whatever response was in flight is drained by the run loop before
+        # the status command is processed.
+        status = await self.client.status()
+        self.assertEqual(status, {"volume": "70"})
+        self.assertFalse(stream.complete)
+
+    async def test_readpicture_stream(self) -> None:
+        await self.init_client()
+        payload = bytes(range(16))
+        self.mockserver.expect_exchange(
+            [b'readpicture "x.mp3" "0"\n'],
+            [
+                b"size: 16\n",
+                b"type: image/jpeg\n",
+                b"binary: 16\n",
+                payload,
+                b"\n",
+                b"OK\n",
+            ],
+        )
+
+        stream = self.client.readpicture_stream("x.mp3")
+        chunks = [chunk async for chunk in stream]
+
+        self.assertEqual(len(chunks), 1)
+        self.assertEqual(chunks[0].data, payload)
+        self.assertEqual(chunks[0].type, "image/jpeg")
+        self.assertTrue(chunks[0].complete)
+        self.assertTrue(stream.complete)
+
+    async def test_readpicture_stream_binary_contains_protocol_lines(self) -> None:
+        await self.init_client()
+        payload = b"x\nOK\nbinary: 1\ny"
+        self.mockserver.expect_exchange(
+            [b'readpicture "x.mp3" "0"\n'],
+            [
+                b"size: %d\n" % len(payload),
+                b"type: image/png\n",
+                b"binary: %d\n" % len(payload),
+            ]
+            + [payload[i : i + 3] for i in range(0, len(payload), 3)]
+            + [b"\n", b"OK\n"],
+        )
+        self.mockserver.expect_exchange(
+            [b"status\n"],
+            [b"volume: 1\n", b"OK\n"],
+        )
+
+        stream = self.client.readpicture_stream("x.mp3", chunk_size=3)
+        data = b"".join([chunk.data async for chunk in stream])
+
+        self.assertEqual(data, payload)
+        self.assertEqual(stream.type, "image/png")
+        self.assertTrue(stream.complete)
+        self.assertEqual(await self.client.status(), {"volume": "1"})
+
+    async def test_readpicture_stream_empty(self) -> None:
+        await self.init_client()
+        self.mockserver.expect_exchange(
+            [b'readpicture "x.mp3" "0"\n'],
+            [b"OK\n"],
+        )
+
+        stream = self.client.readpicture_stream("x.mp3")
+        chunks = [chunk async for chunk in stream]
+
+        self.assertEqual(chunks, [])
+        self.assertFalse(stream.complete)
 
     async def test_mocker(self) -> None:
         """Does the mock server refuse unexpected writes?"""

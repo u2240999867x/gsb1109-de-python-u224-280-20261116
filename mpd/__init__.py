@@ -17,6 +17,9 @@
 # You should have received a copy of the GNU Lesser General Public License
 # along with python-mpd2.  If not, see <http://www.gnu.org/licenses/>.
 
+from mpd.base import BinaryChunk as BinaryChunk
+from mpd.base import BinaryStream as BinaryStream
+from mpd.base import Delivered as Delivered
 from mpd.base import CommandError as CommandError
 from mpd.base import CommandListError as CommandListError
 from mpd.base import ConnectionError as ConnectionError

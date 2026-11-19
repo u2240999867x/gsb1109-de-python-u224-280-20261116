@@ -1,6 +1,15 @@
 python-mpd2 Changes List
 ========================
 
+Unreleased
+----------
+
+* add ``albumart_stream`` / ``readpicture_stream`` for incremental, chunked
+  access to cover art.  Chunks carry the delivered byte range and MPD's
+  declared total length; early exit drains the current response so the
+  connection can be reused, and a partial image is never reported complete.
+  The one-shot ``albumart`` / ``readpicture`` APIs are unchanged.
+
 Changes in v3.1.1
 -----------------
 
