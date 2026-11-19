@@ -27,6 +27,16 @@ from mpd.base import MPDError as MPDError
 from mpd.base import PendingCommandError as PendingCommandError
 from mpd.base import ProtocolError as ProtocolError
 from mpd.base import VERSION as VERSION
+from mpd.filters import Filter as Filter
+from mpd.filters import TagFilter as TagFilter
+from mpd.filters import compile_filter as compile_filter
+from mpd.filters import select_songs as select_songs
+
+try:
+    from mpd.replay import replay as replay
+    from mpd.replay import load_songs as load_songs
+except ImportError:  # pragma: no cover - optional convenience export
+    pass
 
 try:
     from mpd.twisted import MPDProtocol

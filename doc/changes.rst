@@ -1,6 +1,17 @@
 python-mpd2 Changes List
 ========================
 
+Unreleased
+----------
+
+* add version-aware filter conditions.  ``MPDClient.find_filtered()`` accepts
+  a filter expression, mapping, sequence, or ``Filter`` tree and plans it for
+  the connected MPD version.  Servers without filter expressions use an exact
+  legacy candidate plus local verification; a loose ``search`` is never used
+  as an exact ``find``.
+* add ``mpd.replay`` to run one condition against fixture directories for
+  several MPD versions and compare the confirmed records.
+
 Changes in v3.1.1
 -----------------
 

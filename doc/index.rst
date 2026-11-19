@@ -41,6 +41,13 @@ A quick guide for getting started python-mpd2:
 
 .. _python-mpd: https://pypi.python.org/pypi/python-mpd/
 
+Filtered queries
+================
+
+Version-aware conditions for old and new MPD servers:
+
+* :doc:`Filters <topics/filters>`
+
 Command Reference
 =================
 

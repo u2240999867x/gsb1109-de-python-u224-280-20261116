@@ -628,6 +628,25 @@ The music database
 
 
         count group artist
+.. function:: MPDClient.find_filtered(condition[, require_server_only])
+
+    Finds songs matching *CONDITION* on MPD servers with or without filter
+    expressions.  *CONDITION* may be a filter expression string, a
+    ``Filter`` tree, a ``{tag: value}`` mapping, or a ``(tag, value)`` pair.
+    The result separates confirmed, undetermined and excluded records; see
+    :doc:`Filters <filters>`.
+
+    On servers without filter expressions the client requests a candidate
+    superset and verifies every record locally.  A loose ``search`` is never
+    used as a substitute for an exact ``find``.  With
+    ``require_server_only=True``, a condition that cannot be answered
+    completely by the server raises ``FilterNotSupported`` instead of
+    returning unverified rows.
+
+    ``find_all(condition)`` returns only the confirmed songs; check
+    :meth:`find_filtered` when undetermined records matter.
+
+
 .. function:: MPDClient.find(type, what[, ..., startend])
 
 

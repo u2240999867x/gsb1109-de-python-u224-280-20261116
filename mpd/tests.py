@@ -5,6 +5,7 @@ from __future__ import absolute_import
 import itertools
 import mpd.base
 import mpd.asyncio
+from mpd.filters import TagFilter
 import os
 import socket
 import sys
@@ -339,6 +340,49 @@ class TestMPDClient(unittest.TestCase):
         self.MPDWillReturn("OK\n")
         self.client.find("file", 1)
         self.assertMPDReceived('find "file" "1"\n')
+
+    def test_find_expression_is_iterable(self) -> None:
+        self.client.mpd_version = "0.21.0"
+        self.MPDWillReturn("file: a.mp3\n", "Artist: AC/DC\n", "OK\n")
+        result = self.client.find_expression('(artist == "AC/DC")')
+        self.assertEqual([song["file"] for song in result], ["a.mp3"])
+        self.assertEqual(result.confirmed_files, ["a.mp3"])
+
+    def test_find_filtered_exact_uses_find(self) -> None:
+        self.client.mpd_version = "0.19.0"
+        self.MPDWillReturn("file: a.mp3\n", "Artist: AC/DC\n", "OK\n")
+        result = self.client.find_filtered(("artist", "AC/DC"))
+        self.assertMPDReceived('find "artist" "AC/DC"\n')
+        self.assertEqual(result.confirmed_files, ["a.mp3"])
+        self.assertEqual(result.plan.guarantee, "exact")
+
+    def test_find_filtered_negation_falls_back(self) -> None:
+        self.client.mpd_version = "0.19.0"
+        self.MPDWillReturn(
+            "file: a.mp3\n",
+            "Artist: AC/DC\n",
+            "file: b.mp3\n",
+            "Artist: Other\n",
+            "file: c.mp3\n",
+            "Title: no artist\n",
+            "OK\n",
+        )
+        result = self.client.find_filtered(
+            ("artist", "!=", "AC/DC")
+        )
+        self.assertMPDReceived("listallinfo\n")
+        self.assertEqual(result.confirmed_files, ["b.mp3"])
+        self.assertEqual(result.undetermined_files, ["c.mp3"])
+        self.assertFalse(result.supported)
+
+    def test_find_filtered_new_server_uses_expression(self) -> None:
+        self.client.mpd_version = "0.21.0"
+        self.MPDWillReturn("file: a.mp3\n", "Artist: AC/DC\n", "OK\n")
+        result = self.client.find_filtered('(artist == "AC/DC")')
+        self.assertMPDReceived('find "(artist == \\\"AC/DC\\\")"\n')
+        self.assertEqual(result.confirmed_files, ["a.mp3"])
+        self.assertTrue(result.supported)
+
 
     def test_commands_without_callbacks(self) -> None:
         self.MPDWillReturn("\n")
@@ -1611,6 +1655,54 @@ class TestAsyncioMPD(unittest.IsolatedAsyncioTestCase):
         # pausing for exactly this duration triggers a special case in mpd.asyncio.MPDClient.__run
         await asyncio.sleep(self.client.IMMEDIATE_COMMAND_TIMEOUT)
         await self.client.currentsong()
+        self.client.disconnect()
+
+
+class TestAsyncioFilteredQueries(unittest.IsolatedAsyncioTestCase):
+    async def init_client(self, version: bytes = b"OK MPD 0.19.0\n") -> None:
+        self.mockserver = AsyncMockServer()
+        asyncio.open_connection = mock.MagicMock(
+            return_value=self.mockserver.get_streams()
+        )
+        self.mockserver.expect_exchange([], [version])
+        self.client = mpd.asyncio.MPDClient()
+        await self.client.connect(TEST_MPD_HOST, TEST_MPD_PORT)
+
+    async def test_asyncio_find_filtered_legacy(self) -> None:
+        await self.init_client()
+        self.mockserver.expect_exchange(
+            [b'listallinfo\n'],
+            [
+                b"file: a.mp3\n",
+                b"Artist: AC/DC\n",
+                b"file: b.mp3\n",
+                b"Artist: Other\n",
+                b"OK\n",
+            ],
+        )
+        result = await self.client.find_filtered(("artist", "!=", "AC/DC"))
+        self.assertEqual([song["file"] for song in result.confirmed], ["b.mp3"])
+        self.assertFalse(result.supported)
+        self.client.disconnect()
+
+    async def test_asyncio_require_server_only_rejects(self) -> None:
+        import mpd.filters
+
+        await self.init_client()
+        with self.assertRaises(mpd.filters.FilterNotSupported):
+            await self.client.find_filtered(
+                ("artist", "!=", "AC/DC"), require_server_only=True
+            )
+        self.client.disconnect()
+
+    async def test_asyncio_find_filtered_native(self) -> None:
+        await self.init_client(b"OK MPD 0.21.0\n")
+        self.mockserver.expect_exchange(
+            [b'find "(artist == \\"AC/DC\\")"\n'],
+            [b"file: a.mp3\n", b"Artist: AC/DC\n", b"OK\n"],
+        )
+        songs = await self.client.find_all(TagFilter("artist", "AC/DC"))
+        self.assertEqual([song["file"] for song in songs], ["a.mp3"])
         self.client.disconnect()
 
 

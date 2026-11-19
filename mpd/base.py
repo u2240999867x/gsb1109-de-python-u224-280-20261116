@@ -901,6 +901,83 @@ class MPDClient(MPDClientBase):
         escaped_name = name.replace(" ", "_")
         setattr(cls, escaped_name, method)
 
+    def find_filtered(
+        self,
+        condition: Any,
+        *,
+        require_server_only: bool = False,
+    ) -> Any:
+        """Find songs matching *condition* on any supported MPD version.
+
+        The condition may be a filter expression string, a :class:`Filter`
+        tree, a ``{tag: value}`` mapping, or a ``(tag, value)`` pair.  On
+        servers without filter expressions the client requests a candidate
+        superset and verifies every record locally.  The result exposes
+        confirmed, undetermined, and excluded records.
+        """
+        from mpd.filters import select_songs
+
+        return select_songs(
+            self, condition, require_server_only=require_server_only
+        )
+
+    def select_songs(
+        self,
+        condition: Any,
+        *,
+        require_server_only: bool = False,
+    ) -> Any:
+        """Alias for :meth:`find_filtered`.
+
+        ``select`` emphasizes that the returned :class:`~mpd.filters.FilterResult`
+        contains confirmed, undetermined and excluded records rather than only
+        raw server rows.
+        """
+        return self.find_filtered(
+            condition, require_server_only=require_server_only
+        )
+
+    def query_filtered(
+        self,
+        condition: Any,
+        *,
+        require_server_only: bool = False,
+    ) -> Any:
+        """Alias for :meth:`find_filtered`."""
+        return self.find_filtered(
+            condition, require_server_only=require_server_only
+        )
+
+    def find_all(
+        self,
+        condition: Any,
+        *,
+        require_server_only: bool = False,
+    ) -> Any:
+        """Return confirmed songs for *condition* as a plain list.
+
+        Unlike :meth:`find_filtered`, this hides undetermined records.  It is
+        a convenience for callers that only need the confirmed set.
+        """
+        return self.find_filtered(
+            condition, require_server_only=require_server_only
+        ).confirmed
+
+    def find_expression(
+        self,
+        expression: str,
+        *,
+        require_server_only: bool = False,
+    ) -> Any:
+        """Run an MPD filter expression against any supported version."""
+        return self.find_filtered(
+            expression, require_server_only=require_server_only
+        )
+
+    def find_expr(self, expression: str, **kwargs: Any) -> Any:
+        """Alias for :meth:`find_expression`."""
+        return self.find_expression(expression, **kwargs)
+
     @classmethod
     def remove_command(cls, name: str) -> None:
         if not hasattr(cls, name):

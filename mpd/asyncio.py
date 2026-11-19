@@ -685,5 +685,68 @@ class MPDClient(MPDClientBase):
             if self.__idle_consumers is not None:
                 self.__idle_consumers.remove(entry)
 
+    async def find_filtered(
+        self,
+        condition: Any,
+        *,
+        require_server_only: bool = False,
+    ) -> Any:
+        """Asynchronous counterpart of :meth:`mpd.base.MPDClient.find_filtered`."""
+
+        from mpd.filters import select_songs_async
+
+        return await select_songs_async(
+            self, condition, require_server_only=require_server_only
+        )
+
+    async def select_songs(
+        self,
+        condition: Any,
+        *,
+        require_server_only: bool = False,
+    ) -> Any:
+        """Alias for :meth:`find_filtered`."""
+        return await self.find_filtered(
+            condition, require_server_only=require_server_only
+        )
+
+    async def query_filtered(
+        self,
+        condition: Any,
+        *,
+        require_server_only: bool = False,
+    ) -> Any:
+        """Alias for :meth:`find_filtered`."""
+        return await self.find_filtered(
+            condition, require_server_only=require_server_only
+        )
+
+    async def find_all(
+        self,
+        condition: Any,
+        *,
+        require_server_only: bool = False,
+    ) -> Any:
+        """Return confirmed songs for *condition* as a plain list."""
+        result = await self.find_filtered(
+            condition, require_server_only=require_server_only
+        )
+        return result.confirmed
+
+    async def find_expression(
+        self,
+        expression: str,
+        *,
+        require_server_only: bool = False,
+    ) -> Any:
+        """Run an MPD filter expression against any supported version."""
+        return await self.find_filtered(
+            expression, require_server_only=require_server_only
+        )
+
+    async def find_expr(self, expression: str, **kwargs: Any) -> Any:
+        """Alias for :meth:`find_expression`."""
+        return await self.find_expression(expression, **kwargs)
+
     def noidle(self) -> None:
         raise AttributeError("noidle is not supported / required in mpd.asyncio")

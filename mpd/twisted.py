@@ -26,7 +26,7 @@ from __future__ import absolute_import, unicode_literals
 
 import threading
 import types
-from typing import Any, Callable, List, Optional, Protocol, Union, cast
+from typing import Any, Callable, List, Mapping, Optional, Protocol, Union, cast
 
 from twisted.internet import defer
 from twisted.protocols import basic
@@ -262,6 +262,72 @@ class MPDProtocol(basic.LineReceiver, MPDClientBase):
         self._state[-1].append(deferred)
         self._in_command_list = False
         return deferred
+
+    def find_filtered(
+        self,
+        condition: Any,
+        *,
+        require_server_only: bool = False,
+    ) -> defer.Deferred:
+        """Find songs matching *condition*, returning a deferred result.
+
+        The condition is planned for :attr:`mpd_version` exactly as in the
+        synchronous client.  The deferred fires with a ``FilterResult``.
+        """
+        from mpd.filters import compile_filter
+
+        try:
+            plan = compile_filter(
+                condition,
+                self.mpd_version,
+                require_server_only=require_server_only,
+            )
+        except Exception as error:
+            return defer.fail(error)
+
+        candidates: List[Mapping[str, Any]] = []
+        seen = set()
+
+        def collect(result: Any) -> None:
+            if result is None:
+                return
+            for song in result:
+                if not isinstance(song, Mapping) or "file" not in song:
+                    continue
+                key = str(song["file"])
+                if key in seen:
+                    continue
+                seen.add(key)
+                candidates.append(song)
+
+        deferreds = []
+        for query in plan.queries:
+            method = getattr(self, query.command)
+            result = method(*query.args)
+            if isinstance(result, defer.Deferred):
+                deferreds.append(result)
+            else:
+                # A test double or subclass may return concrete records.
+                collect(result)
+
+        def finish(_: Any) -> Any:
+            from mpd.filters import classify_candidates
+
+            return classify_candidates(plan, candidates)
+
+        if not deferreds:
+            return defer.succeed(finish(None))
+
+        combined = defer.DeferredList(deferreds, consumeErrors=True)
+
+        def on_results(results: List[Any]) -> Any:
+            for success, value in results:
+                if success:
+                    collect(value)
+            return finish(None)
+
+        combined.addCallback(on_results)
+        return combined
 
 
 # vim: set expandtab shiftwidth=4 softtabstop=4 textwidth=79:
