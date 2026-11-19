@@ -74,6 +74,44 @@ instead encodes a reference to the nth sufficiently long string already encoded.
 .. warning:: Support for string referencing is rare in other CBOR implementations, so think carefully
     whether you want to enable it.
 
+Selective decoding
+------------------
+
+For large documents where only a few fields are needed, :func:`loads_selective` and
+:func:`load_selective` expand just the requested paths::
+
+    from cbor2 import loads_selective
+
+    result = loads_selective(data, [("header", "kind"), ("items", 3, "id")])
+    if result.complete:
+        print(result[("header", "kind")], result[("items", 3, "id")])
+
+Path components are matched with their CBOR types intact: the boolean key ``true`` and the
+integer key ``1`` are distinct, as are text and byte-string keys. Array elements are addressed
+by non-negative integers. Unknown tags remain opaque; use :class:`TagKey` to explicitly enter
+their payload::
+
+    from cbor2 import TagKey
+
+    result = loads_selective(data, [(TagKey(4242), "field")])
+
+Unselected definite-length strings and byte strings are skipped when the input is seekable, so
+their payloads need not be read. A selected value that depends on a previously skipped shared
+value or string-reference entry fetches just that definition; :attr:`SelectiveResult.sources`
+lists the definitions that were needed.
+
+``read_budget`` and ``expansion_budget`` cap the work performed. If either is exceeded, the
+affected paths are returned in :attr:`SelectiveResult.unfinished` with an explanation in
+``errors``; no partially expanded value is published in ``values``. The same applies when a
+corrupt unselected region prevents later boundaries from being proven. If a path is definitely
+absent, it is reported in ``missing`` instead.
+
+Cyclic values are supported when the query has a finite path: a cycle can be selected and
+dereferenced through a finite number of components. A reference that never reaches a finite
+value (for example a shared scalar that refers to itself) is reported as unfinished rather than
+guessed. Results for successfully expanded paths match what a full decode followed by the same
+path lookup would produce, including object identity for shared values.
+
 Tag support
 -----------
 

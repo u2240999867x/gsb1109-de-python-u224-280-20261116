@@ -5,6 +5,12 @@ Version history
 
 This library adheres to `Semantic Versioning <http://semver.org/>`_.
 
+**Unreleased**
+
+- Added :func:`cbor2.loads_selective` and :func:`cbor2.load_selective` for expanding only
+  requested paths, with typed path keys, read/expansion budgets, lazy resolution of shared and
+  string-reference definitions, and explicit incomplete/missing results for unprovable regions
+
 **5.6.5** (2024-10-09)
 
 - Published binary wheels for Python 3.13

@@ -7,6 +7,14 @@ from ._encoder import CBOREncoder as CBOREncoder
 from ._encoder import dump as dump
 from ._encoder import dumps as dumps
 from ._encoder import shareable_encoder as shareable_encoder
+from ._selective import MISSING as MISSING
+from ._selective import SelectiveResult as SelectiveResult
+from ._selective import SelectiveSource as SelectiveSource
+from ._selective import TagKey as TagKey
+from ._selective import load_paths as load_paths
+from ._selective import load_selective as load_selective
+from ._selective import loads_paths as loads_paths
+from ._selective import loads_selective as loads_selective
 from ._types import CBORDecodeEOF as CBORDecodeEOF
 from ._types import CBORDecodeError as CBORDecodeError
 from ._types import CBORDecodeValueError as CBORDecodeValueError

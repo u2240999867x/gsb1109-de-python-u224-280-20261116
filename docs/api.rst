@@ -16,6 +16,16 @@ Decoding
 .. autofunction:: cbor2.load
 .. autoclass:: cbor2.CBORDecoder
 
+Selective decoding
+------------------
+
+.. autofunction:: cbor2.loads_selective
+.. autofunction:: cbor2.load_selective
+.. autoclass:: cbor2.SelectiveResult
+.. autoclass:: cbor2.SelectiveSource
+.. autoclass:: cbor2.TagKey
+.. autodata:: cbor2.MISSING
+
 Types
 -----
 
