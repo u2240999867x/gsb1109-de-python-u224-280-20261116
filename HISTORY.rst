@@ -8,6 +8,12 @@ Version: 2.2.1 - (IN DEVELOPMENT)
 * 686: distribute wheel binaries, not only .tar.gz.
 * 689: Fix file existence check for certificate files
 * Add a SECURITY.md mechanism to report critical vulnerabilities.
+* Add ``pyftpdlib.catalog`` module: unify directory results collected
+  via MLSD/MLST and LIST for asset collection, recording the original
+  declarations and the trusted precision of every field, preserving
+  unknown facts as-is, listing same-name candidates instead of
+  overwriting them, and never emitting full deletions when a directory
+  collection did not fully cover the directory.
 
 **Bug fixes**
 
