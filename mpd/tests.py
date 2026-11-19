@@ -224,6 +224,198 @@ class TestMPDClient(unittest.TestCase):
             self.assertEqual("0", song["pos"])
             self.assertEqual("66", song["id"])
 
+    def _written_lines(self) -> List[str]:
+        return [c[0][0] for c in self.client._wfile.write.call_args_list]
+
+    def test_tagtypes_scope(self) -> None:
+        self.MPDWillReturn(
+            "tagtype: Artist\n", "tagtype: Album\n", "OK\n",  # baseline query
+            "OK\n",  # tagtypes disable "Album"
+            "OK\n",  # tagtypes enable "Date"
+            "file: my-song.ogg\n", "Artist: Someone\n", "OK\n",  # search
+            "tagtype: Artist\n", "tagtype: Date\n", "OK\n",  # restore query
+            "OK\n",  # tagtypes disable "Date"
+            "OK\n",  # tagtypes enable "Album"
+        )
+        with self.client.tagtypes_scope(["Artist", "Date"]) as scope:
+            self.assertTrue(scope.active)
+            self.assertEqual(scope.projection, ("Artist", "Date"))
+            self.assertEqual(scope.baseline, ("Artist", "Album"))
+            songs = self.client.search("artist", "Someone")
+            states = scope.classify(songs[0])
+            self.assertEqual(states["artist"], mpd.TagFieldState.PROVIDED)
+            self.assertEqual(states["date"], mpd.TagFieldState.NOT_PROVIDED)
+            self.assertEqual(states["file"], mpd.TagFieldState.NOT_REQUESTED)
+            self.assertEqual(
+                scope.field_state(songs[0], "Album"),
+                mpd.TagFieldState.NOT_REQUESTED,
+            )
+        self.assertFalse(scope.active)
+        self.assertEqual(
+            self._written_lines(),
+            [
+                "tagtypes\n",
+                'tagtypes disable "Album"\n',
+                'tagtypes enable "Date"\n',
+                'search "artist" "Someone"\n',
+                "tagtypes\n",
+                'tagtypes disable "Date"\n',
+                'tagtypes enable "Album"\n',
+            ],
+        )
+
+    def test_tagtypes_scope_nested(self) -> None:
+        self.MPDWillReturn(
+            "tagtype: Artist\n", "tagtype: Album\n", "OK\n",  # outer baseline
+            "OK\n",  # disable Album
+            "tagtype: Artist\n", "OK\n",  # inner baseline
+            "OK\n",  # enable Date
+            "tagtype: Artist\n", "tagtype: Date\n", "OK\n",  # inner restore
+            "OK\n",  # disable Date
+            "tagtype: Artist\n", "OK\n",  # outer restore
+            "OK\n",  # enable Album
+        )
+        outer = self.client.tagtypes_scope(["Artist"])
+        inner = self.client.tagtypes_scope(["Artist", "Date"])
+        with outer:
+            with inner:
+                # scopes must close innermost-first
+                self.assertRaises(RuntimeError, outer.close)
+                self.assertTrue(outer.active)
+        self.assertFalse(inner.active)
+        self.assertFalse(outer.active)
+        self.assertEqual(
+            self._written_lines(),
+            [
+                "tagtypes\n",
+                'tagtypes disable "Album"\n',
+                "tagtypes\n",
+                'tagtypes enable "Date"\n',
+                "tagtypes\n",
+                'tagtypes disable "Date"\n',
+                "tagtypes\n",
+                'tagtypes enable "Album"\n',
+            ],
+        )
+
+    def test_tagtypes_scope_no_restore_while_iterating(self) -> None:
+        self.MPDWillReturn(
+            "tagtype: Artist\n", "OK\n",  # baseline query
+            "file: my-song.ogg\n", "Pos: 0\n", "OK\n",  # playlistinfo
+            "tagtype: Artist\n", "OK\n",  # restore query after draining
+        )
+        self.client.iterate = True
+        with self.client.tagtypes_scope(["Artist"]) as scope:
+            songs = self.client.playlistinfo()
+            next(songs)
+            # the restore must not cut in on the same connection while the
+            # result is still being iterated
+            self.assertRaises(mpd.IteratingError, scope.close)
+            self.assertTrue(scope.active)
+            list(songs)  # drain the pending result
+        self.assertFalse(scope.active)
+        self.assertEqual(
+            self._written_lines(),
+            ["tagtypes\n", "playlistinfo\n", "tagtypes\n"],
+        )
+
+    def test_tagtypes_scope_restores_on_exception(self) -> None:
+        self.MPDWillReturn(
+            "tagtype: Artist\n", "OK\n",  # baseline query
+            "OK\n",  # enable Date
+            "tagtype: Artist\n", "tagtype: Date\n", "OK\n",  # restore query
+            "OK\n",  # disable Date
+        )
+        scope = self.client.tagtypes_scope(["Artist", "Date"])
+        with self.assertRaises(ValueError):
+            with scope:
+                raise ValueError("batch failed")
+        self.assertFalse(scope.active)
+        self.assertEqual(
+            self._written_lines(),
+            [
+                "tagtypes\n",
+                'tagtypes enable "Date"\n',
+                "tagtypes\n",
+                'tagtypes disable "Date"\n',
+            ],
+        )
+
+    def test_tagtypes_scope_reconnect_skips_stale_restore(self) -> None:
+        self.MPDWillReturn(
+            "tagtype: Artist\n", "OK\n",  # baseline on first connection
+            "OK\n",  # enable Date
+        )
+        with self.client.tagtypes_scope(["Artist", "Date"]) as scope:
+            self.client.disconnect()
+            self.client.connect(TEST_MPD_HOST, TEST_MPD_PORT)
+        # the baseline saved from the old connection must not be posed as
+        # the state of the new one: no restore commands after reconnecting
+        self.assertEqual(self.client._wfile.write.call_args_list, [])
+        self.assertFalse(scope.active)
+
+    def test_tagtypes_scope_revalidate_after_reconnect(self) -> None:
+        self.MPDWillReturn(
+            "tagtype: Artist\n", "OK\n",  # baseline on first connection
+            "OK\n",  # enable Date
+        )
+        with self.client.tagtypes_scope(["Artist", "Date"]) as scope:
+            self.client.disconnect()
+            self.client.connect(TEST_MPD_HOST, TEST_MPD_PORT)
+            self.MPDWillReturn(
+                "tagtype: Album\n", "OK\n",  # fresh baseline evidence
+                "OK\n",  # disable Album
+                "OK\n",  # enable Artist + Date
+                "tagtype: Artist\n", "tagtype: Date\n", "OK\n",  # restore query
+                "OK\n",  # disable Artist + Date
+                "OK\n",  # enable Album
+            )
+            # re-establish evidence on the new connection
+            self.assertTrue(scope.revalidate())
+            self.assertEqual(scope.baseline, ("Album",))
+            # same connection now: nothing to revalidate
+            self.assertFalse(scope.revalidate())
+        self.assertEqual(
+            self._written_lines(),
+            [
+                "tagtypes\n",
+                'tagtypes disable "Album"\n',
+                'tagtypes enable "Artist" "Date"\n',
+                "tagtypes\n",
+                'tagtypes disable "Artist" "Date"\n',
+                'tagtypes enable "Album"\n',
+            ],
+        )
+
+    def test_tagtypes_scope_projections_not_shared(self) -> None:
+        self.MPDWillReturn(
+            "tagtype: Artist\n", "OK\n",  # batch A baseline
+            "tagtype: Artist\n", "OK\n",  # batch A restore
+            "tagtype: Artist\n", "OK\n",  # batch B baseline
+            "OK\n",  # batch B disable Artist
+            "OK\n",  # batch B enable Date
+            "tagtype: Date\n", "OK\n",  # batch B restore query
+            "OK\n",  # batch B disable Date
+            "OK\n",  # batch B enable Artist
+        )
+        record = {"file": "x.ogg", "artist": "A", "date": "1970"}
+        with self.client.tagtypes_scope(["Artist"]) as batch_a:
+            pass
+        with self.client.tagtypes_scope(["Date"]) as batch_b:
+            pass
+        # each batch classifies with its own projection only
+        self.assertEqual(
+            batch_a.field_state(record, "date"), mpd.TagFieldState.NOT_REQUESTED
+        )
+        self.assertEqual(
+            batch_b.field_state(record, "artist"), mpd.TagFieldState.NOT_REQUESTED
+        )
+        self.assertEqual(
+            batch_a.field_state(record, "artist"), mpd.TagFieldState.PROVIDED
+        )
+        # scopes are single-use and cannot be recycled for another batch
+        self.assertRaises(RuntimeError, batch_a.__enter__)
+
     def test_add_and_remove_command(self) -> None:
         self.MPDWillReturn("ACK awesome command\n")
 

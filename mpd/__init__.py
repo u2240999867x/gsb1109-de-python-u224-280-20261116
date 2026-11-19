@@ -26,6 +26,8 @@ from mpd.base import MPDClient as MPDClient
 from mpd.base import MPDError as MPDError
 from mpd.base import PendingCommandError as PendingCommandError
 from mpd.base import ProtocolError as ProtocolError
+from mpd.base import TagFieldState as TagFieldState
+from mpd.base import TagTypesScope as TagTypesScope
 from mpd.base import VERSION as VERSION
 
 try:

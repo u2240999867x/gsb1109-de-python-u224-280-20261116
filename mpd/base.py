@@ -26,6 +26,7 @@ from enum import Enum
 from logging import NullHandler
 from typing import (
     IO,
+    TYPE_CHECKING,
     Any,
     Callable,
     Dict,
@@ -110,6 +111,210 @@ class PendingCommandError(MPDError):
 
 class IteratingError(MPDError):
     pass
+
+
+class TagFieldState(Enum):
+    """Why a tag field is (not) present in a record fetched inside a
+    ``TagTypesScope``.
+    """
+
+    #: The field was part of the scope's projection and the server sent it.
+    PROVIDED = "provided"
+    #: The field was requested through the scope's projection, but the
+    #: server did not include it in the record.
+    NOT_PROVIDED = "not_provided"
+    #: The field was never part of the scope's projection; its absence from
+    #: a record says nothing about whether the server could have provided it.
+    NOT_REQUESTED = "not_requested"
+
+
+class TagTypesScope:
+    """Explicit scope temporarily adjusting a connection's tag types.
+
+    Instances are created through :meth:`MPDClient.tagtypes_scope` and used
+    as context managers.  On entry, the currently enabled tag types are
+    queried from the server (the *baseline evidence*) and the connection is
+    switched to the requested *projection*; on exit, the baseline is
+    restored.  Each instance carries its own projection, so concurrent
+    collection batches never share projection state, and instances cannot be
+    re-entered.
+
+    Scopes may nest; they must be closed innermost-first and restore their
+    baseline in the order in which the projections actually took effect on
+    the connection.
+
+    The saved baseline is evidence of the connection it was taken from.  If
+    the client reconnects while a scope is active, the stale baseline is
+    never applied to the new connection; call :meth:`revalidate` to
+    re-establish evidence on the current connection instead.
+    """
+
+    def __init__(self, client: "MPDClient", tags: Iterable[str]) -> None:
+        self._client = client
+        self._projection: Tuple[str, ...] = tuple(tags)
+        self._projection_keys = frozenset(tag.lower() for tag in self._projection)
+        self._entered = False
+        self._active = False
+        self._connection: Optional[socket.socket] = None
+        self._baseline: List[str] = []
+        self._current: List[str] = []
+
+    @property
+    def projection(self) -> Tuple[str, ...]:
+        """The tag types requested by this scope, as passed in."""
+        return self._projection
+
+    @property
+    def baseline(self) -> Tuple[str, ...]:
+        """The tag types enabled on the connection before this scope
+        applied its projection (empty until the scope was entered)."""
+        return tuple(self._baseline)
+
+    @property
+    def active(self) -> bool:
+        """Whether the scope's projection is currently in effect."""
+        return self._active
+
+    def _check_usable(self) -> None:
+        if self._client._command_list is not None:
+            raise CommandListError(
+                "Cannot change tagtypes while a command list is open"
+            )
+        if self._client._iterating:
+            raise IteratingError(
+                "Cannot change tagtypes while results are still being "
+                "iterated; finish consuming the pending result first"
+            )
+
+    def _apply(self, target: Iterable[str]) -> None:
+        """Switch the connection from ``self._current`` to ``target``,
+        comparing tag names case-insensitively and preferring the server's
+        canonical spelling."""
+        current = {name.lower(): name for name in self._current}
+        wanted = {}
+        for name in target:
+            wanted[name.lower()] = current.get(name.lower(), name)
+        disable = [name for key, name in current.items() if key not in wanted]
+        enable = [name for key, name in wanted.items() if key not in current]
+        if disable:
+            self._client.tagtypes_disable(*disable)
+        if enable:
+            self._client.tagtypes_enable(*enable)
+        self._current = list(wanted.values())
+
+    def _restore(self) -> None:
+        # Re-query the actual state instead of trusting our bookkeeping, so
+        # the baseline is restored even if tagtypes were changed inside the
+        # scope by other means.
+        self._current = list(self._client.tagtypes())
+        self._apply(self._baseline)
+
+    def __enter__(self) -> "TagTypesScope":
+        client = self._client
+        if self._entered:
+            raise RuntimeError("TagTypesScope instances cannot be re-entered")
+        self._check_usable()
+        self._connection = client._sock
+        # Evidence: what the server actually has enabled right now.  Raises
+        # ConnectionError if the client is not connected.
+        self._baseline = list(client.tagtypes())
+        self._current = list(self._baseline)
+        try:
+            self._apply(self._projection)
+        except BaseException:
+            # Roll back a partially applied projection so the connection is
+            # left as it was found.
+            try:
+                self._current = list(client.tagtypes())
+                self._apply(self._baseline)
+            except MPDError:
+                logger.warning(
+                    "Could not roll back partial tagtypes change", exc_info=True
+                )
+            raise
+        self._entered = True
+        self._active = True
+        client._tagtypes_scopes.append(self)
+        return self
+
+    def __exit__(self, *exc_info: Any) -> None:
+        self.close()
+
+    def close(self) -> None:
+        """Restore the baseline tag types and leave the scope.
+
+        Does nothing if the scope is already closed.  Raises
+        :class:`IteratingError` without touching the connection if a command
+        result is still being iterated; the scope stays active and ``close``
+        can be retried once the result is fully consumed.
+        """
+        if not self._active:
+            return
+        client = self._client
+        if not client._tagtypes_scopes or client._tagtypes_scopes[-1] is not self:
+            raise RuntimeError(
+                "Nested tagtypes scopes must be closed innermost-first"
+            )
+        self._check_usable()
+        try:
+            if client._sock is None:
+                logger.warning(
+                    "Connection lost inside tagtypes scope; "
+                    "nothing left to restore"
+                )
+            elif client._sock is not self._connection:
+                logger.warning(
+                    "Connection was re-established inside tagtypes scope; "
+                    "not applying stale tagtypes to the new connection"
+                )
+            else:
+                self._restore()
+        finally:
+            client._tagtypes_scopes.pop()
+            self._active = False
+
+    def revalidate(self) -> bool:
+        """Re-establish baseline evidence after a reconnect.
+
+        If the connection was replaced while this scope was active, query
+        the new connection's current tag types as the fresh baseline and
+        re-apply this scope's projection to it.  Returns whether
+        revalidation was necessary.
+        """
+        if not self._active:
+            raise RuntimeError("Cannot revalidate an inactive TagTypesScope")
+        client = self._client
+        if client._sock is None:
+            raise ConnectionError("Not connected")
+        if client._sock is self._connection:
+            return False
+        self._check_usable()
+        self._connection = client._sock
+        self._baseline = list(client.tagtypes())
+        self._current = list(self._baseline)
+        self._apply(self._projection)
+        return True
+
+    def field_state(self, record: Dict[str, Any], field: str) -> TagFieldState:
+        """Classify a single field of a record fetched inside this scope."""
+        key = field.lower()
+        if key not in self._projection_keys:
+            return TagFieldState.NOT_REQUESTED
+        if key in record:
+            return TagFieldState.PROVIDED
+        return TagFieldState.NOT_PROVIDED
+
+    def classify(self, record: Dict[str, Any]) -> Dict[str, TagFieldState]:
+        """Classify every relevant field of a record fetched inside this
+        scope, distinguishing fields that were not requested from fields
+        that were requested but not provided by the server."""
+        states = {key: TagFieldState.NOT_REQUESTED for key in record}
+        for key in self._projection_keys:
+            states[key] = (
+                TagFieldState.PROVIDED if key in record
+                else TagFieldState.NOT_PROVIDED
+            )
+        return states
 
 
 class CallableWithCommands:
@@ -372,6 +577,10 @@ class MPDClientBase:
         "subscribe",
         "swap",
         "swapid",
+        "tagtypes all",
+        "tagtypes clear",
+        "tagtypes disable",
+        "tagtypes enable",
         "toggleoutput",
         "unmount",
         "unsubscribe",
@@ -535,6 +744,20 @@ class MPDClient(MPDClientBase):
                 stacklevel=2,
             )
         super().__init__()
+        self._tagtypes_scopes: List[TagTypesScope] = []
+
+    def tagtypes_scope(self, tags: Iterable[str]) -> TagTypesScope:
+        """Create a :class:`TagTypesScope` switching this connection to the
+        given tag types for the duration of a ``with`` block, restoring the
+        previous setting on exit."""
+        return TagTypesScope(self, tags)
+
+    if TYPE_CHECKING:
+        # Registered dynamically through add_command(); declared for the
+        # type checker because TagTypesScope calls them internally.
+        def tagtypes(self) -> List[str]: ...
+        def tagtypes_disable(self, *tags: str) -> None: ...
+        def tagtypes_enable(self, *tags: str) -> None: ...
 
     def _reset(self) -> None:
         super()._reset()
