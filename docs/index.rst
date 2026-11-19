@@ -12,5 +12,6 @@ Table of contents
 
    usage
    customizing
+   tag-replay
    api
    versionhistory

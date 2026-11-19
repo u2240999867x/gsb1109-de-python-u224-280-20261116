@@ -24,6 +24,23 @@ Types
 .. data:: cbor2.undefined
     A singleton representing the CBOR "undefined" value.
 
+Tag rule replay
+---------------
+
+.. autoclass:: cbor2.TagRule
+.. autoclass:: cbor2.RuleSet
+.. autoclass:: cbor2.RuleChange
+.. autoclass:: cbor2.RuleSetDiff
+.. autofunction:: cbor2.builtin_rules
+.. autoclass:: cbor2.TaggedValue
+.. autoclass:: cbor2.Replay
+.. autofunction:: cbor2.replay_records
+.. autoclass:: cbor2.RecordResult
+.. autoclass:: cbor2.FieldResult
+.. autoclass:: cbor2.Node
+.. autoclass:: cbor2.Dependency
+.. autofunction:: cbor2.pending_tickets
+
 Exceptions
 ----------
 
