@@ -1,1 +1,2 @@
 include imaplib2/tests/test_imports.py
+include imaplib2/tests/test_condstore.py

@@ -16,7 +16,8 @@ Public functions: Internaldate2Time
 
 __all__ = ("IMAP4", "IMAP4_SSL", "IMAP4_stream",
            "Internaldate2Time", "ParseFlags", "Time2Internaldate",
-           "Mon2num", "MonthNames", "InternalDate", "version")
+           "Mon2num", "MonthNames", "InternalDate", "version",
+           "CONDSTORE_CAP", "QRESYNC_CAP", "UNCHANGEDSINCE")
 
 __version__ = "3.07"
 __release__ = "3"
@@ -81,6 +82,13 @@ TLS_NO_SSL = "tls_no_ssl"
 TLS_COMPAT = "tls_compat"
 
 AllowedVersions = ('IMAP4REV1', 'IMAP4')        # Most recent first
+
+# RFC 7162 CONDSTORE/QRESYNC tokens. CONDSTORE makes the server track a
+# per-message MODSEQ and accepts the UNCHANGEDSINCE conditional STORE marker,
+# which turns a flag update into an atomic compare-and-swap on the server.
+CONDSTORE_CAP = 'CONDSTORE'
+QRESYNC_CAP = 'QRESYNC'
+UNCHANGEDSINCE = 'UNCHANGEDSINCE'
 
 #       Commands
 
@@ -319,6 +327,13 @@ class IMAP4(object):
         self.is_readonly = False        # READ-ONLY desired state
         self.idle_rqb = None            # Server IDLE Request - see _IdleCont
         self.idle_timeout = None        # Must prod server occasionally
+
+        # RFC 7162 CONDSTORE state for the currently selected mailbox.
+        # A MODSEQ is only meaningful within a single (mailbox, UIDVALIDITY)
+        # domain, so every cached value is invalidated when UIDVALIDITY moves.
+        self.condstore_enabled = False  # Server advertised CONDSTORE / selected with it
+        self.uidvalidity = None         # UIDVALIDITY of the selected mailbox
+        self.highestmodseq = None       # HIGHESTMODSEQ reported for the mailbox
 
         self._expecting_data = False    # Expecting message data
         self._expecting_data_len = 0    # How many characters we expect
@@ -1055,12 +1070,18 @@ class IMAP4(object):
         return self._simple_command(name, *criteria, **kw)
 
 
-    def select(self, mailbox='INBOX', readonly=False, **kw):
-        """(typ, [data]) = select(mailbox='INBOX', readonly=False)
+    def select(self, mailbox='INBOX', readonly=False, condstore=False, **kw):
+        """(typ, [data]) = select(mailbox='INBOX', readonly=False, condstore=False)
         Select a mailbox. (Flushes all untagged responses.)
         'data' is count of messages in mailbox ('EXISTS' response).
         Mandated responses are ('FLAGS', 'EXISTS', 'RECENT', 'UIDVALIDITY'), so
-        other responses should be obtained via "response('FLAGS')" etc."""
+        other responses should be obtained via "response('FLAGS')" etc.
+
+        If 'condstore' is True, the RFC 7162 CONDSTORE extension is enabled for
+        the mailbox by appending a CONDSTORE parameter, making the server track a
+        per-message MODSEQ and accept UNCHANGEDSINCE conditional STORE updates.
+        The mailbox's UIDVALIDITY and HIGHESTMODSEQ are cached on the instance;
+        a changed UIDVALIDITY invalidates every previously cached MODSEQ."""
 
         self.mailbox = mailbox
 
@@ -1069,13 +1090,21 @@ class IMAP4(object):
             name = 'EXAMINE'
         else:
             name = 'SELECT'
+        select_args = [mailbox]
+        if condstore:
+            select_args.append('(%s)' % CONDSTORE_CAP)
         try:
-            rqb = self._command(name, mailbox)
+            rqb = self._command(name, *select_args)
             typ, dat = rqb.get_response('command: %s => %%s' % rqb.name)
             if typ != 'OK':
                 if self.state == SELECTED:
                     self.state = AUTH
                 if __debug__: self._log(1, 'state => AUTH')
+                # No valid mailbox incarnation: invalidate any cached MODSEQ
+                # domain so stale versions can never be reused here.
+                self.uidvalidity = None
+                self.highestmodseq = None
+                self.condstore_enabled = False
                 if typ == 'BAD':
                     self._deliver_exc(self.error, '%s command error: %s %s. Data: %.100s' % (name, typ, dat, mailbox), kw)
                 return self._deliver_dat(typ, dat, kw)
@@ -1084,11 +1113,65 @@ class IMAP4(object):
         finally:
             self._release_state_change()
 
+        self._sync_mailbox_modseq_state(condstore_requested=condstore)
+
         if self._get_untagged_response('READ-ONLY', leave=True) and not readonly:
             if __debug__: self._dump_ur(1)
             self._deliver_exc(self.readonly, '%s is not writable' % mailbox, kw)
         typ, dat = self._untagged_response(typ, [None], 'EXISTS')
         return self._deliver_dat(typ, dat, kw)
+
+
+    def _sync_mailbox_modseq_state(self, condstore_requested=False):
+        """Refresh the CONDSTORE domain state from a just-completed SELECT/EXAMINE.
+
+        Reads the UIDVALIDITY and HIGHESTMODSEQ response codes. A MODSEQ is only
+        meaningful inside one (mailbox, UIDVALIDITY) domain, so when UIDVALIDITY
+        changes the cached HIGHESTMODSEQ - and any MODSEQ a caller remembered -
+        must be discarded rather than reused against the new domain."""
+
+        uidvalidity = None
+        uv = self._get_untagged_response('UIDVALIDITY', leave=True)
+        if uv:
+            try:
+                uidvalidity = int(bytes(uv[-1]).strip())
+            except (TypeError, ValueError):
+                uidvalidity = None
+
+        highestmodseq = None
+        hm = self._get_untagged_response('HIGHESTMODSEQ', leave=True)
+        if hm:
+            try:
+                highestmodseq = int(bytes(hm[-1]).strip())
+            except (TypeError, ValueError):
+                highestmodseq = None
+
+        if uidvalidity is not None and uidvalidity != self.uidvalidity:
+            # New UIDVALIDITY: the old MODSEQ namespace is gone.
+            self.highestmodseq = None
+
+        self.uidvalidity = uidvalidity
+        if highestmodseq is not None:
+            self.highestmodseq = highestmodseq
+
+        self.condstore_enabled = (
+            condstore_requested
+            or self.condstore_supported()
+            or highestmodseq is not None
+        )
+        return self.uidvalidity, self.highestmodseq
+
+
+    def condstore_supported(self):
+        """Return True if the server advertises RFC 7162 CONDSTORE or QRESYNC.
+
+        A False result means conditional (atomic compare-and-swap) STORE updates
+        cannot be guaranteed; callers must not emulate them with a separate
+        FETCH followed by an unconditional STORE."""
+
+        caps = getattr(self, 'capabilities', ())
+        capset = {str(c).upper() for c in caps}
+        return CONDSTORE_CAP in capset or QRESYNC_CAP in capset
 
 
     def setacl(self, mailbox, who, what, **kw):
@@ -1195,14 +1278,27 @@ class IMAP4(object):
         return self._simple_command(name, mailbox, names, **kw)
 
 
-    def store(self, message_set, command, flags, **kw):
-        """(typ, [data]) = store(message_set, command, flags)
-        Alters flag dispositions for messages in mailbox."""
+    def store(self, message_set, command, flags, unchanged_since=None, **kw):
+        """(typ, [data]) = store(message_set, command, flags, unchanged_since=None)
+        Alters flag dispositions for messages in mailbox.
+
+        If 'unchanged_since' is a MODSEQ (int), an RFC 7162 UNCHANGEDSINCE marker
+        is sent so the server applies the change only to messages whose MODSEQ has
+        not advanced past that value - an atomic compare-and-swap. Messages that
+        changed since the given MODSEQ are skipped and returned with a MODIFIED
+        response code instead of having their flags overwritten. The MODSEQ must
+        belong to the current mailbox UIDVALIDITY domain."""
 
         if (flags[0],flags[-1]) != ('(',')'):
             flags = '(%s)' % flags  # Avoid quoting the flags
+        # RFC 7162 ABNF places the UNCHANGEDSINCE marker between the message set
+        # and the flag operation: STORE set (UNCHANGEDSINCE modseq) +/-FLAGS (flags)
+        store_args = [message_set]
+        if unchanged_since is not None:
+            store_args.append('(%s %s)' % (UNCHANGEDSINCE, int(unchanged_since)))
+        store_args += [command, flags]
         kw['untagged_response'] = 'FETCH'
-        return self._simple_command('STORE', message_set, command, flags, **kw)
+        return self._simple_command('STORE', *store_args, **kw)
 
 
     def subscribe(self, mailbox, **kw):
