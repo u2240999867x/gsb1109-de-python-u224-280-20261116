@@ -6,6 +6,7 @@ Analysis in Pyomo
 
    alternative_solutions
    community
+   data_conflict_diagnosis
    doe/doe
    iis
    incidence/index
