@@ -87,6 +87,12 @@ _import_packages()
 # Expose the symbols from pyomo.core
 #
 from pyomo.dataportal import DataPortal
+from pyomo.dataportal.coverage import (
+    CoverageDeclaration,
+    Observation,
+    ObservationDomain,
+    ObservationKind,
+)
 import pyomo.core.kernel
 from pyomo.common.collections import ComponentMap
 import pyomo.core.base.indexed_component

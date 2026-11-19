@@ -10,4 +10,13 @@
 from pyomo.dataportal import parse_datacmds
 from pyomo.dataportal.TableData import TableData
 from pyomo.dataportal.DataPortal import DataPortal
+from pyomo.dataportal.coverage import (
+    CoverageDeclaration,
+    CoverageResult,
+    FeasibilityReport,
+    MigrationResult,
+    Observation,
+    ObservationDomain,
+    ObservationKind,
+)
 from pyomo.dataportal.factory import DataManagerFactory, UnknownDataManager

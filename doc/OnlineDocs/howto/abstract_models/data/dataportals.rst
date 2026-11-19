@@ -528,3 +528,41 @@ namespaces:
     :language: python
 
 
+
+Observation Coverage
+--------------------
+
+Sparse data are often accompanied by a compact claim about which
+indices the supplier covered.  That claim may be an index range, a
+small collection of explicit index combinations, or a mixture of the two
+with exclusions.  The
+:class:`~pyomo.dataportal.coverage.CoverageDeclaration` class evaluates
+such a claim against the *actual* Pyomo index set, so members that no
+longer exist are reported rather than assumed:
+
+.. literalinclude:: /src/dataportal/dataportal_coverage_declaration.spy
+    :language: python
+
+The members seen in each dimension are never crossed to form a
+Cartesian product.  The
+:class:`~pyomo.dataportal.coverage.ObservationDomain` class combines
+declarations for several parameters and reports the common domain that
+can be used for a particular calculation, distinguishing an original
+value from a value supplied by the model default:
+
+.. literalinclude:: /src/dataportal/dataportal_coverage_domain.spy
+    :language: python
+
+A missing observation is reported as
+:attr:`~pyomo.dataportal.coverage.ObservationKind.MISSING`; it is never
+replaced with zero:
+
+.. literalinclude:: /src/dataportal/dataportal_coverage_missing.spy
+    :language: python
+
+When an index set is revised, a declaration can be migrated along an
+explicit stable identity, and members added by the revision are not
+covered by the old declaration:
+
+.. literalinclude:: /src/dataportal/dataportal_coverage_migration.spy
+    :language: python

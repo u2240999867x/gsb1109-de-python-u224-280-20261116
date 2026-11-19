@@ -438,3 +438,23 @@ class DataPortal:
                 self._data[name] = c.data()
             except:
                 self._data[name] = c.extract_values()
+
+    def observation_domain(self, index_set, params=None):
+        """Construct an :class:`ObservationDomain` for this data portal.
+
+        This is a convenience shortcut for creating an
+        :class:`~pyomo.dataportal.coverage.ObservationDomain` that is
+        evaluated against the actual Pyomo index set (rather than the
+        symbol names stored in this portal).
+
+        Args:
+            index_set (Set): The real Pyomo index set.
+            params (iterable of Param): Parameters that must provide
+                observations for a calculation.
+
+        Returns:
+            ObservationDomain
+        """
+        from pyomo.dataportal.coverage import ObservationDomain
+
+        return ObservationDomain(index_set, params=params)
