@@ -116,6 +116,18 @@ def is_repeating(sequence, period):
     return True
 
 
+def _is_strictly_monotonic(sequence):
+    '''Returns true if the sequence is strictly increasing or strictly
+    decreasing. Returns false if the elements cannot be compared.'''
+    try:
+        diffs = [sequence[idx + 1] - sequence[idx]
+                 for idx in range(len(sequence) - 1)]
+    except TypeError:
+        return False
+    return (all(diff > 0 for diff in diffs) or
+            all(diff < 0 for diff in diffs))
+
+
 class InvalidExtensionError(Exception):
     def __init__(self, msg):
         '''Exception denoting than a DcmMetaExtension is invalid.'''
@@ -739,6 +751,254 @@ class DcmMetaExtension(Nifti1Extension):
             else:
                 result._copy_sample(self, src_class, 'vector', idx)
         return result
+
+    def take(self, selection):
+        '''Get a DcmMetaExtension corresponding to an explicit selection of
+        slices, time points, and/or vector components.
+
+        Unlike `get_subset`, the selection for each dimension is an explicit
+        sequence of source indices: it may be non-contiguous, out of order,
+        and may repeat the same source sample (each repetition gets an
+        independent output position). Values from source samples that are not
+        selected are never copied into the result.
+
+        Each meta data key keeps its source classification whenever that
+        classification still precisely describes the selected values. If the
+        dimension structure of the result forces a change (e.g. a dimension
+        collapses to a single selected sample), the key is reclassified into
+        the classification with the same per-position meaning; keys are never
+        stuffed into a classification that merely happens to have a matching
+        number of values. If a change is made it is recorded in the returned
+        report.
+
+        Parameters
+        ----------
+        selection : dict
+            Maps a dimension to the sequence of source indices to select.
+            Dimensions can be given as integers or as the strings 'slice'
+            (the slice dimension), 'time' (dimension 3), and 'vector'
+            (dimension 4). Dimensions not present in the dict are kept in
+            full.
+
+        Returns
+        -------
+        result : DcmMetaExtension
+            A new extension describing the selected subset. The source
+            extension is not modified.
+
+        report : dict
+            Provenance information for the selection: the normalized index
+            tables, any meta data keys whose classification changed (with the
+            source and destination classifications), and any dimension
+            ordering attributes (e.g. 'dcmmeta_time_dim') that were dropped
+            because they no longer order the dimension after the selection.
+        '''
+        shape = self.shape
+        slice_dim = self.slice_dim
+        n_time = shape[3] if len(shape) > 3 else 1
+        n_vec = shape[4] if len(shape) > 4 else 1
+
+        #Normalize the selection into {dim: [source indices]}
+        dim_indices = {}
+        for dim_key, indices in iteritems(selection):
+            if dim_key == 'slice':
+                if slice_dim is None:
+                    raise ValueError("Cannot select 'slice', the slice "
+                                     "dimension is not defined")
+                dim = slice_dim
+            elif dim_key == 'time':
+                dim = 3
+            elif dim_key == 'vector':
+                dim = 4
+            else:
+                dim = int(dim_key)
+            if dim in dim_indices:
+                raise ValueError("Multiple selections given for dimension "
+                                 "%d" % dim)
+            indices = [int(idx) for idx in indices]
+            if len(indices) == 0:
+                raise ValueError("Empty selection for dimension %d" % dim)
+            dim_indices[dim] = indices
+        for dim, indices in iteritems(dim_indices):
+            if dim < 0 or dim > 4:
+                raise ValueError("Invalid dimension: %d" % dim)
+            if dim < 3 and dim != slice_dim:
+                raise ValueError("Can only select along the slice dimension, "
+                                 "not spatial dimension %d" % dim)
+            if dim >= len(shape):
+                raise ValueError("Dimension %d does not exist in the meta "
+                                 "data shape" % dim)
+            for idx in indices:
+                if not 0 <= idx < shape[dim]:
+                    raise ValueError("Index %d is out of bounds for dimension "
+                                     "%d with size %d" % (idx, dim, shape[dim]))
+
+        #Index tables mapping output position -> source index for each dim
+        n_slices = self.n_slices
+        if slice_dim is None:
+            slc_table = None
+        else:
+            slc_table = dim_indices.get(slice_dim, list(range(n_slices)))
+        time_table = dim_indices.get(3, list(range(n_time)))
+        vec_table = dim_indices.get(4, list(range(n_vec)))
+
+        #Compute the shape of the result, trimming singular trailing dims
+        new_shape = list(shape)
+        if slice_dim is not None:
+            new_shape[slice_dim] = len(slc_table)
+        if len(shape) > 3:
+            new_shape[3] = len(time_table)
+        if len(shape) > 4:
+            new_shape[4] = len(vec_table)
+        while len(new_shape) > 3 and new_shape[-1] == 1:
+            new_shape = new_shape[:-1]
+        new_shape = tuple(new_shape)
+
+        result = self.make_empty(new_shape,
+                                 self.affine,
+                                 self.reorient_transform,
+                                 slice_dim,
+                                 None,
+                                 None,
+                                 self.extract_version,
+                                )
+        new_valid = result.valid_classes
+        report = {'selection' : dict((dim, list(indices))
+                                     for dim, indices
+                                     in iteritems(dim_indices)),
+                  'shape' : new_shape,
+                  'reclassified' : {},
+                  'dropped_dim_order' : {},
+                 }
+
+        #Gather the values for each key, reclassifying only when the new
+        #dimension structure does not support the source classification
+        for src_class in self.valid_classes:
+            for key, vals in iteritems(self.get_class_dict(src_class)):
+                dest_class, new_vals = self._take_key(
+                    src_class,
+                    vals,
+                    slc_table,
+                    time_table,
+                    vec_table,
+                    new_valid,
+                    len(new_shape),
+                )
+                result.get_class_dict(dest_class)[key] = new_vals
+                if dest_class != src_class:
+                    report['reclassified'][key] = (src_class, dest_class)
+
+        #The attributes used to order the time/vector dimensions only remain
+        #meaningful if their selected values still (strictly) order the
+        #dimension, otherwise they must be dropped
+        for attr, dim, table in (('time_dim', 3, time_table),
+                                 ('vector_dim', 4, vec_table)):
+            order_key = getattr(self, attr)
+            if order_key is None:
+                continue
+            dim_active = ((dim == 3 and ('time', 'samples') in new_valid) or
+                          (dim == 4 and ('vector', 'samples') in new_valid))
+            if not dim_active:
+                reason = 'the dimension is no longer present'
+            else:
+                ordinates = result._get_dim_ordinates(order_key, dim, table)
+                if ordinates is None:
+                    reason = ('the attribute is no longer classified per '
+                              'sample')
+                elif not _is_strictly_monotonic(ordinates):
+                    reason = ('the selected values no longer order the '
+                              'dimension')
+                else:
+                    reason = None
+            if reason is None:
+                setattr(result, attr, order_key)
+            else:
+                report['dropped_dim_order'][attr] = reason
+
+        result.check_valid()
+        return result, report
+
+    def _take_key(self, src_class, vals, slc_table, time_table, vec_table,
+                  new_valid, new_n_dims):
+        '''Gather the values for a single meta data key according to the
+        index tables, returning the (classification, values) pair to use in
+        the result. The source classification is kept whenever it is valid
+        for the result; otherwise the values are placed in the classification
+        with the same per-position meaning.'''
+        shape = self.shape
+        n_slices = self.n_slices
+        n_time = shape[3] if len(shape) > 3 else 1
+        if src_class == ('global', 'const'):
+            return src_class, deepcopy(vals)
+        if src_class == ('global', 'slices'):
+            new_vals = [deepcopy(vals[(v * n_time + t) * n_slices + s])
+                        for v in vec_table
+                        for t in time_table
+                        for s in slc_table]
+            return src_class, new_vals
+        if src_class == ('time', 'samples'):
+            if src_class in new_valid:
+                if new_n_dims == 5:
+                    new_vals = [deepcopy(vals[v * n_time + t])
+                                for v in vec_table
+                                for t in time_table]
+                else:
+                    vec0 = vec_table[0]
+                    new_vals = [deepcopy(vals[vec0 * n_time + t])
+                                for t in time_table]
+                return src_class, new_vals
+            if ('vector', 'samples') in new_valid:
+                time0 = time_table[0]
+                return (('vector', 'samples'),
+                        [deepcopy(vals[v * n_time + time0])
+                         for v in vec_table])
+            return (('global', 'const'),
+                    deepcopy(vals[vec_table[0] * n_time + time_table[0]]))
+        if src_class == ('time', 'slices'):
+            new_vals = [deepcopy(vals[s]) for s in slc_table]
+            if src_class in new_valid:
+                return src_class, new_vals
+            if ('vector', 'slices') in new_valid:
+                return ('vector', 'slices'), new_vals
+            return ('global', 'slices'), new_vals
+        if src_class == ('vector', 'samples'):
+            if src_class in new_valid:
+                return src_class, [deepcopy(vals[v]) for v in vec_table]
+            return ('global', 'const'), deepcopy(vals[vec_table[0]])
+        #The only remaining classification is ('vector', 'slices')
+        new_vals = [deepcopy(vals[t * n_slices + s])
+                    for t in time_table
+                    for s in slc_table]
+        if src_class in new_valid:
+            return src_class, new_vals
+        return ('global', 'slices'), new_vals
+
+    def _get_dim_ordinates(self, key, dim, table):
+        '''Get the selected ordinates of the meta data `key` along dimension
+        `dim` (three for time, four for vector), or None if the current
+        classification of `key` cannot provide per-sample ordinates for that
+        dimension.'''
+        vals, classes = self.get_values_and_class(key)
+        if classes is None:
+            return None
+        n_slices = self.n_slices
+        n_time = self.shape[3] if len(self.shape) > 3 else 1
+        if dim == 3:
+            if classes == ('time', 'samples'):
+                if len(self.shape) == 5:
+                    return vals[:len(table)]
+                return list(vals)
+            if classes == ('global', 'slices') and n_slices is not None:
+                return [vals[t * n_slices] for t in range(len(table))]
+            return None
+        if classes == ('vector', 'samples'):
+            return list(vals)
+        if classes == ('time', 'samples') and len(self.shape) == 5:
+            return [vals[v * n_time] for v in range(len(table))]
+        if (classes == ('global', 'slices') and len(self.shape) == 5 and
+                n_slices is not None):
+            return [vals[v * n_time * n_slices] for v in range(len(table))]
+        return None
 
     def to_json(self):
         '''Return the extension encoded as a JSON string.'''

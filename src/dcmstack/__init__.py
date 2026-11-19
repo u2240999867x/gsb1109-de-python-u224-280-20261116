@@ -5,3 +5,4 @@ data stored in a header extension, and work with these extended Nifti files.
 """
 from .info import __version__
 from .dcmstack import *
+from .select import *

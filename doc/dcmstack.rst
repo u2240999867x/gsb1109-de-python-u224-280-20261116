@@ -22,6 +22,13 @@ dcmstack Package
     :members:
     :show-inheritance:
 
+:mod:`select` Module
+--------------------
+
+.. automodule:: dcmstack.select
+    :members:
+    :show-inheritance:
+
 :mod:`extract` Module
 ---------------------
 
