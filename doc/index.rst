@@ -48,6 +48,13 @@ A complete list of all available commands:
 
 * :doc:`Commands <topics/commands>`
 
+Data Backend
+============
+
+Persisting the music library and play queue in SQLite:
+
+* :doc:`Data backend <topics/backend>`
+
 Changelog
 =========
 
