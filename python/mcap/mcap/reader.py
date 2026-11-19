@@ -44,6 +44,13 @@ from .stream_reader import (
     read_magic,
 )
 from .summary import Summary
+from .time_window import (
+    MessageOrder,
+    MessageQuery,
+    TimeRange,
+    TimeWindow,
+    coerce_query,
+)
 
 
 def _resolve_time_range(
@@ -104,6 +111,145 @@ def _get_record_size(record: McapRecord):
 FOOTER_SIZE = _get_record_size(Footer(0, 0, 0))
 
 
+def _resolve_publish_bounds(
+    starting_at: Optional[int],
+    starting_after: Optional[int],
+    ending_at: Optional[int],
+    ending_before: Optional[int],
+) -> Tuple[Optional[int], Optional[int]]:
+    """Resolve publish-time bounds to the half-open pair ``[start, end)``.
+
+    The publish clock is kept as its original integer nanoseconds. Bounds are
+    validated by :class:`~mcap.time_window.TimeRange`, which normalizes integral
+    types to exact ints and rejects floats and bools.
+    """
+    if sum(bound is not None for bound in (starting_at, starting_after)) > 1:
+        raise ValueError(
+            "provide at most one of publish_starting_at and"
+            " publish_starting_after"
+        )
+    if sum(bound is not None for bound in (ending_at, ending_before)) > 1:
+        raise ValueError(
+            "provide at most one of publish_ending_at and publish_ending_before"
+        )
+    if starting_at is not None:
+        lower = TimeRange.starting_at(starting_at)
+    elif starting_after is not None:
+        lower = TimeRange.starting_after(starting_after)
+    else:
+        lower = TimeRange()
+    if ending_before is not None:
+        upper = TimeRange.ending_before(ending_before)
+    elif ending_at is not None:
+        upper = TimeRange.ending_at(ending_at)
+    else:
+        upper = TimeRange()
+    try:
+        combined = TimeRange(lower.start, upper.end)
+    except ValueError as error:
+        raise ValueError("publish end time cannot come before start time") from error
+    return combined.start, combined.end
+
+
+def _resolve_query(
+    query: Optional[Union[TimeRange, TimeWindow, MessageQuery]],
+    start: Optional[int],
+    end: Optional[int],
+    publish_start: Optional[int] = None,
+    publish_end: Optional[int] = None,
+) -> MessageQuery:
+    """Fold a caller's window and legacy bounds into one normalized query.
+
+    A bare ``TimeRange`` passed as ``query`` constrains ``log_time``, matching
+    the historical meaning of the bound arguments. Explicit ``starting_*`` /
+    ``ending_*`` bounds are an additional log-time constraint, so they
+    intersect with any supplied query rather than replacing it.
+    """
+    resolved = coerce_query(query)
+    if start is not None or end is not None:
+        resolved = resolved & TimeWindow(log_time=TimeRange(start, end))
+    if publish_start is not None or publish_end is not None:
+        resolved = resolved & TimeWindow(
+            publish_time=TimeRange(publish_start, publish_end)
+        )
+    return resolved
+
+
+def _resolve_order(
+    log_time_order: bool,
+    reverse: bool,
+    order: Optional[Union[MessageOrder, str]],
+) -> Tuple[MessageOrder, bool]:
+    """Resolve the historical flags and the explicit ``order`` argument.
+
+    ``order`` wins when given. Otherwise ``log_time_order=False`` selects file
+    order and the default selects log-time order.
+    """
+    if order is None:
+        resolved = MessageOrder.LOG_TIME if log_time_order else MessageOrder.FILE_ORDER
+    else:
+        resolved = MessageOrder.coerce(order)
+    if reverse and resolved is MessageOrder.FILE_ORDER:
+        raise ValueError("reverse is only valid when ordering by a timestamp")
+    return resolved, reverse
+
+
+def _query_may_match_chunk(
+    query: MessageQuery, message_start_time: int, message_end_time: int
+) -> bool:
+    """Whether a chunk index's proven time span leaves any window possible.
+
+    A chunk index proves only the ``log_time`` span of the messages it indexes.
+    ``publish_time`` is independent of it and may run backwards, so a window
+    with an unbounded log-time condition (for example one that constrains only
+    ``publish_time``) intersects every span and keeps every chunk a candidate.
+    The log-time index therefore never prunes a message that a publish-time
+    condition alone selects.
+    """
+    for window in query.windows:
+        if window.is_empty:
+            continue
+        if window.log_time.intersects(message_start_time, message_end_time):
+            return True
+    return False
+
+
+def _chunks_matching_query(
+    summary: Summary,
+    topics: Optional[Iterable[str]],
+    query: MessageQuery,
+) -> List[ChunkIndex]:
+    """Return candidate ChunkIndex records for a topic and time-window query.
+
+    The result is a list of distinct chunk indexes, so a chunk shared by several
+    windows of a disjunctive query is read once.
+    """
+    out: List[ChunkIndex] = []
+    for chunk_index in summary.chunk_indexes:
+        if not _query_may_match_chunk(
+            query,
+            chunk_index.message_start_time,
+            chunk_index.message_end_time,
+        ):
+            continue
+        if topics is None:
+            out.append(chunk_index)
+            continue
+        if len(chunk_index.message_index_offsets) == 0:
+            # Without message indexes, topic membership is unknown until the chunk is scanned.
+            out.append(chunk_index)
+            continue
+        for channel_id in chunk_index.message_index_offsets.keys():
+            channel = summary.channels.get(channel_id)
+            if channel is not None and channel.topic in topics:
+                out.append(chunk_index)
+                break
+    # Return chunks in file order, so a sequential scan and an indexed scan visit
+    # their messages in the same order before any timestamp sort is applied.
+    out.sort(key=lambda chunk_index: chunk_index.chunk_start_offset)
+    return out
+
+
 def _read_summary_from_stream_reader(stream_reader: StreamReader) -> Optional[Summary]:
     """read summary records from an MCAP stream reader, collecting them into a Summary."""
     summary = Summary()
@@ -127,42 +273,6 @@ def _read_summary_from_stream_reader(stream_reader: StreamReader) -> Optional[Su
             else:
                 return summary
     return summary
-
-
-def _chunks_matching_topics(
-    summary: Summary,
-    topics: Optional[Iterable[str]],
-    starting_at: Optional[float],
-    ending_before: Optional[float],
-) -> List[ChunkIndex]:
-    """returns candidate ChunkIndex records that may include messages of the given topics.
-
-    :param summary: the summary of this MCAP.
-    :param topics: topics to match. If None, all chunk indices in the summary are returned.
-    :param starting_at: if not None, messages from before this unix timestamp are not included.
-    :param ending_before: if not None, messages at or after this unix timestamp are not included.
-    """
-    out: List[ChunkIndex] = []
-    for chunk_index in summary.chunk_indexes:
-        if starting_at is not None and chunk_index.message_end_time < starting_at:
-            continue
-        if (
-            ending_before is not None
-            and chunk_index.message_start_time >= ending_before
-        ):
-            continue
-        if topics is None:
-            out.append(chunk_index)
-            continue
-        if len(chunk_index.message_index_offsets) == 0:
-            # Without message indexes, topic membership is unknown until the chunk is scanned.
-            out.append(chunk_index)
-            continue
-        for channel_id in chunk_index.message_index_offsets.keys():
-            if summary.channels[channel_id].topic in topics:
-                out.append(chunk_index)
-                break
-    return out
 
 
 class DecodedMessageTuple(NamedTuple):
@@ -203,6 +313,12 @@ class McapReader(ABC):
         starting_after: Optional[int] = None,
         ending_at: Optional[int] = None,
         ending_before: Optional[int] = None,
+        query: Optional[Union[TimeRange, TimeWindow, MessageQuery]] = None,
+        publish_starting_at: Optional[int] = None,
+        publish_starting_after: Optional[int] = None,
+        publish_ending_at: Optional[int] = None,
+        publish_ending_before: Optional[int] = None,
+        order: Optional[Union[MessageOrder, str]] = None,
     ) -> Iterator[Tuple[Optional[Schema], Channel, Message]]:
         """iterates through the messages in an MCAP.
 
@@ -213,8 +329,7 @@ class McapReader(ABC):
             ``ending_at`` instead.
         :param log_time_order: if True, messages will be yielded in ascending log time order. If
             False, messages will be yielded in the order they appear in the MCAP file.
-        :param reverse: if both ``log_time_order`` and ``reverse`` are True, messages will be
-            yielded in descending log time order.
+        :param reverse: if True, the selected order is reversed.
         :param starting_at: an integer nanosecond timestamp. if provided, messages logged before
             this timestamp are not included (inclusive lower bound).
         :param starting_after: an integer nanosecond timestamp. if provided, messages logged at or
@@ -223,11 +338,35 @@ class McapReader(ABC):
             timestamp are not included (inclusive upper bound).
         :param ending_before: an integer nanosecond timestamp. if provided, messages logged at or
             after this timestamp are not included (exclusive upper bound).
+        :param query: a composable :class:`~mcap.time_window.TimeWindow` or
+            :class:`~mcap.time_window.MessageQuery` over ``log_time`` and
+            ``publish_time``. A bare :class:`~mcap.time_window.TimeRange` constrains
+            ``log_time``. Any explicit bounds intersect with it.
+        :param publish_starting_at: inclusive lower bound on ``publish_time``.
+        :param publish_starting_after: exclusive lower bound on ``publish_time``.
+        :param publish_ending_at: inclusive upper bound on ``publish_time``.
+        :param publish_ending_before: exclusive upper bound on ``publish_time``.
+        :param order: the output ordering criterion: ``"log_time"`` (default) or
+            ``"file_order"``. Takes precedence over ``log_time_order``. The publish
+            clock has no ordering criterion; it is a query condition only.
 
-        At most one lower bound (``start_time``, ``starting_at``, ``starting_after``) and one upper
-        bound (``end_time``, ``ending_at``, ``ending_before``) may be provided. The bounds
-        resolve to a half-open range ``[start, end)``. ``start > end`` raises ``ValueError``;
-        ``start == end`` is a valid empty range.
+        Every bound is an integer count of nanoseconds, kept as given. At most one
+        lower bound per clock (``start_time``, ``starting_at``, ``starting_after``;
+        or the ``publish_starting_*`` pair) and one upper bound per clock may be
+        provided. The log-time bounds resolve to a half-open range ``[start, end)``;
+        ``start > end`` raises ``ValueError`` and ``start == end`` is a valid empty
+        range.
+
+        Messages that tie on ``log_time`` are yielded in file order: by chunk start
+        offset, then by position within the chunk. The order is total, so the same
+        query always yields the same sequence, an indexed read and a sequential read
+        agree, and ``reverse=True`` yields exactly the reverse.
+
+        A chunk index only proves the ``log_time`` span of its messages. A query
+        that constrains ``publish_time`` but leaves ``log_time`` unbounded therefore
+        keeps every chunk a candidate, because the publish clock may run backwards.
+        The chunk is then read and its messages are filtered on their actual
+        ``publish_time``; the log-time index never prunes a publish-time match.
         """
         raise NotImplementedError()
 
@@ -243,6 +382,12 @@ class McapReader(ABC):
         starting_after: Optional[int] = None,
         ending_at: Optional[int] = None,
         ending_before: Optional[int] = None,
+        query: Optional[Union[TimeRange, TimeWindow, MessageQuery]] = None,
+        publish_starting_at: Optional[int] = None,
+        publish_starting_after: Optional[int] = None,
+        publish_ending_at: Optional[int] = None,
+        publish_ending_before: Optional[int] = None,
+        order: Optional[Union[MessageOrder, str]] = None,
     ) -> Iterator[DecodedMessageTuple]:
         """iterates through messages in an MCAP, decoding their contents.
 
@@ -253,12 +398,22 @@ class McapReader(ABC):
         starting_at, ending_before = _resolve_time_range(
             start_time, end_time, starting_at, starting_after, ending_at, ending_before
         )
+        publish_starting_at, publish_ending_before = _resolve_publish_bounds(
+            publish_starting_at,
+            publish_starting_after,
+            publish_ending_at,
+            publish_ending_before,
+        )
         message_iterator = self.iter_messages(
             topics,
             log_time_order=log_time_order,
             reverse=reverse,
             starting_at=starting_at,
             ending_before=ending_before,
+            query=query,
+            publish_starting_at=publish_starting_at,
+            publish_ending_before=publish_ending_before,
+            order=order,
         )
 
         def decoded_message(
@@ -363,6 +518,12 @@ class SeekingReader(McapReader):
         starting_after: Optional[int] = None,
         ending_at: Optional[int] = None,
         ending_before: Optional[int] = None,
+        query: Optional[Union[TimeRange, TimeWindow, MessageQuery]] = None,
+        publish_starting_at: Optional[int] = None,
+        publish_starting_after: Optional[int] = None,
+        publish_ending_at: Optional[int] = None,
+        publish_ending_before: Optional[int] = None,
+        order: Optional[Union[MessageOrder, str]] = None,
     ) -> Iterator[Tuple[Optional[Schema], Channel, Message]]:
         """iterates through the messages in an MCAP.
 
@@ -371,8 +532,22 @@ class SeekingReader(McapReader):
         starting_at, ending_before = _resolve_time_range(
             start_time, end_time, starting_at, starting_after, ending_at, ending_before
         )
+        publish_starting_at, publish_ending_before = _resolve_publish_bounds(
+            publish_starting_at,
+            publish_starting_after,
+            publish_ending_at,
+            publish_ending_before,
+        )
         if isinstance(topics, str):
             topics = [topics]
+        resolved_query = _resolve_query(
+            query,
+            starting_at,
+            ending_before,
+            publish_starting_at,
+            publish_ending_before,
+        )
+        resolved_order, reverse = _resolve_order(log_time_order, reverse, order)
         summary = self.get_summary()
         if summary is None or len(summary.chunk_indexes) == 0:
             # No chunk indices available, so there is no index to search for messages.
@@ -380,22 +555,26 @@ class SeekingReader(McapReader):
             self._stream.seek(0, io.SEEK_SET)
             yield from NonSeekingReader(self._stream).iter_messages(
                 topics,
-                log_time_order=log_time_order,
-                starting_at=starting_at,
-                ending_before=ending_before,
+                query=resolved_query,
+                order=resolved_order,
+                reverse=reverse,
             )
             return
 
-        chunk_indexes = _chunks_matching_topics(
-            summary, topics, starting_at, ending_before
-        )
-        if not log_time_order:
-            if reverse:
-                raise ValueError("reverse is only valid with log_time_order=True")
+        if resolved_query.is_empty:
+            # No message can satisfy the query; skip reading altogether.
+            return
+
+        chunk_indexes = _chunks_matching_query(summary, topics, resolved_query)
+        if resolved_order is MessageOrder.FILE_ORDER:
             # `held` keeps the previous chunk alive, see _read_chunk_messages.
             for chunk_index in chunk_indexes:
                 items, held = self._read_chunk_messages(
-                    chunk_index, summary, topics, starting_at, ending_before, False
+                    chunk_index,
+                    summary,
+                    topics,
+                    resolved_query,
+                    False,
                 )
                 for keyed in items:
                     yield keyed[3]
@@ -406,7 +585,7 @@ class SeekingReader(McapReader):
         # in time. The messages at the head of the queue that sort before everything
         # else in it come back out as one list, which is a whole run at a time for a
         # file whose chunks do not overlap.
-        queue = LogTimeOrderQueue(reverse)
+        queue = LogTimeOrderQueue(reverse=reverse)
         for chunk_index in chunk_indexes:
             queue.push(chunk_index)
         # `held` keeps the previous chunk alive, see _read_chunk_messages.
@@ -419,7 +598,11 @@ class SeekingReader(McapReader):
             item = queue.pop()
             if isinstance(item, ChunkIndex):
                 items, held = self._read_chunk_messages(
-                    item, summary, topics, starting_at, ending_before, reverse
+                    item,
+                    summary,
+                    topics,
+                    resolved_query,
+                    reverse,
                 )
                 queue.push_chunk_messages(items)
             else:
@@ -430,13 +613,15 @@ class SeekingReader(McapReader):
         chunk_index: ChunkIndex,
         summary: Summary,
         topics: Optional[Iterable[str]],
-        starting_at: Optional[int],
-        ending_before: Optional[int],
+        query: MessageQuery,
         reverse: bool,
     ) -> Tuple[List[KeyedMessage], bytes]:
         """Reads one chunk and returns its matching messages in file order, each under a
-        sort key of (log time, chunk offset, record index), negated when reversed, so that
-        a plain tuple sort orders them the way ``iter_messages`` promises.
+        sort key of (log time, chunk offset, record index), negated when reversed, so
+        that a plain tuple sort orders them the way ``iter_messages`` promises.
+
+        The chunk offset and record index make the key total, so messages that share a
+        timestamp keep file order and appear stably.
 
         The chunk's buffer is returned too so the caller can keep it alive until the
         next chunk is read. Freeing it before the next buffer is allocated let glibc's
@@ -458,10 +643,7 @@ class SeekingReader(McapReader):
         for index, record in enumerate(records):
             if not isinstance(record, Message):
                 continue
-            log_time = record.log_time
-            if starting_at is not None and log_time < starting_at:
-                continue
-            if ending_before is not None and log_time >= ending_before:
+            if not query.includes(record):
                 continue
             channel_id = record.channel_id
             pair = resolved.get(channel_id)
@@ -477,6 +659,7 @@ class SeekingReader(McapReader):
                 pair = resolved[channel_id] = (schema, channel)
             elif pair is False:
                 continue
+            log_time = record.log_time
             if reverse:
                 append((-log_time, chunk_offset, -index, (pair[0], pair[1], record)))
             else:
@@ -631,38 +814,62 @@ class NonSeekingReader(McapReader):
         starting_after: Optional[int] = None,
         ending_at: Optional[int] = None,
         ending_before: Optional[int] = None,
+        query: Optional[Union[TimeRange, TimeWindow, MessageQuery]] = None,
+        publish_starting_at: Optional[int] = None,
+        publish_starting_after: Optional[int] = None,
+        publish_ending_at: Optional[int] = None,
+        publish_ending_before: Optional[int] = None,
+        order: Optional[Union[MessageOrder, str]] = None,
     ) -> Iterator[Tuple[Optional[Schema], Channel, Message]]:
         """Iterates through the messages in an MCAP.
 
         See :py:meth:`McapReader.iter_messages` for a description of the arguments.
 
         .. warning::
-            setting log_time_order to True on a non-seekable stream will cause the entire content
-            of the MCAP to be loaded into memory.
+            ordering by log time on a non-seekable stream will cause the entire
+            content of the MCAP to be loaded into memory.
         """
         starting_at, ending_before = _resolve_time_range(
             start_time, end_time, starting_at, starting_after, ending_at, ending_before
         )
+        publish_starting_at, publish_ending_before = _resolve_publish_bounds(
+            publish_starting_at,
+            publish_starting_after,
+            publish_ending_at,
+            publish_ending_before,
+        )
         if isinstance(topics, str):
             topics = [topics]
-        if not log_time_order:
-            yield from self._iter_messages_internal(topics, starting_at, ending_before)
-        else:
-            messages = list(
-                self._iter_messages_internal(topics, starting_at, ending_before)
-            )
-            messages.sort(key=lambda tup: tup[2].log_time, reverse=reverse)
-            yield from messages
+        resolved_query = _resolve_query(
+            query,
+            starting_at,
+            ending_before,
+            publish_starting_at,
+            publish_ending_before,
+        )
+        resolved_order, reverse = _resolve_order(log_time_order, reverse, order)
+        if resolved_order is MessageOrder.FILE_ORDER:
+            yield from self._iter_messages_internal(topics, resolved_query)
+            return
+
+        messages = list(self._iter_messages_internal(topics, resolved_query))
+        # Python's sort is stable, so messages that tie on log time keep the file
+        # order this reader scanned them in. Reversing the forward result, rather
+        # than sorting with reverse=True, makes reverse exactly symmetric.
+        messages.sort(key=lambda tup: tup[2].log_time)
+        if reverse:
+            messages.reverse()
+        yield from messages
 
     def _iter_messages_internal(
         self,
         topics: Optional[Iterable[str]] = None,
-        starting_at: Optional[int] = None,
-        ending_before: Optional[int] = None,
+        query: Optional[MessageQuery] = None,
     ) -> Iterator[Tuple[Optional[Schema], Channel, Message]]:
         self._check_spent()
         channels = self._channels
         schemas = self._schemas
+        effective_query = coerce_query(query)
         for record in self._stream_reader.records:
             if isinstance(record, Message):
                 channel = channels.get(record.channel_id)
@@ -672,9 +879,7 @@ class NonSeekingReader(McapReader):
                     )
                 if topics is not None and channel.topic not in topics:
                     continue
-                if starting_at is not None and record.log_time < starting_at:
-                    continue
-                if ending_before is not None and record.log_time >= ending_before:
+                if not effective_query.includes(record):
                     continue
                 if channel.schema_id == 0:
                     schema = None
