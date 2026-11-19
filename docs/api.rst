@@ -16,6 +16,16 @@ Decoding
 .. autofunction:: cbor2.load
 .. autoclass:: cbor2.CBORDecoder
 
+Measurement reconciliation
+--------------------------
+
+.. autofunction:: cbor2.measurements.reconcile
+.. autofunction:: cbor2.measurements.parse_records
+.. autoclass:: cbor2.measurements.SampleId
+.. autoclass:: cbor2.measurements.Anchor
+.. autoclass:: cbor2.measurements.AffineRelation
+.. autoclass:: cbor2.measurements.ReconciliationResult
+
 Types
 -----
 

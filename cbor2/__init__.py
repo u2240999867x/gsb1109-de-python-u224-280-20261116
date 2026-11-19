@@ -81,3 +81,34 @@ else:
 
     _init_cbor2()
     del _init_cbor2
+
+from .measurements import (  # noqa: E402
+    TAG_ABSOLUTE as TAG_ABSOLUTE,
+    TAG_AFFINE as TAG_AFFINE,
+    TAG_ANCHOR as TAG_ANCHOR,
+    TAG_RELATION as TAG_RELATION,
+    AbsoluteAnchor as AbsoluteAnchor,
+    AffineExpression as AffineExpression,
+    AffineRelation as AffineRelation,
+    Anchor as Anchor,
+    Component as Component,
+    Conflict as Conflict,
+    Evidence as Evidence,
+    InvalidRecord as InvalidRecord,
+    MeasurementFormatError as MeasurementFormatError,
+    ParsedRecords as ParsedRecords,
+    ReconciliationResult as ReconciliationResult,
+    Relation as Relation,
+    SampleId as SampleId,
+    UndeterminedRelation as UndeterminedRelation,
+    decode_measurements as decode_measurements,
+    exact_fraction as exact_fraction,
+    load_measurements as load_measurements,
+    measurement_tag_hook as measurement_tag_hook,
+    parse_records as parse_records,
+    reconcile as reconcile,
+    reconcile_cbor as reconcile_cbor,
+    reconcile_measurements as reconcile_measurements,
+    reconstruct as reconstruct,
+    resolve as resolve,
+)

@@ -12,5 +12,6 @@ Table of contents
 
    usage
    customizing
+   measurements
    api
    versionhistory
