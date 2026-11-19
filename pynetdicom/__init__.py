@@ -48,6 +48,19 @@ from pynetdicom._globals import (
 )
 from pynetdicom.ae import ApplicationEntity as AE
 from pynetdicom.association import Association
+from pynetdicom.recording import (
+    AssociationRecord,
+    ContextView,
+    Direction,
+    IssueCode,
+    MessageRecord,
+    MessageStatus,
+    Recording,
+    Role,
+    SOPClassContext,
+    inspect_recording,
+    read_recording,
+)
 from pynetdicom.presentation import (
     AllStoragePresentationContexts,
     ApplicationEventLoggingPresentationContexts,
@@ -119,16 +132,27 @@ __all__ = [
     "ProtocolApprovalPresentationContexts",
     "QueryRetrievePresentationContexts",
     "RTMachineVerificationPresentationContexts",
+    "Recording",
+    "Role",
     "RelevantPatientInformationPresentationContexts",
     "StorageCommitmentPresentationContexts",
     "StoragePresentationContexts",
+    "SOPClassContext",
     "SubstanceAdministrationPresentationContexts",
     "UnifiedProcedurePresentationContexts",
     "VerificationPresentationContexts",
     "__version__",
+    "AssociationRecord",
+    "ContextView",
+    "Direction",
+    "IssueCode",
+    "MessageRecord",
+    "MessageStatus",
     "build_context",
     "build_role",
     "debug_logger",
     "evt",
+    "inspect_recording",
+    "read_recording",
     "register_uid",
 ]

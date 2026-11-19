@@ -8,3 +8,11 @@ Fixes
 
 * Fixed the default logging handlers for N-ACTION treating *Action Type ID* as mandatory (:issue:`1027`)
 * Fixed being unable to resolve IPv4 address when using the hostname (:issue:`1033`, :pr:`1034`)
+
+Enhancements
+------------
+
+* Added :mod:`pynetdicom.recording` for auditing recorded associations offline.
+  The negotiated context view records the accepted SOP Class, transfer syntax
+  and roles for each association, and each DIMSE message is reported as
+  explainable, an encoding conflict or insufficient evidence.

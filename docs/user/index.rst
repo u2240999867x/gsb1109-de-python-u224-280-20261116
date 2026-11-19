@@ -52,6 +52,7 @@ User Guide
 
    association_requesting
    association_accepting
+   recording_audit
 
 .. toctree::
    :maxdepth: 1
