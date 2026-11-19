@@ -1,3 +1,13 @@
+Unreleased
+==========
+* Added: imap_tools.filter - two-stage email filtering.
+    Builds a sound server-side candidate IMAP query from an AND/OR/NOT condition tree and the announced
+    server capabilities (unknown capabilities never exclude a possible match; falls back to ALL), then
+    verifies candidates locally with three-valued logic. Materials (flags, envelope, body, attachment
+    metadata/payload) are fetched cheapest-first, reused from a per-message cache, and any fetch or
+    evaluation failure yields "inconclusive" instead of a false exclusion. Results are split into
+    matched / excluded / inconclusive, keeping the deciding fields or content ranges as evidence.
+
 1.16.0
 ======
 * Fixed: silent no-op behavior at BaseMailBox.<action> when using iterables. (#274)

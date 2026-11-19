@@ -103,3 +103,15 @@ class MailboxAppendError(UnexpectedCommandStatusError):
 
 class MailboxTaggedResponseError(UnexpectedCommandStatusError):
     pass
+
+
+class FilterError(ImapToolsError):
+    """Base error for the two-stage filtering logic"""
+
+
+class FilterConditionError(FilterError):
+    """Invalid filter condition construction or evaluation setup"""
+
+
+class MaterialFetchError(FilterError):
+    """A required material could not be fetched; the condition stays unknown"""
