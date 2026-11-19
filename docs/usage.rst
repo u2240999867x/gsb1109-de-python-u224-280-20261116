@@ -114,6 +114,87 @@ a :class:`CBORTag` object like so::
 
 This will be ignored on decode and the original data content will be returned.
 
+Row projections
+---------------
+
+Decoded CBOR messages often contain nested arrays that need to become rows.
+:class:`~cbor2.Projection` maps each output column to a path and expands the
+arrays on that path.  Paths share their common prefix, so two columns that both
+start with ``orders[]`` are correlated by order::
+
+    from cbor2 import Projection
+
+    value = {
+        "orders": [
+            {"id": 1, "items": [{"sku": "a"}, {"sku": "b"}]},
+            {"id": 2, "items": [{"sku": "c"}]},
+        ]
+    }
+
+    projection = Projection({
+        "order": "orders[].id",
+        "sku": "orders[].items[].sku",
+    })
+
+    plan = projection.plan(value)
+    assert plan.row_count == 3
+    assert plan.sources == {
+        "order": "orders[].id",
+        "sku": "orders[].items[].sku",
+    }
+
+    result = projection.project(value, max_rows=100)
+    print(result.rows)
+
+A path uses dots between mapping keys, ``[N]`` for an array index, ``[]`` (or
+``[*]``) to expand one array level, and ``[**]`` to expand nested arrays
+recursively.  A sequence of keys and indices can also be passed directly, which
+supports non-string keys.  Leading ``$`` is optional.
+
+The plan is exact.  :meth:`~cbor2.Projection.plan` reports the row count and,
+for each column, its canonical source path, the number of occurrences, and how
+many missing values, empty arrays and tags were resolved by policy.
+:meth:`~cbor2.Projection.project` computes the plan first and only then builds
+records.  If ``max_rows`` is given and the exact row count is larger, it raises
+:class:`~cbor2.ProjectionBudgetError` and returns no partial records.
+
+**Combining modes**
+
+``paired`` (the default) aligns divergent branches at the same path by index,
+like :func:`zip`.  A branch that does not expand is a scalar and is broadcast to
+every row of its sibling.  If two expanded branches have different occurrence
+counts, the missing policy decides what happens to the extra occurrences of the
+longer one.
+
+``cross`` forms the Cartesian product of divergent branches, with the
+rightmost branch varying fastest.  Shared prefixes are still evaluated once, so
+orders are not crossed with each other.
+
+**Policies**
+
+Each policy is set on the projection or overridden per column:
+
+- ``missing`` controls a path step that does not exist: ``null`` adds one
+  occurrence holding ``missing_value``, ``skip`` adds nothing, and ``error``
+  aborts the plan.
+- ``empty`` controls an empty array at an expansion point: ``zero`` adds no
+  occurrences, ``null`` adds one ``missing_value`` occurrence, and ``error``
+  aborts the plan.
+- ``tag`` controls a tag encountered before the end of a path: ``opaque`` keeps
+  the tag as one value, ``unwrap`` continues into ``tag.value``, ``zero`` drops
+  it, and ``error`` aborts the plan.  A ``tag_resolver`` callable may decode the
+  tag first; returning the tag itself means it could not be resolved.
+
+**Shared values and cycles**
+
+Shared values (CBOR tags 28 and 29) are counted by projection occurrence, not by
+object identity.  If the same object is referenced from two places, both
+references expand and both contribute rows; the projection never deduplicates
+rows by object id.  A cycle that a normal finite path merely passes through is
+not an error.  Only recursive expansion that actually follows a cycle forever
+raises :class:`~cbor2.ProjectionCycleError`, which names both the path where
+the cycle was followed and the earlier path where the same object was entered.
+
 Use Cases
 ---------
 

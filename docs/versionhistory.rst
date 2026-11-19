@@ -5,6 +5,11 @@ Version history
 
 This library adheres to `Semantic Versioning <http://semver.org/>`_.
 
+**UNRELEASED**
+
+- Added row-oriented projections with paired and cross expansion, exact plan
+  reporting and atomic row budgets
+
 **5.6.5** (2024-10-09)
 
 - Published binary wheels for Python 3.13

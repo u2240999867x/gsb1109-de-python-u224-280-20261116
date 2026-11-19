@@ -18,6 +18,28 @@ from ._types import CBORSimpleValue as CBORSimpleValue
 from ._types import CBORTag as CBORTag
 from ._types import FrozenDict as FrozenDict
 from ._types import undefined as undefined
+from .projection import Column as Column
+from .projection import ColumnSource as ColumnSource
+from .projection import EmptyPolicy as EmptyPolicy
+from .projection import ExpansionMode as ExpansionMode
+from .projection import MissingPolicy as MissingPolicy
+from .projection import Path as Path
+from .projection import PathStep as PathStep
+from .projection import Projection as Projection
+from .projection import ProjectionBudgetError as ProjectionBudgetError
+from .projection import ProjectionCardinalityError as ProjectionCardinalityError
+from .projection import ProjectionCycleError as ProjectionCycleError
+from .projection import ProjectionError as ProjectionError
+from .projection import ProjectionPathError as ProjectionPathError
+from .projection import ProjectionPlan as ProjectionPlan
+from .projection import ProjectionPolicy as ProjectionPolicy
+from .projection import ProjectionResult as ProjectionResult
+from .projection import ProjectionTagError as ProjectionTagError
+from .projection import TagPolicy as TagPolicy
+from .projection import parse_path as parse_path
+from .projection import plan_projection as plan_projection
+from .projection import project as project
+from .projection import project_rows as project_rows
 
 try:
     from _cbor2 import *  # noqa: F403
