@@ -171,6 +171,139 @@ def Int2AP(num):
 
 
 
+def _parse_seq_set(message_set, highest=None):
+
+    """Expand an IMAP message-set / UID-set into concrete numbers.
+
+    Accepts str or bytes such as '1,3:5', '1:*' or '*'. A '*' element is
+    resolved to 'highest' when supplied, otherwise yields None to signal
+    that the exact number cannot be determined offline.
+    """
+
+    if isinstance(message_set, bytes):
+        message_set = message_set.decode('ASCII')
+    text = str(message_set).strip()
+    if not text:
+        return []
+
+    def elem_num(token):
+        return None if token == '*' else int(token)
+
+    result = []
+    for element in text.split(','):
+        element = element.strip()
+        if not element:
+            continue
+        if ':' in element:
+            lo_s, hi_s = element.split(':', 1)
+            lo, hi = elem_num(lo_s), elem_num(hi_s)
+            if lo is None and hi is None:
+                result.append(highest)
+                continue
+            if lo is None:                       # '*:n' means 1..n
+                lo = 1 if highest is None else min(highest, hi)
+            if hi is None:
+                if highest is None:
+                    # Known lower end, but the '*' end is undetermined.
+                    result.extend(range(lo, lo + 1))
+                    result.append(None)
+                    continue
+                hi = highest
+            result.extend(range(lo, hi + 1))
+        elif element == '*':
+            result.append(highest)
+        else:
+            result.append(int(element))
+    return result
+
+
+
+class _UidMap(object):
+
+    """Track the current message sequence-number view and stable UIDs.
+
+    Sequence numbers (RFC 3501 section 2.3.1.2) are positional: an EXPUNGE
+    removes a slot and every later sequence number shifts down. UIDs are
+    stable for the lifetime of a message and never change merely because
+    the physical sequence numbers moved. This map maintains both views from
+    untagged server responses, keeping the distinction explicit so that a
+    re-numbering is never mistaken for a UID change.
+    """
+
+    def __init__(self):
+        self._uids = {}          # Current sequence number -> stable UID
+        self.exists = 0          # Current EXISTS count (size of the view)
+        self._lock = threading.Lock()
+
+
+    def reset(self):
+        """Forget every mapping (e.g. a new mailbox was selected)."""
+
+        with self._lock:
+            self._uids = {}
+            self.exists = 0
+
+
+    def exists_set(self, count):
+        """Record an EXISTS response, growing or shrinking the view."""
+
+        count = int(count)
+        with self._lock:
+            if count < self.exists:
+                # Defensive: a view shrink without individual EXPUNGE responses
+                # invalidates every slot beyond the new end, never the UIDs in
+                # surviving slots.
+                for seq in list(self._uids):
+                    if seq > count:
+                        del self._uids[seq]
+            self.exists = count
+
+
+    def expunge(self, sequence):
+        """Record '* sequence EXPUNGE': drop the slot and renumber later ones.
+
+        Returns the UID that occupied the removed slot, or None if it was
+        never learned. Only sequence positions move; surviving UIDs stay
+        unchanged.
+        """
+
+        sequence = int(sequence)
+        with self._lock:
+            removed = self._uids.pop(sequence, None)
+            self._uids = {old - 1 if old > sequence else old: uid
+                          for old, uid in self._uids.items()}
+            if self.exists:
+                self.exists -= 1
+            return removed
+
+
+    def fetch(self, sequence, uid):
+        """Learn the UID occupying a current sequence-number slot."""
+
+        if uid is None:
+            return
+        with self._lock:
+            self._uids[int(sequence)] = int(uid)
+
+
+    def uid(self, sequence):
+        """Return the stable UID at a current slot, or None if unknown."""
+
+        with self._lock:
+            return self._uids.get(int(sequence))
+
+
+    def sequence(self, uid):
+        """Return the current slot of a stable UID, or None if not in view."""
+
+        uid = int(uid)
+        with self._lock:
+            for sequence, mapped_uid in self._uids.items():
+                if mapped_uid == uid:
+                    return sequence
+            return None
+
+
 class Request(object):
 
     """Private class to represent a request awaiting response."""
@@ -191,6 +324,14 @@ class Request(object):
         self.response = None
         self.aborted = None
         self.data = None
+        # Original message specification, as written by the caller:
+        # ('SEQ', command, message_set) or ('UID', subcommand, message_set).
+        # EXPUNGE responses arriving before completion never rewrite this.
+        self.message_set = None
+        # Stable UIDs targeted at the instant the request was issued, in
+        # message-set order, with None for slots whose UID was not yet known.
+        # Frozen here: later sequence renumbering never changes it.
+        self.message_uids = None
 
 
     def abort(self, typ, val):
@@ -302,11 +443,13 @@ class IMAP4(object):
     # These must be encoded according to utf8 setting in _mode_xxx():
     _literal = br'.*{(?P<size>\d+)}$'
     _untagged_status = br'\* (?P<data>\d+) (?P<type>[A-Z-]+)( (?P<data2>.*))?'
+    _uid_fetch = br'^(?P<seq>\d+)\s+(?:FETCH\s*)?\(.*(?<![A-Z-])UID (?P<uid>\d+)'
 
     continuation_cre = re.compile(br'\+( (?P<data>.*))?')
     mapCRLF_cre = re.compile(br'\r\n|\r|\n')
     response_code_cre = re.compile(br'\[(?P<type>[A-Z-]+)( (?P<data>[^\]]*))?\]')
     untagged_response_cre = re.compile(br'\* (?P<type>[A-Z-]+)( (?P<data>.*))?')
+    uid_fetch_cre = re.compile(_uid_fetch, re.DOTALL)
 
 
     def __init__(self, host=None, port=None, debug=None, debug_file=None, identifier=None, timeout=None, debug_buf_lvl=None):
@@ -315,6 +458,7 @@ class IMAP4(object):
         self.literal = None             # A literal argument to a command
         self.tagged_commands = {}       # Tagged commands awaiting response
         self.untagged_responses = []    # [[typ: [data, ...]], ...]
+        self.uid_map = _UidMap()        # Current sequence view + stable UIDs
         self.mailbox = None             # Current mailbox selected
         self.is_readonly = False        # READ-ONLY desired state
         self.idle_rqb = None            # Server IDLE Request - see _IdleCont
@@ -1274,6 +1418,8 @@ class IMAP4(object):
         # Append new 'dat' to end of last untagged response if same 'typ',
         # else append new response.
 
+        self._note_untagged_event(typ, dat)
+
         if dat is None: dat = b''
 
         self.commands_lock.acquire()
@@ -1294,6 +1440,32 @@ class IMAP4(object):
         self.commands_lock.release()
 
         if __debug__: self._log(5, 'untagged_responses[%s] %s += ["%.80r"]' % (typ, len(urd)-1, dat))
+
+
+    def _note_untagged_event(self, typ, dat):
+
+        # Keep the sequence-number view and stable UID map in step with the
+        # server's untagged responses. Sequence shifts caused by EXPUNGE are
+        # physical renumbering only: they never alter a surviving UID.
+
+        if typ == 'EXPUNGE':
+            removed_uid = self.uid_map.expunge(dat)
+            if __debug__: self._log(4, 'EXPUNGE seq %s, uid %s removed' % (dat, removed_uid))
+            return
+
+        if typ == 'EXISTS':
+            self.uid_map.exists_set(dat)
+            return
+
+        if typ != 'FETCH':
+            return
+
+        # A FETCH response may be a single line, or a header line followed
+        # by one or more literal tuples carrying the rest of the response.
+        header = dat[0] if isinstance(dat, tuple) else dat
+        mo = self.uid_fetch_cre.match(header)
+        if mo is not None:
+            self.uid_map.fetch(mo.group('seq'), mo.group('uid'))
 
 
     def _check_bye(self):
@@ -1358,6 +1530,7 @@ class IMAP4(object):
         if name in ('EXAMINE', 'SELECT'):
             self.commands_lock.acquire()
             self.untagged_responses = []      # Flush all untagged responses
+            self.uid_map.reset()              # Old sequence view is invalid
             self.commands_lock.release()
         else:
             for typ in ('OK', 'NO', 'BAD'):
@@ -1372,6 +1545,7 @@ class IMAP4(object):
             raise self.abort('connection closed')
 
         rqb = self._request_push(name=name, **kw)
+        self._record_message_set(rqb, args)
 
         name = bytes(name, self._encoding)
         data = rqb.tag + b' ' + name
@@ -1655,6 +1829,100 @@ class IMAP4(object):
     def _quote(self, arg):
 
         return '"%s"' % arg.replace('\\', '\\\\').replace('"', '\\"')
+
+
+    def _record_message_set(self, rqb, args):
+
+        # Remember, on the request itself, exactly which messages the caller
+        # named when issuing the command. The identifiers are the caller's
+        # own: sequence numbers for FETCH/STORE/COPY/PARTIAL, UIDs for UID
+        # sub-commands. EXPUNGE-driven renumbering never rewrites this, and
+        # the UID resolution is frozen immediately against the current view.
+
+        name = rqb.name
+
+        if name == 'UID' and len(args) >= 2:
+            subcommand = args[0]
+            if isinstance(subcommand, bytes):
+                subcommand = subcommand.decode('ASCII')
+            subcommand = subcommand.upper()
+            # SEARCH/SORT/THREAD carry search criteria, not a message set.
+            if subcommand in ('FETCH', 'STORE', 'COPY', 'PARTIAL', 'EXPUNGE'):
+                rqb.message_set = ('UID', subcommand, args[1])
+        elif name in ('FETCH', 'STORE', 'COPY', 'PARTIAL') and args:
+            rqb.message_set = ('SEQ', name, args[0])
+
+        # Tracking is best-effort: an unparseable set must never stop the
+        # command from being sent; unresolved targets simply stay None.
+        if rqb.message_set is None:
+            rqb.message_uids = None
+            return
+
+        try:
+            rqb.message_uids = self._resolve_message_set(rqb.message_set)
+        except (TypeError, ValueError):
+            if __debug__: self._log(1, 'could not resolve message set %r' % (rqb.message_set,))
+            rqb.message_uids = None
+
+
+    def _resolve_message_set(self, message_set):
+
+        # Map a recorded message set to the stable UIDs in the current view.
+        # Returns None when the set cannot be fully resolved (e.g. a '*'
+        # bound), or a list aligned with the set whose entries are None for
+        # slots without a learned UID.
+
+        kind, sub, raw_set = message_set
+        highest = self.uid_map.exists or None
+        expanded = _parse_seq_set(raw_set, highest)
+
+        if any(num is None for num in expanded):
+            return None
+
+        if kind == 'UID':
+            return list(expanded)
+
+        return [self.uid_map.uid(num) for num in expanded]
+
+
+    def message_uid(self, sequence):
+        """uid = message_uid(sequence)
+        Return the stable UID currently occupying sequence slot 'sequence',
+        or None if no UID has been learned for that slot."""
+
+        return self.uid_map.uid(sequence)
+
+
+    def message_sequence(self, uid):
+        """sequence = message_sequence(uid)
+        Return the current sequence-number slot of stable 'uid',
+        or None if the UID is not present in the current view."""
+
+        return self.uid_map.sequence(uid)
+
+
+    def request_target_uids(self, request):
+        """[uid, ...] = request_target_uids(request)
+        Return the stable UIDs of the messages originally named by a
+        request, frozen when the request was issued.
+
+        'request' is the Request object returned by an internal command
+        call (or its tag, while the command is still pending). Entries are
+        None where a sequence->UID mapping had not been learned at issue
+        time; the whole result is None when the request named no messages,
+        or when a '*' bound could not be resolved. A later EXPUNGE never
+        changes this snapshot."""
+
+        if isinstance(request, (bytes, str)):
+            tag = bytes(request, 'ASCII') if isinstance(request, str) else request
+            self.commands_lock.acquire()
+            rqb = self.tagged_commands.get(tag)
+            self.commands_lock.release()
+            if rqb is None:
+                return None
+            return rqb.message_uids
+
+        return getattr(request, 'message_uids', None)
 
 
     def _release_state_change(self):
