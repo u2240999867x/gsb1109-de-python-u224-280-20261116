@@ -78,6 +78,8 @@ from .phonenumber import PhoneNumber, CountryCodeSource, FrozenPhoneNumber
 from .phonemetadata import REGION_CODE_FOR_NON_GEO_ENTITY, NumberFormat, PhoneNumberDesc, PhoneMetadata
 # Functionality
 from .asyoutypeformatter import AsYouTypeFormatter
+from .asyoutypeeditor import (AsYouTypeEditor, DeletedChar, DeletedCharKind,
+                              EditResult, InputState, replay_edit_log)
 from .phonenumberutil import (COUNTRY_CODE_TO_REGION_CODE, SUPPORTED_REGIONS,
                               UNKNOWN_REGION, COUNTRY_CODES_FOR_NON_GEO_REGIONS,
                               NON_DIGITS_PATTERN,
@@ -152,6 +154,8 @@ __version__ = "9.0.43"
 __all__ = ['PhoneNumber', 'CountryCodeSource', 'FrozenPhoneNumber',
            'REGION_CODE_FOR_NON_GEO_ENTITY', 'NumberFormat', 'PhoneNumberDesc', 'PhoneMetadata',
            'AsYouTypeFormatter',
+           'AsYouTypeEditor', 'DeletedChar', 'DeletedCharKind',
+           'EditResult', 'InputState', 'replay_edit_log',
            # items from phonenumberutil.py
            'COUNTRY_CODE_TO_REGION_CODE', 'SUPPORTED_REGIONS',
            'UNKNOWN_REGION', 'COUNTRY_CODES_FOR_NON_GEO_REGIONS',

@@ -1,4 +1,10 @@
 from .asyoutypeformatter import AsYouTypeFormatter as AsYouTypeFormatter
+from .asyoutypeeditor import AsYouTypeEditor as AsYouTypeEditor
+from .asyoutypeeditor import DeletedChar as DeletedChar
+from .asyoutypeeditor import DeletedCharKind as DeletedCharKind
+from .asyoutypeeditor import EditResult as EditResult
+from .asyoutypeeditor import InputState as InputState
+from .asyoutypeeditor import replay_edit_log as replay_edit_log
 from .phonemetadata import NumberFormat as NumberFormat
 from .phonemetadata import PhoneMetadata as PhoneMetadata
 from .phonemetadata import PhoneNumberDesc as PhoneNumberDesc
