@@ -15,6 +15,7 @@ Welcome to pyftpdlib's documentation
     api
     faqs
     cli
+    replay
     benchmarks
     rfc-compliance
     adoptions
