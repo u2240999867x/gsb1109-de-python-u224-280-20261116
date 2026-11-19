@@ -18,6 +18,7 @@ Welcome to pyftpdlib's documentation
     benchmarks
     rfc-compliance
     adoptions
+    schedule-audit
 
 Indices and tables
 ==================
