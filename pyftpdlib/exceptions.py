@@ -2,11 +2,23 @@
 # Use of this source code is governed by MIT license that can be
 # found in the LICENSE file.
 
-__all__ = ["AuthenticationFailed", "AuthorizerError", "FilesystemError"]
+__all__ = [
+    "AuthenticationFailed",
+    "AuthorizerError",
+    "FilesystemError",
+    "RulebookError",
+]
 
 
 class AuthorizerError(Exception):
     """Base class for authorizer exceptions."""
+
+
+class RulebookError(AuthorizerError):
+    """Exception raised when a versioned authorization rulebook or one
+    of its rules is invalid. When raised during a rule update the
+    previously active rulebook version is left untouched.
+    """
 
 
 class AuthenticationFailed(Exception):

@@ -8,6 +8,15 @@ Version: 2.2.1 - (IN DEVELOPMENT)
 * 686: distribute wheel binaries, not only .tar.gz.
 * 689: Fix file existence check for certificate files
 * Add a SECURITY.md mechanism to report critical vulnerabilities.
+* Add ``pyftpdlib.rulebooks`` module providing ``VersionedRuleAuthorizer``:
+  an authorizer whose directory permissions are driven by versioned,
+  hot-swappable rule snapshots. Read, write and rename eligibilities are
+  judged as separate capabilities, rule updates are atomic (a failed
+  update keeps the previous version active), in-progress data transfers
+  are dealt with via an explicit continue/terminate policy applied
+  selectively per session, and every authorization decision is recorded
+  in an audit log reporting the rule version it was based on (credentials
+  are never recorded).
 
 **Bug fixes**
 

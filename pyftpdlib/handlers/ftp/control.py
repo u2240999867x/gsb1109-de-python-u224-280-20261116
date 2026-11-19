@@ -831,6 +831,10 @@ class FTPHandler(AsyncChat):
 
             self._shutdown_connecting_dtp()
 
+            unregister = getattr(self.authorizer, "unregister_session", None)
+            if unregister is not None:
+                unregister(self)
+
             if self.data_channel is not None:
                 self.data_channel.close()
                 del self.data_channel
@@ -1055,6 +1059,9 @@ class FTPHandler(AsyncChat):
         username = self.username
         if self.authenticated and username:
             self.on_logout(username)
+        unregister = getattr(self.authorizer, "unregister_session", None)
+        if unregister is not None:
+            unregister(self)
         self.authenticated = False
         self.username = ""
         self.password = ""
@@ -1816,6 +1823,9 @@ class FTPHandler(AsyncChat):
         self.attempted_logins = 0
 
         self.fs = self.abstracted_fs(home, self)
+        register = getattr(self.authorizer, "register_session", None)
+        if register is not None:
+            register(self)
         self.on_login(self.username)
 
     def ftp_PASS(self, line):
