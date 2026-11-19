@@ -2,11 +2,13 @@
 # Use of this source code is governed by MIT license that can be
 # found in the LICENSE file.
 
+import errno
 import os
 import tempfile
 
 import pytest
 
+from pyftpdlib.exceptions import RenameNotGuaranteedError
 from pyftpdlib.filesystems import AbstractedFS
 
 from . import HOME
@@ -190,6 +192,90 @@ class TestAbstractedFS(PyftpdlibTestCase):
                     assert not fs.validpath(testfn)
                 finally:
                     safe_rmpath(testfn)
+
+
+class TestRenameNoReplace(PyftpdlibTestCase):
+    """Tests for the atomic, non-replacing rename primitive and the
+    object identity fingerprint used to pin an RNFR selection.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.root = tempfile.mkdtemp(prefix="pyftpd-rnfr-")
+        self.addCleanup(safe_rmpath, self.root)
+        self.fs = AbstractedFS(self.root, None)
+
+    def _path(self, name):
+        return os.path.join(self.root, name)
+
+    def test_file_identity_stable_for_same_object(self):
+        path = self._path("a")
+        touch(path)
+        assert self.fs.file_identity(path) == self.fs.file_identity(path)
+
+    def test_file_identity_changes_when_replaced(self):
+        path = self._path("a")
+        touch(path)
+        before = self.fs.file_identity(path)
+        # a brand new inode at the same pathname must look different
+        os.remove(path)
+        touch(path)
+        assert self.fs.file_identity(path) != before
+
+    def test_file_identity_changes_when_mutated(self):
+        path = self._path("a")
+        with open(path, "w") as f:
+            f.write("one")
+        before = self.fs.file_identity(path)
+        with open(path, "a") as f:
+            f.write("-two")
+        assert self.fs.file_identity(path) != before
+
+    def test_file_identity_handles_broken_symlink(self):
+        if not hasattr(os, "symlink"):
+            return self.skipTest("os.symlink not available")
+        link = self._path("link")
+        os.symlink(self._path("missing"), link)
+        # lstat-based identity must work even though the link is broken
+        assert self.fs.file_identity(link) == self.fs.file_identity(link)
+
+    def test_rename_noreplace_when_unsupported(self):
+        class WeakFS(AbstractedFS):
+            supports_noreplace_rename = False
+
+        fs = WeakFS(self.root, None)
+        touch(self._path("a"))
+        with pytest.raises(RenameNotGuaranteedError):
+            fs.rename_noreplace(self._path("a"), self._path("b"))
+        # the source is left untouched: no check-then-rename fallback
+        assert os.path.exists(self._path("a"))
+        assert not os.path.exists(self._path("b"))
+
+    @pytest.mark.skipif(
+        not AbstractedFS.supports_noreplace_rename,
+        reason="platform has no atomic non-replacing rename",
+    )
+    def test_rename_noreplace_success(self):
+        touch(self._path("a"))
+        self.fs.rename_noreplace(self._path("a"), self._path("b"))
+        assert not os.path.exists(self._path("a"))
+        assert os.path.exists(self._path("b"))
+
+    @pytest.mark.skipif(
+        not AbstractedFS.supports_noreplace_rename,
+        reason="platform has no atomic non-replacing rename",
+    )
+    def test_rename_noreplace_refuses_existing_target(self):
+        with open(self._path("a"), "w") as f:
+            f.write("source")
+        with open(self._path("b"), "w") as f:
+            f.write("destination")
+        with pytest.raises(OSError) as exc:
+            self.fs.rename_noreplace(self._path("a"), self._path("b"))
+        assert exc.value.errno == errno.EEXIST
+        # the atomic syscall must not have replaced either path
+        assert open(self._path("b")).read() == "destination"
+        assert os.path.exists(self._path("a"))
 
 
 @pytest.mark.skipif(not POSIX, reason="UNIX only")

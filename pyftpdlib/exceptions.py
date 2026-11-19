@@ -2,7 +2,12 @@
 # Use of this source code is governed by MIT license that can be
 # found in the LICENSE file.
 
-__all__ = ["AuthenticationFailed", "AuthorizerError", "FilesystemError"]
+__all__ = [
+    "AuthenticationFailed",
+    "AuthorizerError",
+    "FilesystemError",
+    "RenameNotGuaranteedError",
+]
 
 
 class AuthorizerError(Exception):
@@ -17,6 +22,21 @@ class FilesystemError(Exception):
     """Custom class for filesystem-related exceptions.
     You can raise this from an AbstractedFS subclass in order to
     send a customized error string to the client.
+    """
+
+
+class RenameNotGuaranteedError(FilesystemError):
+    """Raised when a rename is requested but the underlying filesystem
+    does not provide an atomic, non-replacing rename primitive.
+
+    The two-step RNFR/RNTO procedure can only be made race-free when the
+    filesystem is able to reject a rename whose destination already
+    exists in a single system call (e.g. Linux ``renameat2`` with
+    ``RENAME_NOREPLACE`` or macOS ``renamex_np`` with ``RENAME_EXCL``).
+    When no such primitive is available the server must not pretend the
+    "check then rename" sequence is atomic: raising this error makes the
+    lack of a guarantee explicit instead of silently overwriting an
+    existing destination.
     """
 
 

@@ -2,12 +2,16 @@
 # Use of this source code is governed by MIT license that can be
 # found in the LICENSE file.
 
+import ctypes
+import ctypes.util
 import os
 import stat
+import sys
 import tempfile
 import time
 
 from .exceptions import FilesystemError
+from .exceptions import RenameNotGuaranteedError
 from .utils import memoize
 
 try:
@@ -34,6 +38,63 @@ _months_map = {
     11: "Nov",
     12: "Dec",
 }
+
+
+def _resolve_noreplace_rename():
+    """Resolve a native, atomic, non-replacing rename callable.
+
+    Returns a tuple ``(func, available)`` where ``func`` (when available)
+    takes two real filesystem paths and atomically renames ``src`` to
+    ``dst`` raising ``OSError(EEXIST)`` if ``dst`` already exists, and
+    ``available`` advertises whether such a primitive exists.
+
+    A plain ``os.rename()`` is deliberately not used as a fallback: on
+    POSIX it silently replaces an existing destination, so a "check then
+    rename" sequence would leave a TOCTOU window in which another actor
+    can create the target. When the platform exposes nothing better the
+    caller is expected to fail explicitly rather than claim the operation
+    is race-free.
+    """
+    # Linux (and some other libc platforms): Python >= 3.13 exposes
+    # os.renameat2() with the RENAME_NOREPLACE flag.
+    renameat2 = getattr(os, "renameat2", None)
+    noreplace = getattr(os, "RENAME_NOREPLACE", None)
+    if renameat2 is not None and noreplace is not None:
+
+        def _rename(src, dst):
+            renameat2(src, dst, noreplace)
+
+        return _rename, True
+
+    # macOS / BSD: renamex_np() with RENAME_EXCL is reachable through
+    # libc. It is not wrapped by the os module, hence the ctypes call.
+    if sys.platform == "darwin":
+        libc_name = ctypes.util.find_library("c")
+        if libc_name:
+            try:
+                libc = ctypes.CDLL(libc_name, use_errno=True)
+            except OSError:
+                libc = None
+            renamex_np = getattr(libc, "renamex_np", None) if libc else None
+            if renamex_np is not None:
+                # RENAME_EXCL: fail with EEXIST instead of replacing.
+                rename_excl = 0x00000004
+
+                def _rename(src, dst):
+                    rc = renamex_np(
+                        os.fsencode(src), os.fsencode(dst), rename_excl
+                    )
+                    if rc != 0:
+                        err = ctypes.get_errno()
+                        raise OSError(err, os.strerror(err), src)
+
+                return _rename, True
+
+    # No atomic, non-replacing primitive is available on this platform.
+    return None, False
+
+
+_noreplace_rename, _NOREPLACE_RENAME_AVAILABLE = _resolve_noreplace_rename()
 
 
 # ===================================================================
@@ -73,6 +134,13 @@ class AbstractedFS:
         self._cwd = "/"
         self._root = root
         self.cmd_channel = cmd_channel
+
+    # Whether the running platform can rename without replacing an
+    # existing destination in a single, atomic system call. Subclasses
+    # targeting a different backend must override this (and
+    # rename_noreplace()) to advertise their real capability instead of
+    # inheriting a possibly incorrect default.
+    supports_noreplace_rename = _NOREPLACE_RENAME_AVAILABLE
 
     @property
     def root(self):
@@ -259,6 +327,52 @@ class AbstractedFS:
     def rename(self, src, dst):
         """Rename the specified src file to the dst filename."""
         os.rename(src, dst)
+
+    def rename_noreplace(self, src, dst):
+        """Atomically rename ``src`` to ``dst`` only if ``dst`` does not
+        already exist.
+
+        Unlike :meth:`rename` (which wraps ``os.rename`` and may silently
+        replace an existing destination), this method must either perform
+        a non-replacing rename in a single system call or fail without
+        touching either path. It raises :class:`RenameNotGuaranteedError`
+        when the backend cannot provide that atomic guarantee, and
+        ``OSError(EEXIST)`` when the destination already exists.
+
+        Subclasses backed by a store without an atomic no-replace
+        primitive must keep the default behavior (explicit failure)
+        rather than emulate it with a check followed by ``os.rename``,
+        which would reintroduce a TOCTOU race.
+        """
+        if not self.supports_noreplace_rename or _noreplace_rename is None:
+            raise RenameNotGuaranteedError(
+                "filesystem provides no atomic non-replacing rename; "
+                "refusing to guess between an RNFR source and a target "
+                "that may have appeared in the meantime"
+            )
+        _noreplace_rename(src, dst)
+
+    def file_identity(self, path):
+        """Return an opaque, comparable fingerprint describing both the
+        identity and the current version of the object at ``path``.
+
+        The object identity is derived from ``(st_dev, st_ino)`` while
+        the version part captures size, mode and modification / status
+        change timestamps. ``lstat`` is used on purpose so that renaming
+        a symbolic link pins the link itself (including broken links)
+        rather than whatever it points to. A different fingerprint at
+        RNTO time means the path no longer denotes the exact object
+        selected by RNFR.
+        """
+        st = self.lstat(path)
+        return (
+            st.st_dev,
+            st.st_ino,
+            st.st_mode,
+            st.st_size,
+            st.st_mtime_ns,
+            st.st_ctime_ns,
+        )
 
     def chmod(self, path, mode):
         """Change file/directory mode."""

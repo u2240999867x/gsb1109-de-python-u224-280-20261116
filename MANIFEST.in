@@ -57,4 +57,5 @@ include tests/test_filesystems.py
 include tests/test_functional.py
 include tests/test_functional_ssl.py
 include tests/test_ioloop.py
+include tests/test_rename.py
 include tests/test_servers.py

@@ -476,6 +476,17 @@ Filesystem
 
     *Changed in version 0.7.0: support setattr()*
 
+  .. data:: supports_noreplace_rename
+
+    ``True`` when the backend can rename a path to a non-existing
+    destination in a single atomic system call that refuses to replace an
+    existing target (Linux ``renameat2(RENAME_NOREPLACE)`` or macOS
+    ``renamex_np(RENAME_EXCL)``). When ``False``, :meth:`rename_noreplace`
+    raises ``RenameNotGuaranteedError`` instead of emulating the operation
+    with a racy existence check followed by ``os.rename``. Subclasses
+    backed by a different store must override this to advertise their
+    real capability.
+
   .. method:: ftpnorm(ftppath)
 
     Normalize a "virtual" FTP pathname depending on the current working
@@ -511,6 +522,8 @@ Filesystem
   .. method:: rmdir(path)
   .. method:: remove(path)
   .. method:: rename(src, dst)
+  .. method:: rename_noreplace(src, dst)
+  .. method:: file_identity(path)
   .. method:: chmod(path, mode)
   .. method:: stat(path)
   .. method:: lstat(path)
@@ -518,6 +531,17 @@ Filesystem
 
     Wrappers around the corresponding
     `os <https://docs.python.org/library/os.html>`_ module functions.
+
+    :meth:`rename_noreplace` differs from :meth:`rename`: it atomically
+    renames ``src`` to ``dst`` only when ``dst`` does not already exist,
+    raising ``OSError(EEXIST)`` on a conflict and
+    ``RenameNotGuaranteedError`` when the backend has no atomic
+    non-replacing primitive. :meth:`file_identity` returns an opaque
+    fingerprint (device/inode plus size, mode and timestamps) describing
+    the object and its current version; it is used by the RNFR/RNTO flow
+    to detect a source being swapped or modified between the two commands
+    and uses ``lstat`` so symbolic links (including broken ones) are pinned
+    as links rather than targets.
 
   .. method:: isfile(path)
   .. method:: islink(path)

@@ -8,6 +8,19 @@ Version: 2.2.1 - (IN DEVELOPMENT)
 * 686: distribute wheel binaries, not only .tar.gz.
 * 689: Fix file existence check for certificate files
 * Add a SECURITY.md mechanism to report critical vulnerabilities.
+* [RNFR/RNTO] the two-step rename is now protected against TOCTOU races.
+  RNFR pins the selected object's identity and version (device/inode plus
+  size, mode and timestamps) and RNTO re-validates that identity and the
+  current ``"f"`` permission before renaming, so a source swapped for a
+  different placeholder or a permission change between the two commands is
+  rejected. The move uses an atomic non-replacing rename
+  (``renameat2(RENAME_NOREPLACE)`` on Linux, ``renamex_np(RENAME_EXCL)`` on
+  macOS) so an existing destination is never overwritten; on platforms
+  without such a primitive the server replies ``451`` and reports that the
+  guarantee is unavailable instead of relying on a check-then-rename. The
+  pending selection is scoped to the single control session and consumed on
+  any RNTO, RNFR, ABOR or REIN, and the success reply names the actual
+  source entity and new location.
 
 **Bug fixes**
 

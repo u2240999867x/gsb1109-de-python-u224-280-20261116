@@ -24,6 +24,7 @@ from pyftpdlib.authorizers import DummyAuthorizer
 from pyftpdlib.exceptions import AuthenticationFailed
 from pyftpdlib.exceptions import AuthorizerError
 from pyftpdlib.exceptions import FilesystemError
+from pyftpdlib.exceptions import RenameNotGuaranteedError
 from pyftpdlib.filesystems import AbstractedFS
 from pyftpdlib.ioloop import AsyncChat
 from pyftpdlib.log import debug
@@ -476,6 +477,10 @@ class FTPHandler(AsyncChat):
         self._out_dtp_queue = None
         self._extra_feats = []
         self._current_facts = ["type", "perm", "size", "modify"]
+        # Pending RNFR selection for this control connection only.
+        # Holds a {"src", "identity"} dict between RNFR and RNTO and is
+        # always None outside that single two-step exchange; it is never
+        # carried over to a later rename (see ftp_RNTO / ftp_ABOR).
         self._rnfr = None
         self._idler = None
         self._log_debug = (
@@ -1710,6 +1715,10 @@ class FTPHandler(AsyncChat):
 
     def ftp_ABOR(self, line):
         """Abort the current data transfer."""
+        # An ABOR also cancels any in-progress RNFR/RNTO exchange so the
+        # pinned selection cannot be reused by a later RNTO. The FTP
+        # replies below are unchanged and keep describing the data channel.
+        self._rnfr = None
         # ABOR received while no data channel exists
         if (
             self._dtp_acceptor is None
@@ -2049,33 +2058,122 @@ class FTPHandler(AsyncChat):
 
     def ftp_RNFR(self, path):
         """Rename the specified (only the source name is specified
-        here, see RNTO command)."""
+        here, see RNTO command).
+
+        The selected object is not remembered as a bare pathname: its
+        current identity/version fingerprint is captured so that RNTO
+        can detect the source being swapped for a different placeholder
+        between the two commands. Any previously pending selection is
+        discarded, since a two-step exchange belongs to a single
+        RNFR/RNTO pair.
+        """
+        self._rnfr = None
         if not self.fs.lexists(path):
             self.respond("550 No such file or directory.")
-        elif self.fs.realpath(path) == self.fs.realpath(self.fs.root):
+            return
+        if self.fs.realpath(path) == self.fs.realpath(self.fs.root):
             self.respond("550 Can't rename home directory.")
-        else:
-            self._rnfr = path
-            self.respond("350 Ready for destination name.")
+            return
+        try:
+            identity = self.run_as_current_user(self.fs.file_identity, path)
+        except (OSError, FilesystemError) as err:
+            self.respond(f"550 {strerror(err)}.")
+            return
+        self._rnfr = {"src": path, "identity": identity}
+        self.respond("350 Ready for destination name.")
 
     def ftp_RNTO(self, path):
         """Rename file (destination name only, source is specified with
         RNFR).
+
         On success return a (source_path, destination_path) tuple.
+
+        The pending RNFR selection is consumed unconditionally on entry,
+        so a rejected/failed RNTO is never retried against stale state.
+        Before renaming, the source identity captured by RNFR is
+        re-validated and current permissions are re-checked, guarding
+        against an administrator replacing the source or changing
+        authorization in between the two commands. The final move uses an
+        atomic, non-replacing rename so an existing destination can never
+        be overwritten; where the filesystem cannot provide that
+        guarantee the operation fails explicitly instead of relying on a
+        racy "check then rename".
         """
-        if not self._rnfr:
+        pending = self._rnfr
+        # Consume the two-step state up front: it belongs to this RNTO
+        # only and must never carry over into a later rename.
+        self._rnfr = None
+        if pending is None:
             self.respond("503 Bad sequence of commands: use RNFR first.")
             return
-        src = self._rnfr
-        self._rnfr = None
+
+        src = pending["src"]
+        pinned_identity = pending["identity"]
+
+        # Re-check current privileges on both ends at RNTO time. The
+        # "f" permission granted when RNFR arrived may have been revoked.
+        can_rename_src = self.authorizer.has_perm(self.username, "f", src)
+        can_rename_dst = self.authorizer.has_perm(self.username, "f", path)
+        if not can_rename_src or not can_rename_dst:
+            self.respond("550 Not enough privileges.")
+            return
+
+        # Make sure the pathname still denotes the exact object (and
+        # version) selected by RNFR, not a replacement dropped onto the
+        # same path afterwards.
         try:
-            self.run_as_current_user(self.fs.rename, src, path)
+            current_identity = self.run_as_current_user(
+                self.fs.file_identity, src
+            )
         except (OSError, FilesystemError) as err:
-            why = strerror(err)
-            self.respond(f"550 {why}.")
-        else:
-            self.respond("250 Renaming ok.")
-            return (src, path)
+            self.respond(f"550 Source no longer available: {strerror(err)}.")
+            return
+        if current_identity != pinned_identity:
+            self.respond(
+                "550 Source changed since RNFR; issue RNFR again."
+            )
+            return
+
+        # Surface an existing target as an explicit conflict. The atomic
+        # no-replace rename below is what actually guarantees it can never
+        # be overwritten, even if the target appears right after this check.
+        try:
+            if self.run_as_current_user(self.fs.lexists, path):
+                self.respond(
+                    "550 Destination already exists; not overwriting."
+                )
+                return
+        except (OSError, FilesystemError) as err:
+            self.respond(f"550 {strerror(err)}.")
+            return
+
+        src_ftp = self.fs.fs2ftp(src)
+        dst_ftp = self.fs.fs2ftp(path)
+        try:
+            self.run_as_current_user(self.fs.rename_noreplace, src, path)
+        except RenameNotGuaranteedError as err:
+            # The backend has no atomic non-replacing rename: report the
+            # lack of guarantee rather than pretending check-then-rename
+            # is race-free.
+            self.respond(f"451 {err}.")
+            return
+        except FilesystemError as err:
+            # Custom error string raised by an AbstractedFS subclass.
+            self.respond(f"550 {err}.")
+            return
+        except OSError as err:
+            if err.errno == errno.EEXIST:
+                # Target raced into existence between the check and the
+                # syscall; the atomic primitive refused to replace it.
+                self.respond(
+                    "550 Destination already exists; not overwriting."
+                )
+            else:
+                self.respond(f"550 {strerror(err)}.")
+            return
+
+        self.respond(f"250 Renamed {src_ftp} to {dst_ftp}.")
+        return (src, path)
 
         # --- others
 
