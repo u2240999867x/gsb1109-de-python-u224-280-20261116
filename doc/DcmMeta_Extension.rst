@@ -50,8 +50,32 @@ the slices in a time sample (a single volume) will be stored in the 'slices'
 dictionary with each value being a list of values (one for each slice in a time 
 point).
 
-If there is a vector dimension there will be a 'vector' dictionary, handled in 
+If there is a vector dimension there will be a 'vector' dictionary, handled in
 the same manner as the 'time' dictionary.
+
+Merging
+-------
+
+Merging a sequence of extensions concatenates them along one dimension (slice,
+time, or vector). Each meta data key is merged independently so that the
+classification of the result reflects where that key actually varies:
+
+#. The inputs must agree on every dimension other than the merge dimension.
+   A mismatch in a common dimension is an error, since the resulting meta data
+   could not be mapped onto a single array.
+
+#. A key is kept at the most specific classification that can represent the
+   merged values. For example, per-slice values that are identical in every
+   input collapse to 'global'/'const'.
+
+#. A key that is missing from one input is represented as ``None`` for that
+   input's coordinates. Missing meta data never deletes the values supplied by
+   another input.
+
+#. When inputs cover the same coordinates (merging along a non-slice spatial
+   dimension) and disagree, both values are retained as a two element list
+   ``[value1, value2]`` instead of silently choosing one. A locally varying
+   value is likewise not replaced by a constant declared by another input.
 
 Encoding
 --------

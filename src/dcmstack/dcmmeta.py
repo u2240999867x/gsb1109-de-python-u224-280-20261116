@@ -116,6 +116,14 @@ def is_repeating(sequence, period):
     return True
 
 
+def _values_equal(left, right):
+    '''Deep equality test for meta data values, which may be nested lists.'''
+    if isinstance(left, list) and isinstance(right, list):
+        return (len(left) == len(right) and
+                all(_values_equal(a, b) for a, b in zip(left, right)))
+    return left == right
+
+
 class InvalidExtensionError(Exception):
     def __init__(self, msg):
         '''Exception denoting than a DcmMetaExtension is invalid.'''
@@ -228,13 +236,30 @@ class DcmMetaExtension(Nifti1Extension):
         '''
         if not 0 <= dim < 5:
             raise ValueError("The argument 'dim' must be in the range [0, 5).")
+        if len(seq) == 0:
+            raise ValueError("The sequence of extensions must not be empty.")
         # Determine the output shape and create empty extension
         n_inputs = len(seq)
         first_input = seq[0]
         input_shape = first_input.shape
-        if len(input_shape) > dim and input_shape[dim] != 1:
-            raise ValueError("The dim must be singular or not exist for the "
-                             "inputs.")
+        for input_ext in seq:
+            ext_shape = input_ext.shape
+            if len(ext_shape) > dim and ext_shape[dim] != 1:
+                raise ValueError("The dim must be singular or not exist for "
+                                 "the inputs.")
+            # Every dimension other than the merge dimension must have a
+            # common extent, otherwise the resulting meta data can not be
+            # mapped onto a single image.
+            for axis in range(max(len(input_shape), len(ext_shape))):
+                if axis == dim:
+                    continue
+                ref_size = input_shape[axis] if axis < len(input_shape) else 1
+                ext_size = ext_shape[axis] if axis < len(ext_shape) else 1
+                if ref_size != ext_size:
+                    raise ValueError(
+                        "Inputs have mismatched extents on dimension %d "
+                        "(%d versus %d)." % (axis, ref_size, ext_size)
+                    )
         output_shape = list(input_shape)
         while len(output_shape) <= dim:
             output_shape.append(1)
@@ -257,24 +282,21 @@ class DcmMetaExtension(Nifti1Extension):
             vector_dim,
             first_input.extract_version,
         )
-        # Need to initialize the result with the first extension in 'seq'
-        result_slc_norm = result.slice_normal
-        first_slc_norm = first_input.slice_normal
-        use_slices = (not result_slc_norm is None and
-                      not first_slc_norm is None and
-                      np.allclose(result_slc_norm, first_slc_norm))
-        for classes in first_input.valid_classes:
-            if classes[1] == 'slices' and not use_slices:
-                continue
-            result._content[classes[0]][classes[1]] = \
-                deepcopy(first_input.get_class_dict(classes))
-        #Adjust the shape to what the extension actually contains
-        shape = list(result.shape)
-        shape[dim] = 1
-        result.shape = shape
+        # Merge each key independently. This keeps the value for every
+        # coordinate covered by an input, represents coordinates missing from
+        # an input as None, and keeps both values when inputs overlap and
+        # disagree.
+        all_keys = []
+        seen_keys = set()
+        for input_ext in seq:
+            for key in input_ext.get_keys():
+                if key not in seen_keys:
+                    seen_keys.add(key)
+                    all_keys.append(key)
+        for key in all_keys:
+            result._merge_key(key, seq, dim)
         #Initialize reorient transform
         reorient_transform = first_input.reorient_transform
-        #Add the other extensions, updating the shape as we go
         for input_ext in seq[1:]:
             #If the affines or reorient_transforms don't match, we set the
             #reorient_transform to None as we can not reliably use it to update
@@ -287,15 +309,267 @@ class DcmMetaExtension(Nifti1Extension):
                     )
                ):
                 reorient_transform = None
-            result._insert(dim, input_ext)
-            shape[dim] += 1
-            result.shape = shape
         #Set the reorient transform
         result.reorient_transform = reorient_transform
         #Try simplifying any keys in global slices
         for key in list(result.get_class_dict(('global', 'slices'))):
             result._simplify(key)
         return result
+
+    @staticmethod
+    def _select_class(axes, valid_classes):
+        '''Pick the most specific classification that can represent variation
+        along the provided set of axes ('s', 't', 'v').'''
+        if not axes:
+            return ('global', 'const')
+        candidates = []
+        if axes <= set('s'):
+            candidates = [('time', 'slices'),
+                          ('vector', 'slices'),
+                          ('global', 'slices')]
+        elif axes <= set('t'):
+            candidates = [('time', 'samples'), ('global', 'slices')]
+        elif axes <= set('v'):
+            candidates = [('vector', 'samples'), ('global', 'slices')]
+        elif axes <= set('tv'):
+            candidates = [('time', 'samples'),
+                          ('vector', 'samples'),
+                          ('global', 'slices')]
+        elif axes <= set('ts'):
+            candidates = [('vector', 'slices'), ('global', 'slices')]
+        else:
+            candidates = [('global', 'slices')]
+        for candidate in candidates:
+            if candidate in valid_classes:
+                return candidate
+        return ('global', 'slices')
+
+    @staticmethod
+    def _flat_values(ext, cls, values, ns=None, nt=None, nv=None):
+        '''Expand a key's values to a flat (vector, time, slice) grid, in
+        vector-major order. The grid extents default to those of `ext`, but
+        can be overridden when merging so that an input spans the full result
+        grid on dimensions it does not own.'''
+        if ns is None:
+            ns = ext.shape[ext.slice_dim] if ext.slice_dim is not None else 1
+        if nt is None:
+            nt = ext.shape[3] if len(ext.shape) > 3 else 1
+        if nv is None:
+            nv = ext.shape[4] if len(ext.shape) > 4 else 1
+        if cls == ('global', 'const'):
+            return [values] * (ns * nt * nv)
+        # A per-slice or per-sample value with a multiplicity of one may be
+        # stored either as a scalar or as a single element list.
+        if not isinstance(values, list):
+            values = [values]
+        if cls == ('global', 'slices'):
+            return list(values)
+        if cls == ('time', 'samples'):
+            return [val for val in values for _ in range(ns)]
+        if cls == ('time', 'slices'):
+            return list(values) * (nt * nv)
+        if cls == ('vector', 'samples'):
+            return [val for val in values for _ in range(nt * ns)]
+        if cls == ('vector', 'slices'):
+            return list(values) * nv
+        raise ValueError("Unknown classification: %s" % (cls,))
+
+    def _merge_key(self, key, seq, dim):
+        '''Merge a single meta data key from `seq` into this extension.'''
+        scopes = []
+        for input_ext in seq:
+            try:
+                values, cls = input_ext.get_values_and_class(key)
+            except KeyError:
+                values, cls = None, None
+            scopes.append((values, cls))
+        present = [(values, cls) for values, cls in scopes if cls is not None]
+        if not present:
+            return
+        # Fast path for keys that are globally constant in every input. This
+        # avoids materializing the full coordinate grid for the common case.
+        if all(cls == ('global', 'const') for _, cls in present):
+            self._merge_const_key(key, scopes, dim)
+            return
+        ns = self.shape[self.slice_dim] if self.slice_dim is not None else 1
+        nt = self.shape[3] if len(self.shape) > 3 else 1
+        nv = self.shape[4] if len(self.shape) > 4 else 1
+        # Build each input's contribution on the result grid. Dimensions not
+        # owned by an input are broadcast over the result extent.
+        flats = []
+        sizes = []
+        for input_ext, (values, cls) in zip(seq, scopes):
+            in_ns = (input_ext.shape[input_ext.slice_dim]
+                     if input_ext.slice_dim is not None else ns)
+            in_nt = input_ext.shape[3] if len(input_ext.shape) > 3 else 1
+            in_nv = input_ext.shape[4] if len(input_ext.shape) > 4 else 1
+            grid = (in_ns if dim == self.slice_dim else ns,
+                    in_nt if dim == 3 else nt,
+                    in_nv if dim == 4 else nv)
+            sizes.append(grid)
+            if cls is not None and cls[1] == 'slices':
+                result_normal = self.slice_normal
+                input_normal = input_ext.slice_normal
+                if not (result_normal is not None and
+                        input_normal is not None and
+                        np.allclose(result_normal, input_normal)):
+                    cls = None
+            if cls is None:
+                flats.append([None] * (grid[0] * grid[1] * grid[2]))
+            else:
+                flats.append(self._flat_values(input_ext, cls, values, *grid))
+        if dim == self.slice_dim:
+            # Each input contributes a single slice. Interleave the inputs so
+            # that the slice index maps to the input index. Inputs without a
+            # slice dimension contribute the same value to every slice.
+            cells = []
+            for v in range(nv):
+                for t in range(nt):
+                    for flat, (in_ns, in_nt, in_nv) in zip(flats, sizes):
+                        src_v = v if in_nv > 1 else 0
+                        src_t = t if in_nt > 1 else 0
+                        cells.append(flat[(src_v * in_nt + src_t) * in_ns])
+        elif dim == 3:
+            # Each input contributes a single time point. Interleave per
+            # vector component so the time index maps to the input index.
+            cells = []
+            for v in range(nv):
+                for flat, (in_ns, in_nt, in_nv) in zip(flats, sizes):
+                    src_v = v if in_nv > 1 else 0
+                    start = (src_v * in_nt) * in_ns
+                    cells.extend(flat[start:start + in_ns])
+        elif dim == 4:
+            # Each input contributes a single vector component.
+            cells = []
+            for flat, (in_ns, in_nt, in_nv) in zip(flats, sizes):
+                cells.extend(flat[:in_ns * in_nt])
+        else:
+            # Merging along a spatial dimension other than the slice dim: all
+            # inputs describe the same coordinates. Combine contributions,
+            # keeping any disagreement and never letting a missing value erase
+            # evidence from another input.
+            cells = []
+            for idx in range(ns * nt * nv):
+                values_here = []
+                for flat in flats:
+                    val = flat[idx]
+                    if val is None:
+                        continue
+                    if not any(_values_equal(val, other)
+                               for other in values_here):
+                        values_here.append(val)
+                if not values_here:
+                    cells.append(None)
+                elif len(values_here) == 1:
+                    cells.append(values_here[0])
+                else:
+                    cells.append(values_here)
+        # Determine which axes actually vary, including missing values.
+        axes = set()
+        if ns > 1:
+            for v in range(nv):
+                for t in range(nt):
+                    start = (v * nt + t) * ns
+                    row = cells[start:start + ns]
+                    if any(not _values_equal(row[0], val) for val in row[1:]):
+                        axes.add('s')
+                        break
+                if 's' in axes:
+                    break
+        if nt > 1:
+            for v in range(nv):
+                for s in range(ns):
+                    col = [cells[(v * nt + t) * ns + s] for t in range(nt)]
+                    if any(not _values_equal(col[0], val) for val in col[1:]):
+                        axes.add('t')
+                        break
+                if 't' in axes:
+                    break
+        if nv > 1:
+            for t in range(nt):
+                for s in range(ns):
+                    col = [cells[(v * nt + t) * ns + s] for v in range(nv)]
+                    if any(not _values_equal(col[0], val) for val in col[1:]):
+                        axes.add('v')
+                        break
+                if 'v' in axes:
+                    break
+        target_cls = self._select_class(axes, self.valid_classes)
+        if target_cls == ('global', 'const'):
+            out_vals = cells[0]
+        elif target_cls == ('time', 'samples'):
+            out_vals = [cells[(v * nt + t) * ns]
+                        for v in range(nv) for t in range(nt)]
+        elif target_cls == ('vector', 'samples'):
+            out_vals = [cells[(v * nt) * ns] for v in range(nv)]
+        elif target_cls == ('time', 'slices'):
+            out_vals = [cells[s] for s in range(ns)]
+        elif target_cls == ('vector', 'slices'):
+            out_vals = [cells[t * ns + s]
+                        for t in range(nt) for s in range(ns)]
+        else:
+            out_vals = list(cells)
+        self.get_class_dict(target_cls)[key] = deepcopy(out_vals)
+        # Fold values that repeat across the vector/time samples back into a
+        # simpler classification, without dropping any coordinate.
+        while (self.get_classification(key) is not None and
+               self._simplify(key)):
+            pass
+
+    def _merge_const_key(self, key, scopes, dim):
+        '''Merge a key that is globally constant (or absent) in every input.'''
+        seq_vals = []
+        missing = []
+        for values, cls in scopes:
+            if cls is None:
+                seq_vals.append(None)
+                missing.append(True)
+            else:
+                seq_vals.append(values)
+                missing.append(False)
+        present_vals = [val for val, miss in zip(seq_vals, missing) if not miss]
+        if dim < 3 and dim != self.slice_dim:
+            # The values of different inputs describe the same coordinates,
+            # so a disagreement must be retained rather than dropped. A
+            # missing value does not remove existing evidence.
+            distinct = []
+            for val in present_vals:
+                if not any(_values_equal(val, other) for other in distinct):
+                    distinct.append(val)
+            if not distinct:
+                return
+            out_vals = distinct[0] if len(distinct) == 1 else distinct
+            self.get_class_dict(('global', 'const'))[key] = deepcopy(out_vals)
+            return
+        all_same = (not any(missing) and
+                    all(_values_equal(seq_vals[0], val)
+                        for val in seq_vals[1:]))
+        if all_same:
+            self.get_class_dict(('global', 'const'))[key] = deepcopy(seq_vals[0])
+            return
+        if dim == 3:
+            out_vals = [deepcopy(seq_vals[t])
+                        for v in range(self.shape[4] if len(self.shape) > 4 else 1)
+                        for t in range(len(seq_vals))]
+            self.get_class_dict(('time', 'samples'))[key] = out_vals
+        elif dim == 4:
+            self.get_class_dict(('vector', 'samples'))[key] = \
+                [deepcopy(val) for val in seq_vals]
+        elif dim == self.slice_dim:
+            target_cls = self._select_class(set('s'), self.valid_classes)
+            self.get_class_dict(target_cls)[key] = \
+                [deepcopy(val) for val in seq_vals]
+        else:
+            # Merging along another spatial dimension: variation along that
+            # dimension can not be represented, so retain a conflict.
+            distinct = []
+            for val in present_vals:
+                if not any(_values_equal(val, other) for other in distinct):
+                    distinct.append(val)
+            if not distinct:
+                return
+            out_vals = distinct[0] if len(distinct) == 1 else distinct
+            self.get_class_dict(('global', 'const'))[key] = deepcopy(out_vals)
 
     def guess_extra_dims(self) -> None:
         extra_shape = self.shape[3:]
@@ -415,7 +689,9 @@ class DcmMetaExtension(Nifti1Extension):
 
     @property
     def extract_version(self) -> Optional[str]:
-        return self._content["extract_version"]
+        '''The version of dcmstack that produced the meta data, when available.
+        Older extensions may not record this field.'''
+        return self._content.get("extract_version")
     
     @extract_version.setter
     def extract_version(self, value: Optional[str]) -> None:
@@ -1114,167 +1390,6 @@ class DcmMetaExtension(Nifti1Extension):
                         other._global_slice_subset(key, sample_base, idx)
                     self.get_class_dict(src_class)[key] = deepcopy(subset_vals)
                     self._simplify(key)
-
-    def _insert(self, dim, other):
-        self_slc_norm = self.slice_normal
-        other_slc_norm = other.slice_normal
-
-        #If we are not using slice meta data, temporarily remove it from the
-        #other dcmmeta object
-        use_slices = (not self_slc_norm is None and
-                      not other_slc_norm is None and
-                      np.allclose(self_slc_norm, other_slc_norm))
-        other_slc_meta = {}
-        if not use_slices:
-            for classes in other.valid_classes:
-                if classes[1] == 'slices':
-                    other_slc_meta[classes] = other.get_class_dict(classes)
-                    other._content[classes[0]][classes[1]] = {}
-        missing_keys = list(set(self.get_keys()) - set(other.get_keys()))
-        for other_classes in other.valid_classes:
-            other_keys = list(other.get_class_dict(other_classes).keys())
-
-            #Treat missing keys as if they were in global const and have a value
-            #of None
-            if other_classes == ('global', 'const'):
-                other_keys += missing_keys
-
-            #When possible, reclassify our meta data so it matches the other
-            #classification
-            for key in other_keys:
-                local_classes = self.get_classification(key)
-                if local_classes != other_classes:
-                    local_allow = self._preserving_changes[local_classes]
-                    other_allow = self._preserving_changes[other_classes]
-
-                    if other_classes in local_allow:
-                        self._change_class(key, other_classes)
-                    elif not local_classes in other_allow:
-                        best_dest = None
-                        for dest_class in local_allow:
-                            if (dest_class[0] in self._content and
-                               dest_class in other_allow):
-                                best_dest = dest_class
-                                break
-                        self._change_class(key, best_dest)
-
-            #Insert new meta data and further reclassify as necessary
-            for key in other_keys:
-                if dim == self.slice_dim:
-                    self._insert_slice(key, other)
-                elif dim < 3:
-                    self._insert_non_slice(key, other)
-                elif dim == 3:
-                    self._insert_sample(key, other, 'time')
-                elif dim == 4:
-                    self._insert_sample(key, other, 'vector')
-
-        #Restore per slice meta if needed
-        if not use_slices:
-            for classes in other.valid_classes:
-                if classes[1] == 'slices':
-                    other._content[classes[0]][classes[1]] = \
-                        other_slc_meta[classes]
-
-    def _insert_slice(self, key, other):
-        local_vals, classes = self.get_values_and_class(key)
-        other_vals = other._get_changed_class(key, classes, self.slice_dim)
-
-
-        #Handle some common / simple insertions with special cases
-        if classes == ('global', 'const'):
-            if local_vals != other_vals:
-                for dest_base in ('time', 'vector', 'global'):
-                    if dest_base in self._content:
-                        self._change_class(key, (dest_base, 'slices'))
-                        other_vals = other._get_changed_class(key,
-                                                              (dest_base,
-                                                               'slices'),
-                                                               self.slice_dim
-                                                             )
-                        self.get_values(key).extend(other_vals)
-                        break
-        elif classes == ('time', 'slices'):
-            local_vals.extend(other_vals)
-        else:
-            #Default to putting in global slices and simplifying later
-            if classes != ('global', 'slices'):
-                self._change_class(key, ('global', 'slices'))
-                local_vals = self.get_class_dict(('global', 'slices'))[key]
-                other_vals = other._get_changed_class(key,
-                                                      ('global', 'slices'),
-                                                      self.slice_dim)
-
-            #Need to interleave slices from different volumes
-            n_slices = self.n_slices
-            other_n_slices = other.n_slices
-            shape = self.shape
-            n_vols = 1
-            for dim_size in shape[3:]:
-                n_vols *= dim_size
-
-            intlv = []
-            loc_start = 0
-            oth_start = 0
-            for vol_idx in range(n_vols):
-                intlv += local_vals[loc_start:loc_start + n_slices]
-                intlv += other_vals[oth_start:oth_start + other_n_slices]
-                loc_start += n_slices
-                oth_start += other_n_slices
-
-            self.get_class_dict(('global', 'slices'))[key] = intlv
-
-    def _insert_non_slice(self, key, other):
-        local_vals, classes = self.get_values_and_class(key)
-        other_vals = other._get_changed_class(key, classes, self.slice_dim)
-
-        if local_vals != other_vals:
-            del self.get_class_dict(classes)[key]
-
-    def _insert_sample(self, key, other, sample_base):
-        local_vals, classes = self.get_values_and_class(key)
-        other_vals = other._get_changed_class(key, classes, self.slice_dim)
-
-        if classes == ('global', 'const'):
-            if local_vals != other_vals:
-                self._change_class(key, (sample_base, 'samples'))
-                local_vals = self.get_values(key)
-                other_vals = other._get_changed_class(key,
-                                                      (sample_base, 'samples'),
-                                                      self.slice_dim
-                                                     )
-                local_vals.extend(other_vals)
-        elif classes == (sample_base, 'samples'):
-            local_vals.extend(other_vals)
-        else:
-            if classes != ('global', 'slices'):
-                self._change_class(key, ('global', 'slices'))
-                local_vals = self.get_values(key)
-                other_vals = other._get_changed_class(key,
-                                                      ('global', 'slices'),
-                                                      self.slice_dim)
-
-            shape = self.shape
-            n_dims = len(shape)
-            if sample_base == 'time' and n_dims == 5:
-                #Need to interleave values from the time points in each vector
-                #component
-                n_slices = self.n_slices
-                slices_per_vec = n_slices * shape[3]
-                oth_slc_per_vec = n_slices * other.shape[3]
-
-                intlv = []
-                loc_start = 0
-                oth_start = 0
-                for vec_idx in range(shape[4]):
-                    intlv += local_vals[loc_start:loc_start+slices_per_vec]
-                    intlv += other_vals[oth_start:oth_start+oth_slc_per_vec]
-                    loc_start += slices_per_vec
-                    oth_start += oth_slc_per_vec
-
-                self.get_class_dict(('global', 'slices'))[key] = intlv
-            else:
-                local_vals.extend(other_vals)
 
 #Add our extension to nibabel
 nb.nifti1.extension_codes.add_codes(((dcm_meta_ecode,

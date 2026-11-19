@@ -819,6 +819,55 @@ def test_from_sequence_4d_time_to_5d():
     assert merged.get_values_and_class('time_slices_var') == ([0, 1, 0, 1, 1, 2, 1, 2], ('global', 'slices'))
     assert merged.get_values_and_class('time_slices_missing') == ([0, 1, 0, 1, None, None, None, None], ('global', 'slices'))
 
+def _make_merge_input(shape, slice_dim=2):
+    return dcmmeta.DcmMetaExtension.make_empty(shape,
+                                               np.eye(4),
+                                               np.eye(4),
+                                               slice_dim)
+
+def test_merge_missing_does_not_erase():
+    # A field absent from one input must not remove the value from the input
+    # that does provide it; the gap is represented explicitly as None.
+    ext1 = _make_merge_input((2, 2, 2))
+    ext2 = _make_merge_input((2, 2, 2))
+    ext1.get_class_dict(('global', 'const'))['EchoTime'] = 5
+    merged = dcmmeta.DcmMetaExtension.from_sequence([ext1, ext2], 3)
+    assert merged.get_values_and_class('EchoTime') == \
+        ([5, None], ('time', 'samples'))
+
+def test_merge_local_not_overridden_by_const():
+    # A locally corrected per-slice value must survive even if another input
+    # declares the same key globally constant.
+    ext1 = _make_merge_input((2, 2, 2))
+    ext2 = _make_merge_input((2, 2, 2))
+    ext1.get_class_dict(('global', 'slices'))['SliceLocation'] = [1, 2]
+    ext2.get_class_dict(('global', 'const'))['SliceLocation'] = 9
+    merged = dcmmeta.DcmMetaExtension.from_sequence([ext1, ext2], 3)
+    assert merged.get_values_and_class('SliceLocation') == \
+        ([1, 2, 9, 9], ('global', 'slices'))
+    merged = dcmmeta.DcmMetaExtension.from_sequence([ext2, ext1], 3)
+    assert merged.get_values_and_class('SliceLocation') == \
+        ([9, 9, 1, 2], ('global', 'slices'))
+
+def test_merge_overlapping_conflict_retained():
+    # Merging along a non-slice spatial dimension maps inputs onto the same
+    # coordinates. Disagreements must be kept as a conflict rather than one
+    # side silently winning.
+    ext1 = _make_merge_input((1, 2, 2))
+    ext2 = _make_merge_input((1, 2, 2))
+    ext1.get_class_dict(('global', 'slices'))['SliceLocation'] = [1, 2]
+    ext2.get_class_dict(('global', 'slices'))['SliceLocation'] = [1, 3]
+    merged = dcmmeta.DcmMetaExtension.from_sequence([ext1, ext2], 0)
+    assert merged.get_values_and_class('SliceLocation') == \
+        ([1, [2, 3]], ('global', 'slices'))
+
+def test_merge_common_dim_mismatch():
+    # Inputs must agree on every dimension other than the merge dimension.
+    ext1 = _make_merge_input((4, 4, 1))
+    ext2 = _make_merge_input((3, 4, 1))
+    with pytest.raises(ValueError):
+        dcmmeta.DcmMetaExtension.from_sequence([ext1, ext2], 2)
+
 def test_from_sequence_no_slc():
     ext1 = dcmmeta.DcmMetaExtension.make_empty((2, 2, 2), np.eye(4))
     ext2 = dcmmeta.DcmMetaExtension.make_empty((2, 2, 2), np.eye(4))
