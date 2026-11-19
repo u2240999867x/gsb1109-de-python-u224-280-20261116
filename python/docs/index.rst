@@ -5,6 +5,7 @@ Usage Examples
 
 .. toctree::
    raw_reader_writer_example
+   shared_stream_example
    protobuf_example
    ros1_example
    ros2_example
