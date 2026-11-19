@@ -33,6 +33,7 @@ from pyomo.core.base.indexed_component import (
 )
 from pyomo.core.base.initializer import Initializer, PartialInitializer
 from pyomo.core.base.misc import apply_parameterized_indexed_rule
+from pyomo.core.base.observation import ParamProvenance, ValueOrigin
 from pyomo.core.base.set import Reals, _AnySet, SetInitializer
 from pyomo.core.base.units_container import units
 from pyomo.core.expr import GetItemExpression
@@ -216,6 +217,13 @@ class ParamData(ComponentData, NumericValue):
         except:
             self._value = old_value
             raise
+        # Every successful write to a ParamData is an explicit
+        # observation.  Default-rule materialization in a mutable Param
+        # sets '_provenance_suspended' so that it is not misrecorded.
+        if not getattr(_comp, '_provenance_suspended', False):
+            if idx is NOTSET:
+                idx = self._index
+            _comp._provenance._mark_observed(idx)
 
     def __call__(self, exception=NOTSET):
         """
@@ -366,6 +374,9 @@ class Param(IndexedComponent, IndexedComponent_NDArrayMixin):
         )
         self._dense_initialize = kwd.pop('initialize_as_dense', False)
         self._units = kwd.pop('units', None)
+        # Provenance record separating explicit observations from
+        # default-rule values and indices that still lack evidence.
+        self._provenance = ParamProvenance(self)
 
         if self._mutable is None:
             if self._units is None:
@@ -616,6 +627,7 @@ class Param(IndexedComponent, IndexedComponent_NDArrayMixin):
                     if index not in self._data:
                         self._data[index] = ParamData(self)
                     self._data[index]._value = new_value
+                    self._provenance._mark_observed(index)
             else:
                 # For scalars, we will choose an approach based on
                 # how "dense" the Param is
@@ -623,14 +635,17 @@ class Param(IndexedComponent, IndexedComponent_NDArrayMixin):
                     for index in self._index_set:
                         p = self._data[index] = ParamData(self)
                         p._value = new_values
+                        self._provenance._mark_observed(index)
                 elif len(self._data) == len(self._index_set):
                     for index in self._index_set:
                         self._data[index]._value = new_values
+                        self._provenance._mark_observed(index)
                 else:
                     for index in self._index_set:
                         if index not in self._data:
                             self._data[index] = ParamData(self)
                         self._data[index]._value = new_values
+                        self._provenance._mark_observed(index)
         else:
             #
             # Initialize a scalar
@@ -649,11 +664,19 @@ class Param(IndexedComponent, IndexedComponent_NDArrayMixin):
         """
         Perform error checks and then set the default value for this parameter.
 
+        Replacing the default only changes how *future* default queries are
+        answered: it never rewrites the explicit observations recorded for
+        this Param.  Passing ``Param.NoValue`` removes the default rule.
+        Use :meth:`indices_affected_by_default_change` to compute the indices
+        whose defaulted value would actually change.
+
         NOTE: this test will not validate the value of function return values.
         """
+        if val is Param.NoValue:
+            self._default = None
+            return
         if (
             self._constructed
-            and val is not Param.NoValue
             and type(val) in native_types
             and val not in self.domain
         ):
@@ -662,6 +685,19 @@ class Param(IndexedComponent, IndexedComponent_NDArrayMixin):
                 % (str(val), self.name, self.domain.name)
             )
         self._default = Initializer(val)
+
+    def __delitem__(self, index):
+        super().__delitem__(index)
+        # Removing the materialized value also withdraws the collection
+        # evidence for that index; it reverts to the default rule or to
+        # the missing set.  For a Reference the deletion is delegated to
+        # the referenced component's data, so update its record instead.
+        self._provenance_target()._provenance._mark_missing_observation(index)
+
+    def clear(self):
+        """Clear the data, including the explicit-observation record."""
+        super().clear()
+        self._provenance = ParamProvenance(self)
 
     def default(self):
         """
@@ -682,6 +718,71 @@ class Param(IndexedComponent, IndexedComponent_NDArrayMixin):
         if self._default.constant():
             return self._default(self, None)
         return self._default
+
+    def _provenance_target(self):
+        """Return the Param whose provenance this component reports.
+
+        A Reference Param shares its data with another component and
+        never accumulates its own observations; route all provenance
+        queries to the referenced Param.  (References created from
+        component slices have a non-Param referent and keep their own,
+        necessarily empty, record.)
+        """
+        if self.is_reference():
+            referent = getattr(self, 'referent', None)
+            if isinstance(referent, Param):
+                return referent
+        return self
+
+    def observation_provenance(self):
+        """Return the :class:`ParamProvenance` record for this Param.
+
+        The record distinguishes explicit observations, values produced
+        by the default rule, and indices that still lack collection
+        evidence.  It is maintained independently of the materialized
+        component data, so explicitly observed zeros and default values
+        that were injected into a mutable Param remain distinguishable.
+        """
+        return self._provenance_target()._provenance
+
+    def explicit_observations(self):
+        """Return ``{index: value}`` for the explicitly observed indices."""
+        return self._provenance_target()._provenance.explicit_observations()
+
+    def default_values(self):
+        """Return ``{index: value}`` produced by the current default rule.
+
+        Only indices without an explicit observation are included; the
+        default rule is re-evaluated against the current model state.
+        """
+        return self._provenance_target()._provenance.default_values()
+
+    def missing_indices(self):
+        """Return the set of indices without an observation or default."""
+        return self._provenance_target()._provenance.missing_indices()
+
+    def value_origin(self, index):
+        """Return the :class:`ValueOrigin` of a single index."""
+        return self._provenance_target()._provenance.value_origin(index)
+
+    def provenance_report(self):
+        """Return the three-way explicit/default/missing classification."""
+        return self._provenance_target()._provenance.provenance()
+
+    def indices_affected_by_default_change(self, new_default):
+        """Indices actually affected by replacing the default rule.
+
+        Returns an ``(affected, unverifiable)`` pair of index sets.
+        Historical observations are never affected; both rules are
+        evaluated against the current model state so index-dependent
+        rules (including rules that read other sets or parameters) are
+        compared on their produced values, not on materialized data.
+        Indices for which a rule cannot be evaluated are reported in
+        ``unverifiable`` as the scope that still requires auditing.
+        """
+        return self._provenance_target()._provenance.affected_by_default_change(
+            new_default
+        )
 
     def _getitem_when_not_present(self, index):
         """
@@ -729,7 +830,14 @@ class Param(IndexedComponent, IndexedComponent_NDArrayMixin):
         # then call validate.
         #
         if self._mutable:
-            return self._setitem_when_not_present(index, val)
+            # This value originates from the default/initializer rule,
+            # not from an explicit observation.  Suspend provenance
+            # tracking while it is injected so it is not misrecorded.
+            self._provenance_suspended = True
+            try:
+                return self._setitem_when_not_present(index, val)
+            finally:
+                self._provenance_suspended = False
         #
         # For immutable params, we never inject the default into the data
         # dictionary.  This will break validation, as the validation rule is
@@ -788,6 +896,7 @@ class Param(IndexedComponent, IndexedComponent_NDArrayMixin):
             # validation that occurs in ParamData.set_value()
             try:
                 self._validate_value(index, value)
+                self._provenance._mark_observed(index)
                 return value
             except:
                 self._data[index] = old_value
@@ -831,6 +940,7 @@ class Param(IndexedComponent, IndexedComponent_NDArrayMixin):
                 # Because we do not have a ParamData, we cannot rely on the
                 # validation that occurs in ParamData.set_value()
                 self._validate_value(index, value, _check_domain)
+                self._provenance._mark_observed(index)
                 return value
         except:
             del self._data[index]

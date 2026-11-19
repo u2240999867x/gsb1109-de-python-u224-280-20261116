@@ -108,6 +108,7 @@ from pyomo.core.base.objective import (
     ObjectiveData,
 )
 from pyomo.core.base.param import Param, ParamData
+from pyomo.core.base.observation import ParamProvenance, ValueOrigin
 from pyomo.core.base.piecewise import Piecewise, PiecewiseData
 from pyomo.core.base.set import (
     Set,

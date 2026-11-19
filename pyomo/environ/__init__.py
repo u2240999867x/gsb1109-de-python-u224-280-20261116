@@ -179,6 +179,7 @@ from pyomo.core import (
     simple_set_rule,
     RangeSet,
     Param,
+    ValueOrigin,
     Var,
     VarList,
     ScalarVar,
