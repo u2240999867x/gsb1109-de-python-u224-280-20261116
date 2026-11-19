@@ -1,10 +1,16 @@
 """Extract meta data from a DICOM data set into human-readable and JSON compatible dict
 
-We don't do any normalization at this level beyond converting decimal strings to float 
-and making sure strings are unicode. The one exception is translating private 
+We don't do any normalization at this level beyond converting decimal strings to float
+and making sure strings are unicode. The one exception is translating private
 mini-headers embedded in certain elements.
+
+A `SourcePolicy` can be applied at the extraction exit (see
+`MetaExtractor.project`) to restrict which source elements may contribute to
+the output. Decisions are based on source provenance rather than output key
+names, so restricted values cannot flow back through derived (translated)
+keys, error summaries, or retained audit records.
 """
-import struct, re, warnings, enum
+import struct, re, warnings, enum, hashlib, json, fnmatch
 from collections import namedtuple
 from typing import Dict, List
 
@@ -321,6 +327,307 @@ class TextConverter:
 _get_text = TextConverter()
 
 
+SourceRef = namedtuple('SourceRef', ['tag', 'creator'])
+'''A reference to a source DICOM element. The `tag` is a pydicom.tag.BaseTag
+(or None) and `creator` is the normalized private creator string for private
+elements (or None for standard elements).'''
+
+
+def _norm_creator(creator):
+    '''Normalize a private creator string for comparison.'''
+    return creator.upper().replace(' ', '_')
+
+
+_TAG_STR_RE = re.compile(
+    r'^\(?\s*(0x[0-9a-fA-F]+|\d+)\s*,\s*(0x[0-9a-fA-F]+|\d+)\s*\)?$'
+)
+
+
+def normalize_source(src):
+    '''Normalize a source identifier into a `SourceRef`.
+
+    Accepted forms are a `SourceRef`, a pydicom tag (or ``(group, elem)``
+    tuple), a DICOM keyword string (e.g. "PatientsName"), a hex tag string
+    (e.g. "0x0010,0x0010"), or a private creator string (e.g. "SIEMENS CSA
+    HEADER") which matches any element in that private block.
+    '''
+    if isinstance(src, SourceRef):
+        return src
+    if isinstance(src, BaseTag) or isinstance(src, int):
+        return SourceRef(BaseTag(src), None)
+    if isinstance(src, tuple) and len(src) == 2:
+        return SourceRef(BaseTag(pydicom.tag.Tag(src[0], src[1])), None)
+    if isinstance(src, str):
+        tag = tag_for_keyword(src)
+        if tag is not None:
+            return SourceRef(BaseTag(tag), None)
+        match = _TAG_STR_RE.match(src)
+        if match is not None:
+            group, elem = int(match.group(1), 0), int(match.group(2), 0)
+            return SourceRef(BaseTag(pydicom.tag.Tag(group, elem)), None)
+        return SourceRef(None, _norm_creator(src))
+    raise ValueError('Unable to normalize source identifier: %r' % (src,))
+
+
+def describe_source(ref):
+    '''Human readable description of a `SourceRef` (contains no values).'''
+    parts = []
+    if ref.tag is not None:
+        keyword = keyword_for_tag(ref.tag)
+        parts.append(keyword if keyword else tag_to_str(ref.tag))
+    if ref.creator is not None:
+        parts.append('private-creator:%s' % ref.creator)
+    return '/'.join(parts) if parts else 'unknown'
+
+
+def source_matches(ref, restricted):
+    '''Check if the source `ref` matches the restricted source `restricted`.'''
+    if restricted.tag is not None and ref.tag == restricted.tag:
+        return True
+    if restricted.creator is not None and ref.creator is not None:
+        return _norm_creator(ref.creator) == restricted.creator
+    return False
+
+
+class SourcePolicy(object):
+    '''Policy describing which extraction sources are restricted.
+
+    Parameters
+    ----------
+    version : str
+        Version identifier for this policy. Stamped onto every projection so
+        artifacts produced under older policies can be recognized.
+
+    restricted_sources : sequence
+        Source identifiers (see `normalize_source`) whose values must not
+        appear in the output, either directly or through derived keys.
+
+    translator_deps : dict
+        Mapping of translator name to the source identifiers that translator
+        depends on. These are unioned with the element the translator
+        actually reads, so outputs are judged by their true sources rather
+        than their (derived) key names.
+
+    derivation_rules : sequence
+        Output key patterns (fnmatch syntax, e.g.
+        "CsaSeries.MrPhoenixProtocol.alFree*") that are explicitly allowed
+        even when derived from a restricted source.
+    '''
+
+    def __init__(self, version, restricted_sources=(), translator_deps=None,
+                 derivation_rules=()):
+        self.version = str(version)
+        self.restricted_sources = frozenset(
+            normalize_source(src) for src in restricted_sources
+        )
+        self.translator_deps = {}
+        for name, deps in (translator_deps or {}).items():
+            self.translator_deps[name] = frozenset(
+                normalize_source(dep) for dep in deps
+            )
+        self.derivation_rules = tuple(derivation_rules)
+
+    def dependencies_for(self, translator):
+        '''Effective source dependencies for a `Translator`: the declared
+        dependencies unioned with the element the translator reads.'''
+        deps = set(self.translator_deps.get(translator.name, ()))
+        creator = translator.priv_creator
+        deps.add(
+            SourceRef(BaseTag(translator.tag),
+                      None if creator is None else _norm_creator(creator))
+        )
+        return frozenset(deps)
+
+    def translator_is_restricted(self, translator):
+        '''Check if a translator depends on any restricted source.'''
+        return any(
+            source_matches(dep, restricted)
+            for dep in self.dependencies_for(translator)
+            for restricted in self.restricted_sources
+        )
+
+    def allows_derivation(self, key):
+        '''Check if an output key is explicitly allowed by a derivation rule.'''
+        return any(
+            fnmatch.fnmatchcase(key, rule) for rule in self.derivation_rules
+        )
+
+    def _canonical(self):
+        return json.dumps(
+            {
+                'version': self.version,
+                'restricted_sources': sorted(
+                    describe_source(ref) for ref in self.restricted_sources
+                ),
+                'translator_deps': {
+                    name: sorted(describe_source(dep) for dep in deps)
+                    for name, deps in sorted(self.translator_deps.items())
+                },
+                'derivation_rules': sorted(self.derivation_rules),
+            },
+            sort_keys=True,
+        )
+
+    @property
+    def fingerprint(self):
+        '''Content hash of the policy, so artifacts can be tied to the exact
+        policy (version and rules) that produced them.'''
+        return hashlib.sha256(self._canonical().encode('utf-8')).hexdigest()
+
+    def project(self, meta, provenance):
+        '''Project extracted meta data through this policy.
+
+        Parameters
+        ----------
+        meta : dict
+            Extracted meta data (output keys to values).
+
+        provenance : dict
+            Mapping of output key to a set of `SourceRef` identifying the
+            source elements the value was derived from.
+
+        Returns
+        -------
+        projection : PolicyProjection
+            The kept meta data plus an audit record of what was removed by
+            policy and which restricted sources were never observed.
+        '''
+        kept = {}
+        removed = {}
+        dispositions = {ref: 'absent' for ref in self.restricted_sources}
+        for key, value in meta.items():
+            sources = set(provenance.get(key, ()))
+            # Union in any declared translator dependencies so decisions are
+            # based on sources, not on the derived key names
+            for trans_name, deps in self.translator_deps.items():
+                if key == trans_name or key.startswith(trans_name + '.'):
+                    sources |= deps
+            matched = [
+                restricted for restricted in self.restricted_sources
+                if any(source_matches(src, restricted) for src in sources)
+            ]
+            if matched and not self.allows_derivation(key):
+                # Record only key names and source references, never values
+                removed[key] = sorted(describe_source(ref) for ref in matched)
+                for ref in matched:
+                    dispositions[ref] = 'removed'
+            else:
+                for ref in matched:
+                    if dispositions[ref] == 'absent':
+                        dispositions[ref] = 'retained-by-rule'
+                kept[key] = value
+        return PolicyProjection(kept, removed, dispositions, self)
+
+
+class PolicyProjection(object):
+    '''The result of projecting extracted meta data through a `SourcePolicy`.
+
+    Attributes
+    ----------
+    meta : dict
+        The meta data kept by the policy.
+
+    removed : dict
+        Mapping of removed output key to the restricted sources that caused
+        the removal. Never contains the removed values.
+
+    policy_version : str
+        Version of the policy that produced this projection.
+
+    policy_fingerprint : str
+        Fingerprint of the policy that produced this projection.
+    '''
+
+    def __init__(self, meta, removed, dispositions, policy):
+        self.meta = meta
+        self.removed = removed
+        self._dispositions = dispositions
+        self.policy_version = policy.version
+        self.policy_fingerprint = policy.fingerprint
+
+    @property
+    def source_dispositions(self):
+        '''Mapping of restricted source description to its disposition:
+        "removed" (observed and suppressed), "retained-by-rule" (observed,
+        only released through allowed derivation rules), or "absent" (never
+        observed).'''
+        return {
+            describe_source(ref): status
+            for ref, status in self._dispositions.items()
+        }
+
+    @property
+    def absent(self):
+        '''Restricted sources that were never observed (missing observations),
+        reported separately from sources that were removed by policy.'''
+        return sorted(
+            desc for desc, status in self.source_dispositions.items()
+            if status == 'absent'
+        )
+
+    def is_current(self, policy):
+        '''Check if this projection was produced by the given policy.'''
+        return (
+            self.policy_version == policy.version
+            and self.policy_fingerprint == policy.fingerprint
+        )
+
+    def to_dict(self):
+        '''Serialize the projection, including the policy stamp, to a dict.'''
+        return {
+            'meta': self.meta,
+            'policy': {
+                'version': self.policy_version,
+                'fingerprint': self.policy_fingerprint,
+            },
+            'removed': self.removed,
+            'absent': self.absent,
+            'source_dispositions': self.source_dispositions,
+        }
+
+    # Mapping-style read access to the kept meta data
+    def __getitem__(self, key):
+        return self.meta[key]
+
+    def __contains__(self, key):
+        return key in self.meta
+
+    def __iter__(self):
+        return iter(self.meta)
+
+    def __len__(self):
+        return len(self.meta)
+
+    def get(self, key, default=None):
+        return self.meta.get(key, default)
+
+    def keys(self):
+        return self.meta.keys()
+
+    def items(self):
+        return self.meta.items()
+
+    def values(self):
+        return self.meta.values()
+
+
+def verify_projection(projection, policy):
+    '''Verify a projection artifact was produced by the given policy.
+
+    Accepts a `PolicyProjection` or a dict produced by
+    `PolicyProjection.to_dict`. Returns False if the artifact was produced
+    under a different policy version or content, so stale artifacts cannot
+    masquerade as results of the current policy.
+    '''
+    if isinstance(projection, PolicyProjection):
+        return projection.is_current(policy)
+    info = projection.get('policy', {})
+    return (
+        info.get('version') == policy.version
+        and info.get('fingerprint') == policy.fingerprint
+    )
+
+
 class MetaExtractor(object):
     '''Callable object for extracting meta data from a dicom dataset
 
@@ -342,6 +649,11 @@ class MetaExtractor(object):
 
     warn_on_trans_except : bool
         Convert any exceptions from translators into warnings.
+
+    policy : SourcePolicy
+        Optional source policy. When set, translator error summaries that
+        could leak restricted values are suppressed, and the `project` method
+        can be used without passing a policy explicitly.
     '''
 
     IGNORE_RULES = IGNORE_BINARY_RULES + (make_ignore_unknown_private(),)
@@ -361,11 +673,12 @@ class MetaExtractor(object):
     }
 
     def __init__(
-        self, 
-        ignore_rules=None, 
-        translators=None, 
+        self,
+        ignore_rules=None,
+        translators=None,
         conversions=None,
-        warn_on_trans_except=True
+        warn_on_trans_except=True,
+        policy=None
     ):
         if ignore_rules is None:
             self.ignore_rules = self.IGNORE_RULES
@@ -380,6 +693,29 @@ class MetaExtractor(object):
         else:
             self.conversions = conversions
         self.warn_on_trans_except = warn_on_trans_except
+        self.policy = policy
+
+    def _get_priv_creator(self, tag: BaseTag, pblocks: List[PrivateBlock]):
+        '''Get the private creator string for a private element, or None'''
+        for pblock in pblocks:
+            if pblock.block_start == tag.elem & 0xFF00:
+                return pblock.private_creator
+        return None
+
+    def _warn_trans_exception(self, trans, exc):
+        '''Warn about a translator exception.
+
+        If a source policy is attached and the translator depends on a
+        restricted source, the exception details (which may embed restricted
+        values) are suppressed so they cannot flow back through the warning.
+        '''
+        if self.policy is not None and self.policy.translator_is_restricted(trans):
+            warnings.warn("Exception from translator %s: details suppressed "
+                          "by source policy (version %s)" %
+                          (trans.name, self.policy.version))
+        else:
+            warnings.warn("Exception from translator %s: %s" %
+                          (trans.name, repr(str(exc))))
 
     def _get_priv_name(self, tag: BaseTag, pblocks: List[PrivateBlock]):
         '''Get the name to use for any private elements'''
@@ -456,6 +792,46 @@ class MetaExtractor(object):
         representation is 'DS' or 'IS' (decimal/integer strings) they are
         converted to float and int types.
         '''
+        return self._extract(dcm)[0]
+
+    def project(self, dcm: pydicom.Dataset, policy=None):
+        '''Extract meta data and project it through a source policy.
+
+        Parameters
+        ----------
+        dcm : pydicom.dataset.Dataset
+            The DICOM dataset to extract the meta data from.
+
+        policy : SourcePolicy
+            The policy to project through. If None, the policy attached to
+            this extractor is used.
+
+        Returns
+        -------
+        projection : PolicyProjection
+            The kept meta data plus an audit record distinguishing
+            policy-removed keys from missing observations, stamped with the
+            policy version and fingerprint.
+        '''
+        if policy is None:
+            policy = self.policy
+        if policy is None:
+            raise ValueError("A SourcePolicy is required for projection")
+        meta, provenance = self._extract(dcm)
+        return policy.project(meta, provenance)
+
+    def _extract(self, dcm: pydicom.Dataset):
+        '''Extract meta data, tracking the source elements of each output key.
+
+        Returns
+        -------
+        meta : dict
+            A dictionary of extracted meta data.
+
+        provenance : dict
+            Mapping of output key to a frozenset of `SourceRef` identifying
+            the source elements the value was derived from.
+        '''
         # Some converters need to see full dataset before converting elements
         for conv in set(self.conversions.values()):
             if hasattr(conv, "prep_dataset"):
@@ -484,6 +860,7 @@ class MetaExtractor(object):
                     raise ValueError("Duplicate translators found")
                 trans_map[src_tag] = translator
         result = {}
+        provenance = {}
         trans_meta = {}
         charset = dcm._character_set
         for tag in tags:
@@ -500,20 +877,29 @@ class MetaExtractor(object):
                     except Exception as e:
                         if not self.warn_on_trans_except:
                             raise
-                        warnings.warn("Exception from translator %s: %s" %
-                                        (trans.name,
-                                        repr(str(e))))
+                        self._warn_trans_exception(trans, e)
                     else:
                         if meta:
-                            trans_meta[trans.name] = meta
+                            creator = trans.priv_creator
+                            src = SourceRef(
+                                BaseTag(tag),
+                                None if creator is None else _norm_creator(creator)
+                            )
+                            trans_meta[trans.name] = (meta, src)
                     continue
                 # Otherwise we construct a name for the private element
                 name = self._get_priv_name(tag, grp_blocks[tag.group])
+                creator = self._get_priv_creator(tag, grp_blocks[tag.group])
+                src = SourceRef(
+                    BaseTag(tag),
+                    None if creator is None else _norm_creator(creator)
+                )
             else:
                 name = keyword_for_tag(tag)
                 if name == "":
                     warnings.warn("Your 'pydicom' is too old, standard tag not in datadict")
                     name = tag_to_str(tag)
+                src = SourceRef(BaseTag(tag), None)
             # Check if we are ignoring this element
             if any(rule(tag, name, dcm) for rule in self.ignore_rules):
                 continue
@@ -524,11 +910,16 @@ class MetaExtractor(object):
             # Handle elements that are sequences with recursion
             if elem.VR == "SQ":
                 value = []
+                sources = {src}
                 for val in elem.value:
-                    value.append(self(val))
+                    sub_meta, sub_prov = self._extract(val)
+                    value.append(sub_meta)
+                    for sub_srcs in sub_prov.values():
+                        sources |= sub_srcs
                 if all(x is None for x in value):
                     continue
                 result[name] =  value
+                provenance[name] = frozenset(sources)
             # Otherwise just make sure the value is unpacked
             else:
                 # Handle unicode conversion
@@ -537,11 +928,14 @@ class MetaExtractor(object):
                 if value is None:
                     continue
                 result[name] =  value
+                provenance[name] = frozenset((src,))
         # Inject translator results
-        for trans_name, meta in trans_meta.items():
+        for trans_name, (meta, src) in trans_meta.items():
             for name, value in meta.items():
-                result[f"{trans_name}.{name}"] = value
-        return result
+                key = f"{trans_name}.{name}"
+                result[key] = value
+                provenance[key] = frozenset((src,))
+        return result, provenance
 
 
 # Preconfigure a few extractors with increasing levels of meta data extraction
