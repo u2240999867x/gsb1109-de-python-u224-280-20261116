@@ -19,8 +19,11 @@ Decoding
 Types
 -----
 
+.. autoclass:: cbor2.CBORMap
 .. autoclass:: cbor2.CBORSimpleValue
 .. autoclass:: cbor2.CBORTag
+.. autofunction:: cbor2.cbor_key_to_str
+.. autofunction:: cbor2.cbor_map_to_str_keys
 .. data:: cbor2.undefined
     A singleton representing the CBOR "undefined" value.
 
@@ -34,3 +37,4 @@ Exceptions
 .. autoexception:: cbor2.CBORDecodeError
 .. autoexception:: cbor2.CBORDecodeValueError
 .. autoexception:: cbor2.CBORDecodeEOF
+.. autoexception:: cbor2.CBORMapKeyCollisionError

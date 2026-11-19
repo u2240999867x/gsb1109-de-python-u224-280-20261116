@@ -14,9 +14,13 @@ from ._types import CBOREncodeError as CBOREncodeError
 from ._types import CBOREncodeTypeError as CBOREncodeTypeError
 from ._types import CBOREncodeValueError as CBOREncodeValueError
 from ._types import CBORError as CBORError
+from ._types import CBORMap as CBORMap
+from ._types import CBORMapKeyCollisionError as CBORMapKeyCollisionError
 from ._types import CBORSimpleValue as CBORSimpleValue
 from ._types import CBORTag as CBORTag
 from ._types import FrozenDict as FrozenDict
+from ._types import cbor_key_to_str as cbor_key_to_str
+from ._types import cbor_map_to_str_keys as cbor_map_to_str_keys
 from ._types import undefined as undefined
 
 try:

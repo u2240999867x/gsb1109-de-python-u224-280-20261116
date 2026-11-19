@@ -820,6 +820,136 @@ def test_object_hook_exception(impl):
         impl.loads(payload, object_hook=object_hook)
 
 
+# 4 pairs: (1, "a"), (True, "b"), (1, "a"), (2, 3)
+DUPLICATE_KEY_PAYLOAD = unhexlify("a4016161f561620161610203")
+
+
+def test_object_pairs_hook(impl):
+    payload = unhexlify("A2616103616205")
+    decoded = impl.loads(payload, object_pairs_hook=lambda decoder, pairs: tuple(pairs))
+    assert decoded == (("a", 3), ("b", 5))
+
+
+def test_object_pairs_hook_preserves_duplicates_and_key_types(impl):
+    decoded = impl.loads(DUPLICATE_KEY_PAYLOAD, object_pairs_hook=lambda decoder, pairs: pairs)
+    assert [(type(key), key) for key, _ in decoded] == [
+        (int, 1),
+        (bool, True),
+        (int, 1),
+        (int, 2),
+    ]
+    assert decoded == [(1, "a"), (True, "b"), (1, "a"), (2, 3)]
+
+
+def test_object_pairs_hook_exception(impl):
+    def object_pairs_hook(decoder, pairs):
+        raise RuntimeError("foo")
+
+    with pytest.raises(RuntimeError, match="foo"):
+        impl.loads(DUPLICATE_KEY_PAYLOAD, object_pairs_hook=object_pairs_hook)
+
+
+def test_object_hook_and_object_pairs_hook_conflict(impl):
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        impl.loads(
+            DUPLICATE_KEY_PAYLOAD,
+            object_hook=lambda decoder, value: value,
+            object_pairs_hook=lambda decoder, pairs: pairs,
+        )
+
+
+def test_map_pairs(impl):
+    decoded = impl.loads(DUPLICATE_KEY_PAYLOAD, map_pairs=True)
+    assert isinstance(decoded, impl.CBORMap)
+    assert decoded == impl.CBORMap([(1, "a"), (True, "b"), (1, "a"), (2, 3)])
+
+
+def test_map_pairs_nested(impl):
+    decoded = impl.loads(unhexlify("a16161a201f5026162"), map_pairs=True)
+    assert decoded == impl.CBORMap([("a", impl.CBORMap([(1, True), (2, "b")]))])
+
+
+def test_map_pairs_conflicts(impl):
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        impl.loads(
+            DUPLICATE_KEY_PAYLOAD,
+            map_pairs=True,
+            object_pairs_hook=lambda decoder, pairs: pairs,
+        )
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        impl.loads(
+            DUPLICATE_KEY_PAYLOAD,
+            map_pairs=True,
+            object_hook=lambda decoder, value: value,
+        )
+
+
+def test_map_pairs_cyclic(impl):
+    decoded = impl.loads(unhexlify("d81ca100d81d00"), map_pairs=True)
+    assert isinstance(decoded, impl.CBORMap)
+    assert decoded[0][0] == 0
+    assert decoded[0][1] is decoded
+
+
+def test_key_to_str_cyclic(impl):
+    decoded = impl.loads(unhexlify("d81ca100d81d00"), key_to_str=True)
+    assert decoded["0"] is decoded
+
+
+def test_map_pairs_key_to_str_cyclic(impl):
+    decoded = impl.loads(unhexlify("d81ca100d81d00"), map_pairs=True, key_to_str=True)
+    assert decoded[0][1] is decoded
+
+
+def test_map_pairs_in_immutable_context(impl):
+    # A CBORMap used as a map key must be decoded as an immutable value
+    decoded = impl.loads(unhexlify("a1a201616102616203"), map_pairs=True)
+    assert decoded == impl.CBORMap([(impl.CBORMap([(1, "a"), (2, "b")]), 3)])
+
+
+def test_map_key_to_str(impl):
+    decoded = impl.loads(unhexlify("a2016161026162"), key_to_str=True)
+    assert decoded == {"1": "a", "2": "b"}
+
+
+def test_map_key_to_str_collision_reports_original_keys(impl):
+    with pytest.raises(impl.CBORMapKeyCollisionError) as exc:
+        impl.loads(DUPLICATE_KEY_PAYLOAD, key_to_str=True)
+
+    assert exc.value.collisions == [("1", [1, 1])]
+    assert "1" in str(exc.value)
+    assert "[1, 1]" in str(exc.value)
+
+
+def test_map_key_to_str_collision_between_bytes_and_text(impl):
+    # {"a": 1, b"a": 2} -> both keys convert to "a"
+    with pytest.raises(impl.CBORMapKeyCollisionError) as exc:
+        impl.loads(unhexlify("a2616101416102"), key_to_str=True)
+
+    assert exc.value.collisions == [("a", ["a", b"a"])]
+
+
+def test_map_key_to_str_with_map_pairs(impl):
+    decoded = impl.loads(unhexlify("a2016161f56162"), map_pairs=True, key_to_str=True)
+    assert decoded == impl.CBORMap([("1", "a"), ("True", "b")])
+
+
+def test_cbor_map_dict_conversion(impl):
+    decoded = impl.loads(DUPLICATE_KEY_PAYLOAD, map_pairs=True)
+    assert decoded.as_dict() == {1: "a", 2: 3}
+    with pytest.raises(impl.CBORMapKeyCollisionError):
+        decoded.as_dict(key_to_str=True)
+
+
+def test_cbor_map_helpers(impl):
+    cbor_map = impl.CBORMap([(1, "a"), (2, "b")])
+    assert cbor_map.keys() == [1, 2]
+    assert cbor_map.values() == ["a", "b"]
+    assert cbor_map.items() == [(1, "a"), (2, "b")]
+    assert cbor_map.get(2) == "b"
+    assert cbor_map.get(3) is None
+
+
 def test_load_from_file(impl, tmpdir):
     path = tmpdir.join("testdata.cbor")
     path.write_binary(b"\x82\x01\x0a")

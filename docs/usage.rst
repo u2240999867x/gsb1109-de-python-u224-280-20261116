@@ -114,6 +114,57 @@ a :class:`CBORTag` object like so::
 
 This will be ignored on decode and the original data content will be returned.
 
+Lossless map handling
+---------------------
+
+By default, maps are decoded into :class:`dict` objects. This is convenient but lossy:
+duplicate keys are collapsed (the last value wins) and key types that compare equal (such as
+``1``, ``True`` and ``1.0``) cannot be distinguished. When every member and the original key
+types matter, pass ``map_pairs=True``::
+
+    from cbor2 import loads, CBORMap
+
+    value = loads(data, map_pairs=True)
+    assert isinstance(value, CBORMap)
+    for key, member_value in value:
+        print(key, member_value)
+
+A :class:`CBORMap` is an ordered sequence of ``(key, value)`` pairs which preserves every
+occurrence and the decoded type of each key. It can be encoded back with :func:`dumps` without
+losing duplicates or order.
+
+If you only need to inspect the members before a :class:`dict` is built, use
+``object_pairs_hook`` instead::
+
+    def pairs_hook(decoder, pairs):
+        return pairs
+
+    pairs = loads(data, object_pairs_hook=pairs_hook)
+
+``object_pairs_hook`` receives the ordered list of ``(key, value)`` pairs for each map and cannot
+be combined with ``object_hook`` or ``map_pairs``.
+
+Converting map keys to strings
+------------------------------
+
+Some storage formats only accept string keys. Passing ``key_to_str=True`` converts every map key
+recursively while preserving the distinction between key types as far as possible. Text keys are
+kept as-is, byte strings are decoded as UTF-8 with backslash escapes, simple values become
+``cbor_simple:N`` and other keys are rendered with :func:`repr`.
+
+If two distinct original keys in the same map would produce the same string (for example the byte
+string ``b"a"`` and the text string ``"a"``), :exc:`CBORMapKeyCollisionError` is raised. Its
+``collisions`` attribute lists each colliding string together with all the original keys, so no
+value is silently dropped::
+
+    from cbor2 import loads, CBORMapKeyCollisionError
+
+    try:
+        loads(data, key_to_str=True)
+    except CBORMapKeyCollisionError as exc:
+        for string_key, original_keys in exc.collisions:
+            print(string_key, original_keys)
+
 Use Cases
 ---------
 

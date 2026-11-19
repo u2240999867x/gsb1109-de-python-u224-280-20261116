@@ -5,6 +5,17 @@ Version history
 
 This library adheres to `Semantic Versioning <http://semver.org/>`_.
 
+**UNRELEASED**
+
+- Added ``CBORMap``, an ordered, lossless representation of a CBOR map which preserves
+  key types and duplicate members
+- Added the ``map_pairs`` and ``key_to_str`` options to the decoder (and to ``load()``
+  and ``loads()``), and ``object_pairs_hook`` for observing the ordered members of a
+  map before a ``dict`` is built
+- Added ``cbor_key_to_str()``, ``cbor_map_to_str_keys()`` and
+  ``CBORMapKeyCollisionError``; string-key conversion now reports every original key
+  involved in a collision instead of keeping the last value
+
 **5.6.5** (2024-10-09)
 
 - Published binary wheels for Python 3.13

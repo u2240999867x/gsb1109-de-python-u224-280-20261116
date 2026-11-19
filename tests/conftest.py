@@ -33,14 +33,23 @@ def will_overflow():
 
 
 class Module:
-    # Mock module class
-    pass
+    def __init__(self, *wrapped):
+        self._wrapped = wrapped
+
+    def __getattr__(self, name):
+        for wrapped in self._wrapped:
+            try:
+                return getattr(wrapped, name)
+            except AttributeError:
+                pass
+
+        raise AttributeError(name)
 
 
 @pytest.fixture(params=[pytest.param("c", marks=cpython), "python"], scope="session")
 def impl(request):
     if request.param == "c":
-        return _cbor2
+        return Module(_cbor2, cbor2._types)
     else:
         # Make a mock module of cbor2 which always contains the pure Python
         # implementations, even if the top-level package has imported the

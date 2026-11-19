@@ -16,6 +16,7 @@ from typing import IO, TYPE_CHECKING, Any, cast
 from ._types import (
     CBOREncodeTypeError,
     CBOREncodeValueError,
+    CBORMap,
     CBORSimpleValue,
     CBORTag,
     FrozenDict,
@@ -457,6 +458,38 @@ class CBOREncoder:
             self.encode(key)
             self.encode(val)
 
+    @container_encoder
+    def encode_cbor_map(self, value: CBORMap[Any, Any]) -> None:
+        self.encode_length(5, len(value))
+        for pair in value:
+            try:
+                key, val = pair
+            except (TypeError, ValueError):
+                raise CBOREncodeValueError("CBORMap members must be (key, value) pairs") from None
+
+            self.encode(key)
+            self.encode(val)
+
+    @container_encoder
+    def encode_canonical_cbor_map(self, value: CBORMap[Any, Any]) -> None:
+        """Reorder members of a CBORMap according to Canonical CBOR specification"""
+        keyed_keys = []
+        for pair in value:
+            try:
+                key, val = pair
+            except (TypeError, ValueError):
+                raise CBOREncodeValueError("CBORMap members must be (key, value) pairs") from None
+
+            keyed_keys.append((self.encode_sortable_key(key), key, val))
+
+        self.encode_length(5, len(value))
+        for sortkey, realkey, val in sorted(keyed_keys):
+            if self.string_referencing:
+                self.encode(realkey)
+            else:
+                self._fp_write(sortkey[1])
+            self.encode(val)
+
     def encode_sortable_key(self, value: Any) -> tuple[int, bytes]:
         """
         Takes a key and calculates the length of its optimal byte
@@ -507,7 +540,7 @@ class CBOREncoder:
                 value = value.replace(tzinfo=self._timezone)
             else:
                 raise CBOREncodeValueError(
-                    f"naive datetime {value!r} encountered and no default timezone " "has been set"
+                    f"naive datetime {value!r} encountered and no default timezone has been set"
                 )
 
         if self.datetime_as_timestamp:
@@ -661,6 +694,7 @@ default_encoders: dict[type | tuple[str, str], Callable[[CBOREncoder, Any], None
     defaultdict: CBOREncoder.encode_map,
     OrderedDict: CBOREncoder.encode_map,
     FrozenDict: CBOREncoder.encode_map,
+    CBORMap: CBOREncoder.encode_cbor_map,
     type(undefined): CBOREncoder.encode_undefined,
     datetime: CBOREncoder.encode_datetime,
     date: CBOREncoder.encode_date,
@@ -685,6 +719,7 @@ canonical_encoders: dict[type | tuple[str, str], Callable[[CBOREncoder, Any], No
     defaultdict: CBOREncoder.encode_canonical_map,
     OrderedDict: CBOREncoder.encode_canonical_map,
     FrozenDict: CBOREncoder.encode_canonical_map,
+    CBORMap: CBOREncoder.encode_canonical_cbor_map,
     set: CBOREncoder.encode_canonical_set,
     frozenset: CBOREncoder.encode_canonical_set,
 }

@@ -377,6 +377,71 @@ CBOR2_loads(PyObject *module, PyObject *args, PyObject *kwargs)
 // Cache-init functions //////////////////////////////////////////////////////
 
 int
+_CBOR2_init_CBORMap(void)
+{
+    PyObject *cbor2_types;
+
+    // from cbor2._types import CBORMap
+    cbor2_types = PyImport_ImportModule("cbor2._types");
+    if (!cbor2_types)
+        goto error;
+    _CBOR2_CBORMap = PyObject_GetAttr(cbor2_types, _CBOR2_str_CBORMap);
+    Py_DECREF(cbor2_types);
+    if (!_CBOR2_CBORMap)
+        goto error;
+    return 0;
+error:
+    PyErr_SetString(PyExc_ImportError,
+            "unable to import CBORMap from cbor2._types");
+    return -1;
+}
+
+
+int
+_CBOR2_init_cbor_map_to_str_keys(void)
+{
+    PyObject *cbor2_types;
+
+    // from cbor2._types import cbor_map_to_str_keys
+    cbor2_types = PyImport_ImportModule("cbor2._types");
+    if (!cbor2_types)
+        goto error;
+    _CBOR2_cbor_map_to_str_keys = PyObject_GetAttr(
+            cbor2_types, _CBOR2_str_cbor_map_to_str_keys);
+    Py_DECREF(cbor2_types);
+    if (!_CBOR2_cbor_map_to_str_keys)
+        goto error;
+    return 0;
+error:
+    PyErr_SetString(PyExc_ImportError,
+            "unable to import cbor_map_to_str_keys from cbor2._types");
+    return -1;
+}
+
+
+int
+_CBOR2_init_cbor_map_to_str_keys_with_alias(void)
+{
+    PyObject *cbor2_types;
+
+    // from cbor2._types import _cbor_map_to_str_keys_with_alias
+    cbor2_types = PyImport_ImportModule("cbor2._types");
+    if (!cbor2_types)
+        goto error;
+    _CBOR2_cbor_map_to_str_keys_with_alias = PyObject_GetAttr(
+            cbor2_types, _CBOR2_str_cbor_map_to_str_keys_with_alias);
+    Py_DECREF(cbor2_types);
+    if (!_CBOR2_cbor_map_to_str_keys_with_alias)
+        goto error;
+    return 0;
+error:
+    PyErr_SetString(PyExc_ImportError,
+            "unable to import _cbor_map_to_str_keys_with_alias from cbor2._types");
+    return -1;
+}
+
+
+int
 _CBOR2_init_BytesIO(void)
 {
     PyObject *io;
@@ -627,7 +692,11 @@ PyObject *_CBOR2_str_as_tuple = NULL;
 PyObject *_CBOR2_str_bit_length = NULL;
 PyObject *_CBOR2_str_bytes = NULL;
 PyObject *_CBOR2_str_BytesIO = NULL;
+PyObject *_CBOR2_str_CBORMap = NULL;
 PyObject *_CBOR2_str_canonical_encoders = NULL;
+PyObject *_CBOR2_str_cbor_key_to_str = NULL;
+PyObject *_CBOR2_str_cbor_map_to_str_keys = NULL;
+PyObject *_CBOR2_str_cbor_map_to_str_keys_with_alias = NULL;
 PyObject *_CBOR2_str_compile = NULL;
 PyObject *_CBOR2_str_copy = NULL;
 PyObject *_CBOR2_str_datetimestr_re = NULL;
@@ -635,6 +704,8 @@ PyObject *_CBOR2_str_datestr_re = NULL;
 PyObject *_CBOR2_str_Decimal = NULL;
 PyObject *_CBOR2_str_default_encoders = NULL;
 PyObject *_CBOR2_str_denominator = NULL;
+PyObject *_CBOR2_str_encode_cbor_map = NULL;
+PyObject *_CBOR2_str_encode_canonical_cbor_map = NULL;
 PyObject *_CBOR2_str_encode_date = NULL;
 PyObject *_CBOR2_str_Fraction = NULL;
 PyObject *_CBOR2_str_fromtimestamp = NULL;
@@ -682,6 +753,9 @@ PyObject *_CBOR2_BytesIO = NULL;
 PyObject *_CBOR2_Decimal = NULL;
 PyObject *_CBOR2_Fraction = NULL;
 PyObject *_CBOR2_FrozenDict = NULL;
+PyObject *_CBOR2_CBORMap = NULL;
+PyObject *_CBOR2_cbor_map_to_str_keys = NULL;
+PyObject *_CBOR2_cbor_map_to_str_keys_with_alias = NULL;
 PyObject *_CBOR2_UUID = NULL;
 PyObject *_CBOR2_Parser = NULL;
 PyObject *_CBOR2_re_compile = NULL;
@@ -703,6 +777,10 @@ cbor2_free(PyObject *m)
     Py_CLEAR(_CBOR2_BytesIO);
     Py_CLEAR(_CBOR2_Decimal);
     Py_CLEAR(_CBOR2_Fraction);
+    Py_CLEAR(_CBOR2_FrozenDict);
+    Py_CLEAR(_CBOR2_CBORMap);
+    Py_CLEAR(_CBOR2_cbor_map_to_str_keys);
+    Py_CLEAR(_CBOR2_cbor_map_to_str_keys_with_alias);
     Py_CLEAR(_CBOR2_UUID);
     Py_CLEAR(_CBOR2_Parser);
     Py_CLEAR(_CBOR2_re_compile);
@@ -969,10 +1047,15 @@ PyInit__cbor2(void)
     INTERN_STRING(Decimal);
     INTERN_STRING(default_encoders);
     INTERN_STRING(denominator);
+    INTERN_STRING(encode_cbor_map);
+    INTERN_STRING(encode_canonical_cbor_map);
     INTERN_STRING(encode_date);
     INTERN_STRING(Fraction);
     INTERN_STRING(fromtimestamp);
     INTERN_STRING(FrozenDict);
+    INTERN_STRING(CBORMap);
+    INTERN_STRING(cbor_key_to_str);
+    INTERN_STRING(cbor_map_to_str_keys);
     INTERN_STRING(fromordinal);
     INTERN_STRING(getvalue);
     INTERN_STRING(groups);
@@ -1008,6 +1091,10 @@ PyInit__cbor2(void)
         goto error;
     if (!_CBOR2_str_utc_suffix &&
             !(_CBOR2_str_utc_suffix = PyUnicode_InternFromString("+00:00")))
+        goto error;
+    if (!_CBOR2_str_cbor_map_to_str_keys_with_alias &&
+            !(_CBOR2_str_cbor_map_to_str_keys_with_alias = PyUnicode_InternFromString(
+                    "_cbor_map_to_str_keys_with_alias")))
         goto error;
     if (!_CBOR2_str_datetimestr_re &&
         !(_CBOR2_str_datetimestr_re = PyUnicode_InternFromString(

@@ -12,12 +12,21 @@ import json
 import re
 import sys
 import uuid
-from collections.abc import Callable, Collection, Iterable, Iterator
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping
 from datetime import datetime
 from functools import partial
 from typing import TYPE_CHECKING, Any, TypeVar
 
-from . import CBORDecoder, CBORSimpleValue, CBORTag, FrozenDict, load, undefined
+from . import (
+    CBORDecoder,
+    CBORMap,
+    CBORMapKeyCollisionError,
+    CBORSimpleValue,
+    CBORTag,
+    FrozenDict,
+    load,
+    undefined,
+)
 
 if TYPE_CHECKING:
     from typing import Literal, TypeAlias
@@ -69,7 +78,7 @@ class DefaultEncoder(json.JSONEncoder):
 def iterdecode(
     f: io.BytesIO,
     tag_hook: Callable[[CBORDecoder, CBORTag], Any] | None = None,
-    object_hook: Callable[[CBORDecoder, dict[Any, Any]], Any] | None = None,
+    object_hook: Callable[[CBORDecoder, Mapping[Any, Any]], Any] | None = None,
     str_errors: Literal["strict", "error", "replace"] = "strict",
 ) -> Iterator[Any]:
     decoder = CBORDecoder(f, tag_hook=tag_hook, object_hook=object_hook, str_errors=str_errors)
@@ -83,7 +92,7 @@ def iterdecode(
 def key_to_str(d: T, dict_ids: set[int] | None = None) -> str | list[Any] | dict[str, Any] | T:
     dict_ids = set(dict_ids or [])
     rval: dict[str, Any] = {}
-    if not isinstance(d, dict):
+    if not isinstance(d, (dict, CBORMap)):
         if isinstance(d, CBORSimpleValue):
             return f"cbor_simple:{d.value:d}"
 
@@ -104,7 +113,10 @@ def key_to_str(d: T, dict_ids: set[int] | None = None) -> str | list[Any] | dict
     else:
         dict_ids.add(id(d))
 
-    for k, v in d.items():
+    members = d.items() if isinstance(d, dict) else d
+    converted_members = []
+    for k, v in members:
+        original_key = k
         if isinstance(k, bytes):
             k = k.decode(encoding="utf-8", errors="backslashreplace")
         elif isinstance(k, CBORSimpleValue):
@@ -112,12 +124,29 @@ def key_to_str(d: T, dict_ids: set[int] | None = None) -> str | list[Any] | dict
         elif isinstance(k, (FrozenDict, frozenset, tuple)):
             k = str(k)
 
-        if isinstance(v, dict):
-            v = key_to_str(v, dict_ids)
-        elif isinstance(v, (tuple, list, set)):
-            v = [key_to_str(x, dict_ids) for x in v]
+        converted_members.append((k, v, original_key))
 
-        rval[k] = v
+    converted_keys: dict[str, list[Any]] = {}
+    for k, _, original_key in converted_members:
+        converted_keys.setdefault(k, []).append(original_key)
+
+    collisions = [
+        (string_key, original_keys)
+        for string_key, original_keys in converted_keys.items()
+        if len(original_keys) > 1
+    ]
+    if collisions:
+        raise CBORMapKeyCollisionError(collisions)
+
+    for k, v, _ in converted_members:
+        if isinstance(v, (dict, CBORMap)):
+            converted_value: Any = key_to_str(v, dict_ids)
+        elif isinstance(v, (tuple, list, set)):
+            converted_value = [key_to_str(x, dict_ids) for x in v]
+        else:
+            converted_value = v
+
+        rval[k] = converted_value
 
     return rval
 

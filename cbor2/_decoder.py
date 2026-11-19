@@ -12,10 +12,15 @@ from typing import IO, TYPE_CHECKING, Any, TypeVar, cast, overload
 from ._types import (
     CBORDecodeEOF,
     CBORDecodeValueError,
+    CBORMap,
     CBORSimpleValue,
     CBORTag,
     FrozenDict,
+    _cbor_map_to_str_keys_with_alias,
+    _check_key_collisions,
     break_marker,
+    cbor_key_to_str,
+    cbor_map_to_str_keys,
     undefined,
 )
 
@@ -52,6 +57,9 @@ class CBORDecoder:
     __slots__ = (
         "_tag_hook",
         "_object_hook",
+        "_object_pairs_hook",
+        "_map_pairs",
+        "_key_to_str",
         "_share_index",
         "_shareables",
         "_fp",
@@ -68,8 +76,11 @@ class CBORDecoder:
         self,
         fp: IO[bytes],
         tag_hook: Callable[[CBORDecoder, CBORTag], Any] | None = None,
-        object_hook: Callable[[CBORDecoder, dict[Any, Any]], Any] | None = None,
+        object_hook: Callable[[CBORDecoder, Mapping[Any, Any]], Any] | None = None,
         str_errors: Literal["strict", "error", "replace"] = "strict",
+        object_pairs_hook: Callable[[CBORDecoder, list[tuple[Any, Any]]], Any] | None = None,
+        map_pairs: bool = False,
+        key_to_str: bool = False,
     ):
         """
         :param fp:
@@ -88,13 +99,42 @@ class CBORDecoder:
         :param str_errors:
             determines how to handle unicode decoding errors (see the `Error Handlers`_
             section in the standard library documentation for details)
+        :param object_pairs_hook:
+            callable that takes 2 arguments: the decoder instance, and a list of
+            ``(key, value)`` pairs in the order they occurred in the CBOR map. This
+            allows duplicate keys and non-string keys to be observed before a
+            :class:`dict` is built. The return value is substituted for the map in
+            the deserialized output. Cannot be used together with ``object_hook``
+            or ``map_pairs``.
+        :param map_pairs:
+            if ``True``, decode every map as a :class:`.CBORMap` (an ordered,
+            lossless sequence of ``(key, value)`` pairs). Cannot be used together
+            with ``object_hook`` or ``object_pairs_hook``.
+        :param key_to_str:
+            if ``True``, recursively convert all map keys to strings using
+            :func:`cbor2.cbor_key_to_str`. If distinct original keys in the same map
+            convert to the same string, :exc:`.CBORMapKeyCollisionError` is raised.
 
         .. _Error Handlers: https://docs.python.org/3/library/codecs.html#error-handlers
 
         """
+        if object_pairs_hook is not None and object_hook is not None:
+            raise ValueError("object_hook and object_pairs_hook are mutually exclusive")
+        if object_pairs_hook is not None and map_pairs:
+            raise ValueError("object_pairs_hook and map_pairs are mutually exclusive")
+        if object_hook is not None and map_pairs:
+            raise ValueError("object_hook and map_pairs are mutually exclusive")
+
         self.fp = fp
         self.tag_hook = tag_hook
+        self._object_hook: Callable[[CBORDecoder, Mapping[Any, Any]], Any] | None = None
+        self._object_pairs_hook: Callable[[CBORDecoder, list[tuple[Any, Any]]], Any] | None = None
+        self._map_pairs = False
+        self._key_to_str = False
         self.object_hook = object_hook
+        self.object_pairs_hook = object_pairs_hook
+        self.map_pairs = map_pairs
+        self.key_to_str = key_to_str
         self.str_errors = str_errors
         self._share_index: int | None = None
         self._shareables: list[object] = []
@@ -137,7 +177,9 @@ class CBORDecoder:
             raise ValueError("tag_hook must be None or a callable")
 
     @property
-    def object_hook(self) -> Callable[[CBORDecoder, dict[Any, Any]], Any] | None:
+    def object_hook(
+        self,
+    ) -> Callable[[CBORDecoder, Mapping[Any, Any]], Any] | None:
         return self._object_hook
 
     @object_hook.setter
@@ -146,6 +188,45 @@ class CBORDecoder:
             self._object_hook = value
         else:
             raise ValueError("object_hook must be None or a callable")
+
+    @property
+    def object_pairs_hook(
+        self,
+    ) -> Callable[[CBORDecoder, list[tuple[Any, Any]]], Any] | None:
+        return self._object_pairs_hook
+
+    @object_pairs_hook.setter
+    def object_pairs_hook(
+        self, value: Callable[[CBORDecoder, list[tuple[Any, Any]]], Any] | None
+    ) -> None:
+        if value is None or callable(value):
+            if value is not None and self._object_hook is not None:
+                raise ValueError("object_hook and object_pairs_hook are mutually exclusive")
+            if value is not None and self._map_pairs:
+                raise ValueError("object_pairs_hook and map_pairs are mutually exclusive")
+
+            self._object_pairs_hook = value
+        else:
+            raise ValueError("object_pairs_hook must be None or a callable")
+
+    @property
+    def map_pairs(self) -> bool:
+        return self._map_pairs
+
+    @map_pairs.setter
+    def map_pairs(self, value: bool) -> None:
+        if value and (self._object_hook is not None or self._object_pairs_hook is not None):
+            raise ValueError("object_hook, object_pairs_hook and map_pairs are mutually exclusive")
+
+        self._map_pairs = bool(value)
+
+    @property
+    def key_to_str(self) -> bool:
+        return self._key_to_str
+
+    @key_to_str.setter
+    def key_to_str(self, value: bool) -> None:
+        self._key_to_str = bool(value)
 
     @property
     def str_errors(self) -> Literal["strict", "error", "replace"]:
@@ -421,35 +502,75 @@ class CBORDecoder:
 
         return items
 
-    def decode_map(self, subtype: int) -> Mapping[Any, Any]:
+    def decode_map(self, subtype: int) -> Any:
         # Major tag 5
         length = self._decode_length(subtype, allow_indefinite=True)
+        pairs: list[tuple[Any, Any]] = []
+        if self._map_pairs:
+            # Use the final CBORMap as the shared object from the start so
+            # that cyclic references resolve to the map itself.
+            placeholder: Any = CBORMap()
+        else:
+            placeholder = {}
+
+        share_index = self._share_index
+        self.set_shareable(placeholder)
         if length is None:
             # Indefinite length
-            dictionary: dict[Any, Any] = {}
-            self.set_shareable(dictionary)
             while True:
                 key = self._decode(immutable=True, unshared=True)
                 if key is break_marker:
                     break
                 else:
-                    dictionary[key] = self._decode(unshared=True)
+                    value = self._decode(unshared=True)
+                    if isinstance(placeholder, CBORMap):
+                        placeholder._append((key, value))
+                    else:
+                        placeholder[key] = value
+                    pairs.append((key, value))
         else:
-            dictionary = {}
-            self.set_shareable(dictionary)
             for _ in range(length):
                 key = self._decode(immutable=True, unshared=True)
-                dictionary[key] = self._decode(unshared=True)
+                value = self._decode(unshared=True)
+                if isinstance(placeholder, CBORMap):
+                    placeholder._append((key, value))
+                else:
+                    placeholder[key] = value
+                pairs.append((key, value))
 
-        if self._object_hook:
-            dictionary = self._object_hook(self, dictionary)
-            self.set_shareable(dictionary)
+        if self._key_to_str:
+            # Validate and convert from the ordered pairs, before any dict can
+            # collapse keys that compare equal (for example ``1`` and ``True``).
+            converted_keys = [(cbor_key_to_str(key), key) for key, _ in pairs]
+            _check_key_collisions(converted_keys)
+
+        if self._object_pairs_hook:
+            value = self._object_pairs_hook(self, pairs)
+            if self._key_to_str:
+                value = cbor_map_to_str_keys(value, preserve_maps=True)
+        elif self._map_pairs:
+            value = placeholder
+            if self._key_to_str:
+                value = cbor_map_to_str_keys(value, preserve_maps=True)
+        elif self._object_hook:
+            value = self._object_hook(self, placeholder)
+            if self._key_to_str:
+                value = cbor_map_to_str_keys(value, preserve_maps=True)
+        elif self._key_to_str:
+            # Build from the ordered pairs so keys that compare equal (such as
+            # ``1`` and ``True``) cannot overwrite one another before the
+            # string-collision check runs. Redirect self-references from the
+            # placeholder to the converted object.
+            value = _cbor_map_to_str_keys_with_alias(CBORMap(pairs), placeholder, self._immutable)
         elif self._immutable:
-            frozen_dict = FrozenDict(dictionary)
-            self.set_shareable(dictionary)
-            return frozen_dict
+            value = FrozenDict(placeholder)
+        else:
+            value = placeholder
 
-        return dictionary
+        if share_index is not None:
+            self._shareables[share_index] = value
+
+        return value
 
     def decode_semantic(self, subtype: int) -> Any:
         # Major tag 6
@@ -787,8 +908,11 @@ semantic_decoders: dict[int, Callable[[CBORDecoder], Any]] = {
 def loads(
     s: bytes | bytearray | memoryview,
     tag_hook: Callable[[CBORDecoder, CBORTag], Any] | None = None,
-    object_hook: Callable[[CBORDecoder, dict[Any, Any]], Any] | None = None,
+    object_hook: Callable[[CBORDecoder, Mapping[Any, Any]], Any] | None = None,
     str_errors: Literal["strict", "error", "replace"] = "strict",
+    object_pairs_hook: Callable[[CBORDecoder, list[tuple[Any, Any]]], Any] | None = None,
+    map_pairs: bool = False,
+    key_to_str: bool = False,
 ) -> Any:
     """
     Deserialize an object from a bytestring.
@@ -807,6 +931,20 @@ def loads(
     :param str_errors:
         determines how to handle unicode decoding errors (see the `Error Handlers`_
         section in the standard library documentation for details)
+    :param object_pairs_hook:
+        callable that takes 2 arguments: the decoder instance, and a list of
+        ``(key, value)`` pairs in wire order. This allows duplicate and non-string
+        keys to be observed before a :class:`dict` is built. Mutually exclusive with
+        ``object_hook`` and ``map_pairs``.
+    :param map_pairs:
+        if ``True``, decode every map as a :class:`.CBORMap` (an ordered, lossless
+        sequence of ``(key, value)`` pairs). Mutually exclusive with ``object_hook``
+        and ``object_pairs_hook``.
+    :param key_to_str:
+        if ``True``, recursively convert all map keys to strings. Distinct original
+        keys that would produce the same string raise
+        :exc:`.CBORMapKeyCollisionError`, whose ``collisions`` attribute lists the
+        original keys.
     :return:
         the deserialized object
 
@@ -815,15 +953,24 @@ def loads(
     """
     with BytesIO(s) as fp:
         return CBORDecoder(
-            fp, tag_hook=tag_hook, object_hook=object_hook, str_errors=str_errors
+            fp,
+            tag_hook=tag_hook,
+            object_hook=object_hook,
+            str_errors=str_errors,
+            object_pairs_hook=object_pairs_hook,
+            map_pairs=map_pairs,
+            key_to_str=key_to_str,
         ).decode()
 
 
 def load(
     fp: IO[bytes],
     tag_hook: Callable[[CBORDecoder, CBORTag], Any] | None = None,
-    object_hook: Callable[[CBORDecoder, dict[Any, Any]], Any] | None = None,
+    object_hook: Callable[[CBORDecoder, Mapping[Any, Any]], Any] | None = None,
     str_errors: Literal["strict", "error", "replace"] = "strict",
+    object_pairs_hook: Callable[[CBORDecoder, list[tuple[Any, Any]]], Any] | None = None,
+    map_pairs: bool = False,
+    key_to_str: bool = False,
 ) -> Any:
     """
     Deserialize an object from an open file.
@@ -842,6 +989,20 @@ def load(
     :param str_errors:
         determines how to handle unicode decoding errors (see the `Error Handlers`_
         section in the standard library documentation for details)
+    :param object_pairs_hook:
+        callable that takes 2 arguments: the decoder instance, and a list of
+        ``(key, value)`` pairs in wire order. This allows duplicate and non-string
+        keys to be observed before a :class:`dict` is built. Mutually exclusive with
+        ``object_hook`` and ``map_pairs``.
+    :param map_pairs:
+        if ``True``, decode every map as a :class:`.CBORMap` (an ordered, lossless
+        sequence of ``(key, value)`` pairs). Mutually exclusive with ``object_hook``
+        and ``object_pairs_hook``.
+    :param key_to_str:
+        if ``True``, recursively convert all map keys to strings. Distinct original
+        keys that would produce the same string raise
+        :exc:`.CBORMapKeyCollisionError`, whose ``collisions`` attribute lists the
+        original keys.
     :return:
         the deserialized object
 
@@ -849,5 +1010,11 @@ def load(
 
     """
     return CBORDecoder(
-        fp, tag_hook=tag_hook, object_hook=object_hook, str_errors=str_errors
+        fp,
+        tag_hook=tag_hook,
+        object_hook=object_hook,
+        str_errors=str_errors,
+        object_pairs_hook=object_pairs_hook,
+        map_pairs=map_pairs,
+        key_to_str=key_to_str,
     ).decode()

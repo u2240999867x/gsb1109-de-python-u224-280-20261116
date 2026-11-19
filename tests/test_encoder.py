@@ -556,6 +556,36 @@ def test_dict_key(impl):
     assert impl.dumps({FrozenDict({2: 1}): ""}) == unhexlify("a1a1020160")
 
 
+def test_cbor_map_round_trip(impl):
+    value = impl.CBORMap([(1, "a"), (True, "b"), (1, "a"), (2, 3)])
+    serialized = impl.dumps(value)
+    assert serialized == unhexlify("a4016161f561620161610203")
+    assert impl.loads(serialized, map_pairs=True) == value
+
+
+def test_cbor_map_round_trip_nested(impl):
+    value = impl.CBORMap([("a", impl.CBORMap([(1, True), (2, "b")]))])
+    serialized = impl.dumps(value)
+    assert impl.loads(serialized, map_pairs=True) == value
+
+
+def test_cbor_map_as_key(impl):
+    value = {impl.CBORMap([(1, "a")]): 2}
+    serialized = impl.dumps(value)
+    assert serialized == unhexlify("a1a101616102")
+    assert impl.loads(serialized, map_pairs=True) == impl.CBORMap([(impl.CBORMap([(1, "a")]), 2)])
+
+
+def test_cbor_map_canonical(impl):
+    value = impl.CBORMap([(2, "b"), (1, "a")])
+    assert impl.dumps(value, canonical=True) == unhexlify("a2016161026162")
+
+
+def test_cbor_map_invalid_pair(impl):
+    with pytest.raises(ValueError, match=r"\(key, value\) pairs"):
+        impl.dumps(impl.CBORMap([(1, 2, 3)]))
+
+
 @pytest.mark.parametrize("frozen", [False, True], ids=["set", "frozenset"])
 def test_set(impl, frozen):
     value = {"a", "b", "c"}
@@ -622,16 +652,7 @@ def test_encode_stringrefs_array(impl):
 def test_encode_stringrefs_dict(impl):
     value = {"aaaa": "mmmm", "bbbb": "bbbb", "cccc": "aaaa", "mmmm": "aaaa"}
     expected = unhexlify(
-        "d90100"
-        "a4"
-        "6461616161"
-        "646d6d6d6d"
-        "6462626262"
-        "d81902"
-        "6463636363"
-        "d81900"
-        "d81901"
-        "d81900"
+        "d90100a46461616161646d6d6d6d6462626262d819026463636363d81900d81901d81900"
     )
     assert impl.dumps(value, string_referencing=True, canonical=True) == expected
 

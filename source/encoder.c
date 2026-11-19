@@ -876,6 +876,76 @@ CBOREncoder_encode_map(CBOREncoderObject *self, PyObject *value)
 }
 
 
+static PyObject *
+encode_cbor_map(CBOREncoderObject *self, PyObject *value)
+{
+    PyObject *pairs, *ret = NULL;
+    Py_ssize_t index;
+
+    // CBORMap is a sequence of (key, value) pairs; use it directly so
+    // duplicate keys are not collapsed and the original order is preserved.
+    pairs = PySequence_Fast(value, "CBORMap must be a sequence of pairs");
+    if (pairs) {
+        if (encode_length(self, 5, PySequence_Fast_GET_SIZE(pairs)) == 0) {
+            ret = Py_None;
+            Py_INCREF(ret);
+            for (index = 0; index < PySequence_Fast_GET_SIZE(pairs); ++index) {
+                PyObject *pair = PySequence_Fast_GET_ITEM(pairs, index);
+                PyObject *encoded;
+
+                if (!PySequence_Check(pair) || PySequence_Size(pair) != 2) {
+                    PyErr_SetString(PyExc_ValueError,
+                            "CBORMap members must be (key, value) pairs");
+                    ret = NULL;
+                    break;
+                }
+
+                encoded = PySequence_GetItem(pair, 0);
+                if (encoded) {
+                    PyObject *result = CBOREncoder_encode(self, encoded);
+                    Py_DECREF(encoded);
+                    if (result)
+                        Py_DECREF(result);
+                    else {
+                        ret = NULL;
+                        break;
+                    }
+                } else {
+                    ret = NULL;
+                    break;
+                }
+
+                encoded = PySequence_GetItem(pair, 1);
+                if (encoded) {
+                    PyObject *result = CBOREncoder_encode(self, encoded);
+                    Py_DECREF(encoded);
+                    if (result)
+                        Py_DECREF(result);
+                    else {
+                        ret = NULL;
+                        break;
+                    }
+                } else {
+                    ret = NULL;
+                    break;
+                }
+            }
+        }
+        Py_DECREF(pairs);
+    }
+    return ret;
+}
+
+
+// CBOREncoder.encode_cbor_map(self, value)
+static PyObject *
+CBOREncoder_encode_cbor_map(CBOREncoderObject *self, PyObject *value)
+{
+    // major type 5
+    return encode_container(self, &encode_cbor_map, value);
+}
+
+
 // Semantic encoders /////////////////////////////////////////////////////////
 
 static int
@@ -1877,6 +1947,95 @@ CBOREncoder_encode_canonical_map(CBOREncoderObject *self, PyObject *value)
 
 
 static PyObject *
+cbor_map_to_canonical_list(CBOREncoderObject *self, PyObject *value)
+{
+    PyObject *pairs, *list, *bytes, *length, *tuple, *ret = NULL;
+    Py_ssize_t index;
+
+    pairs = PySequence_Fast(value, "CBORMap must be a sequence of pairs");
+    if (!pairs)
+        return NULL;
+
+    ret = list = PyList_New(PySequence_Fast_GET_SIZE(pairs));
+    if (list) {
+        for (index = 0; index < PySequence_Fast_GET_SIZE(pairs); ++index) {
+            PyObject *key, *val, *pair = PySequence_Fast_GET_ITEM(pairs, index);
+
+            if (!PySequence_Check(pair) || PySequence_Size(pair) != 2) {
+                PyErr_SetString(PyExc_ValueError,
+                        "CBORMap members must be (key, value) pairs");
+                ret = NULL;
+                break;
+            }
+
+            key = PySequence_GetItem(pair, 0);
+            val = key ? PySequence_GetItem(pair, 1) : NULL;
+            if (!key || !val) {
+                Py_XDECREF(key);
+                Py_XDECREF(val);
+                ret = NULL;
+                break;
+            }
+
+            bytes = CBOREncoder_encode_to_bytes(self, key);
+            if (bytes) {
+                length = PyLong_FromSsize_t(PyBytes_GET_SIZE(bytes));
+                if (length) {
+                    tuple = PyTuple_Pack(4, length, bytes, key, val);
+                    if (tuple)
+                        PyList_SET_ITEM(list, index, tuple);  // steals ref
+                    else {
+                        Py_DECREF(length);
+                        ret = NULL;
+                    }
+                    if (tuple)
+                        Py_DECREF(length);
+                } else
+                    ret = NULL;
+                Py_DECREF(bytes);
+            } else
+                ret = NULL;
+
+            Py_DECREF(key);
+            Py_DECREF(val);
+            if (!ret)
+                break;
+        }
+        if (!ret)
+            Py_DECREF(list);
+    }
+    Py_DECREF(pairs);
+    return ret;
+}
+
+
+static PyObject *
+encode_canonical_cbor_map(CBOREncoderObject *self, PyObject *value)
+{
+    PyObject *list, *ret = NULL;
+    bool string_referencing_old = self->string_referencing;
+
+    self->string_referencing = false;
+    list = cbor_map_to_canonical_list(self, value);
+    self->string_referencing = string_referencing_old;
+
+    if (list) {
+        ret = encode_canonical_map_list(self, list);
+        Py_DECREF(list);
+    }
+
+    return ret;
+}
+
+
+static PyObject *
+CBOREncoder_encode_canonical_cbor_map(CBOREncoderObject *self, PyObject *value)
+{
+    return encode_container(self, &encode_canonical_cbor_map, value);
+}
+
+
+static PyObject *
 encode_canonical_set_list(CBOREncoderObject *self, PyObject *list)
 {
     PyObject *bytes;
@@ -1983,12 +2142,12 @@ encode(CBOREncoderObject *self, PyObject *value)
                 return CBOREncoder_encode_bytearray(self, value);
             else if (PyUnicode_CheckExact(value))
                 return CBOREncoder_encode_string(self, value);
+            else if (PyBool_Check(value))
+                return CBOREncoder_encode_boolean(self, value);
             else if (PyLong_CheckExact(value))
                 return CBOREncoder_encode_int(self, value);
             else if (PyFloat_CheckExact(value))
                 return CBOREncoder_encode_float(self, value);
-            else if (PyBool_Check(value))
-                return CBOREncoder_encode_boolean(self, value);
             else if (value == Py_None)
                 return CBOREncoder_encode_none(self, value);
             else if (value == undefined)
@@ -2171,6 +2330,12 @@ static PyMethodDef CBOREncoder_methods[] = {
     {"encode_canonical_map",
         (PyCFunction) CBOREncoder_encode_canonical_map, METH_O,
         "encode the specified map to a canonical representation in the output"},
+    {"encode_cbor_map",
+        (PyCFunction) CBOREncoder_encode_cbor_map, METH_O,
+        "encode the specified CBORMap to the output"},
+    {"encode_canonical_cbor_map",
+        (PyCFunction) CBOREncoder_encode_canonical_cbor_map, METH_O,
+        "encode the specified CBORMap to a canonical representation in the output"},
     {"encode_canonical_set",
         (PyCFunction) CBOREncoder_encode_canonical_set, METH_O,
         "encode the specified set to a canonical representation in the output"},

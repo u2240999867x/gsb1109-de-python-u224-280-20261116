@@ -44,6 +44,9 @@ typedef uint8_t DecodeOptions;
 static int _CBORDecoder_set_fp(CBORDecoderObject *, PyObject *, void *);
 static int _CBORDecoder_set_tag_hook(CBORDecoderObject *, PyObject *, void *);
 static int _CBORDecoder_set_object_hook(CBORDecoderObject *, PyObject *, void *);
+static int _CBORDecoder_set_object_pairs_hook(CBORDecoderObject *, PyObject *, void *);
+static int _CBORDecoder_set_map_pairs(CBORDecoderObject *, PyObject *, void *);
+static int _CBORDecoder_set_key_to_str(CBORDecoderObject *, PyObject *, void *);
 static int _CBORDecoder_set_str_errors(CBORDecoderObject *, PyObject *, void *);
 
 static PyObject * decode(CBORDecoderObject *, DecodeOptions);
@@ -85,6 +88,7 @@ CBORDecoder_traverse(CBORDecoderObject *self, visitproc visit, void *arg)
     Py_VISIT(self->read);
     Py_VISIT(self->tag_hook);
     Py_VISIT(self->object_hook);
+    Py_VISIT(self->object_pairs_hook);
     Py_VISIT(self->shareables);
     Py_VISIT(self->stringref_namespace);
     // No need to visit str_errors; it's only a string and can't reference us
@@ -98,6 +102,7 @@ CBORDecoder_clear(CBORDecoderObject *self)
     Py_CLEAR(self->read);
     Py_CLEAR(self->tag_hook);
     Py_CLEAR(self->object_hook);
+    Py_CLEAR(self->object_pairs_hook);
     Py_CLEAR(self->shareables);
     Py_CLEAR(self->stringref_namespace);
     Py_CLEAR(self->str_errors);
@@ -139,8 +144,12 @@ CBORDecoder_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
         self->tag_hook = Py_None;
         Py_INCREF(Py_None);
         self->object_hook = Py_None;
+        Py_INCREF(Py_None);
+        self->object_pairs_hook = Py_None;
         self->str_errors = PyBytes_FromString("strict");
         self->immutable = false;
+        self->map_pairs = false;
+        self->key_to_str = false;
         self->shared_index = -1;
     }
     return (PyObject *) self;
@@ -156,25 +165,37 @@ int
 CBORDecoder_init(CBORDecoderObject *self, PyObject *args, PyObject *kwargs)
 {
     static char *keywords[] = {
-        "fp", "tag_hook", "object_hook", "str_errors", NULL
+        "fp", "tag_hook", "object_hook", "str_errors", "object_pairs_hook",
+        "map_pairs", "key_to_str", NULL
     };
     PyObject *fp = NULL, *tag_hook = NULL, *object_hook = NULL,
-             *str_errors = NULL;
+             *str_errors = NULL, *object_pairs_hook = NULL;
+    int map_pairs = 0, key_to_str = 0;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|OOO", keywords,
-                &fp, &tag_hook, &object_hook, &str_errors))
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|OOOOpp", keywords,
+                &fp, &tag_hook, &object_hook, &str_errors,
+                &object_pairs_hook, &map_pairs, &key_to_str))
         return -1;
 
     if (_CBORDecoder_set_fp(self, fp, NULL) == -1)
         return -1;
     if (tag_hook && _CBORDecoder_set_tag_hook(self, tag_hook, NULL) == -1)
         return -1;
+    if (str_errors && _CBORDecoder_set_str_errors(self, str_errors, NULL) == -1)
+        return -1;
     if (object_hook && _CBORDecoder_set_object_hook(self, object_hook, NULL) == -1)
         return -1;
-    if (str_errors && _CBORDecoder_set_str_errors(self, str_errors, NULL) == -1)
+    if (object_pairs_hook &&
+            _CBORDecoder_set_object_pairs_hook(self, object_pairs_hook, NULL) == -1)
+        return -1;
+    if (map_pairs && _CBORDecoder_set_map_pairs(self, Py_True, NULL) == -1)
+        return -1;
+    if (key_to_str && _CBORDecoder_set_key_to_str(self, Py_True, NULL) == -1)
         return -1;
 
     if (!_CBOR2_FrozenDict && _CBOR2_init_FrozenDict() == -1)
+        return -1;
+    if (!_CBOR2_CBORMap && _CBOR2_init_CBORMap() == -1)
         return -1;
 
     return 0;
@@ -284,11 +305,134 @@ _CBORDecoder_set_object_hook(CBORDecoderObject *self, PyObject *value,
                         "None)", value);
         return -1;
     }
+    if (value != Py_None && self->object_pairs_hook != Py_None) {
+        PyErr_SetString(PyExc_ValueError,
+                "object_hook and object_pairs_hook are mutually exclusive");
+        return -1;
+    }
+    if (value != Py_None && self->map_pairs) {
+        PyErr_SetString(PyExc_ValueError,
+                "object_hook and map_pairs are mutually exclusive");
+        return -1;
+    }
 
     tmp = self->object_hook;
     Py_INCREF(value);
     self->object_hook = value;
     Py_DECREF(tmp);
+    return 0;
+}
+
+
+// CBORDecoder._get_object_pairs_hook(self)
+static PyObject *
+_CBORDecoder_get_object_pairs_hook(CBORDecoderObject *self, void *closure)
+{
+    Py_INCREF(self->object_pairs_hook);
+    return self->object_pairs_hook;
+}
+
+
+// CBORDecoder._set_object_pairs_hook(self, value)
+static int
+_CBORDecoder_set_object_pairs_hook(CBORDecoderObject *self, PyObject *value,
+                                   void *closure)
+{
+    PyObject *tmp;
+
+    if (!value) {
+        PyErr_SetString(PyExc_AttributeError,
+                        "cannot delete object_pairs_hook attribute");
+        return -1;
+    }
+    if (value != Py_None && !PyCallable_Check(value)) {
+        PyErr_Format(PyExc_ValueError,
+                        "invalid object_pairs_hook value %R (must be callable "
+                        "or None)", value);
+        return -1;
+    }
+    if (value != Py_None && self->object_hook != Py_None) {
+        PyErr_SetString(PyExc_ValueError,
+                "object_hook and object_pairs_hook are mutually exclusive");
+        return -1;
+    }
+    if (value != Py_None && self->map_pairs) {
+        PyErr_SetString(PyExc_ValueError,
+                "object_pairs_hook and map_pairs are mutually exclusive");
+        return -1;
+    }
+
+    tmp = self->object_pairs_hook;
+    Py_INCREF(value);
+    self->object_pairs_hook = value;
+    Py_DECREF(tmp);
+    return 0;
+}
+
+
+// CBORDecoder._get_map_pairs(self)
+static PyObject *
+_CBORDecoder_get_map_pairs(CBORDecoderObject *self, void *closure)
+{
+    if (self->map_pairs)
+        Py_RETURN_TRUE;
+    else
+        Py_RETURN_FALSE;
+}
+
+
+// CBORDecoder._set_map_pairs(self, value)
+static int
+_CBORDecoder_set_map_pairs(CBORDecoderObject *self, PyObject *value, void *closure)
+{
+    int enabled;
+
+    if (!value) {
+        PyErr_SetString(PyExc_AttributeError, "cannot delete map_pairs attribute");
+        return -1;
+    }
+    enabled = PyObject_IsTrue(value);
+    if (enabled == -1)
+        return -1;
+    if (enabled && (self->object_hook != Py_None ||
+                    self->object_pairs_hook != Py_None)) {
+        PyErr_SetString(PyExc_ValueError,
+                "object_hook, object_pairs_hook and map_pairs are mutually "
+                "exclusive");
+        return -1;
+    }
+
+    self->map_pairs = enabled != 0;
+    return 0;
+}
+
+
+// CBORDecoder._get_key_to_str(self)
+static PyObject *
+_CBORDecoder_get_key_to_str(CBORDecoderObject *self, void *closure)
+{
+    if (self->key_to_str)
+        Py_RETURN_TRUE;
+    else
+        Py_RETURN_FALSE;
+}
+
+
+// CBORDecoder._set_key_to_str(self, value)
+static int
+_CBORDecoder_set_key_to_str(CBORDecoderObject *self, PyObject *value, void *closure)
+{
+    int enabled;
+
+    if (!value) {
+        PyErr_SetString(PyExc_AttributeError, "cannot delete key_to_str attribute");
+        return -1;
+    }
+    enabled = PyObject_IsTrue(value);
+    if (enabled == -1)
+        return -1;
+
+    self->key_to_str = enabled != 0;
     return 0;
 }
 
@@ -1068,76 +1212,233 @@ decode_array(CBORDecoderObject *self, uint8_t subtype)
 }
 
 
+static int
+map_append_pair(PyObject *pairs, PyObject *key, PyObject *value)
+{
+    PyObject *pair = PyTuple_Pack(2, key, value);
+    if (!pair)
+        return -1;
+
+    int ret = PyList_Append(pairs, pair);
+    Py_DECREF(pair);
+    return ret;
+}
+
+
+static int
+cbor_map_append(PyObject *cbor_map, PyObject *key, PyObject *value)
+{
+    PyObject *pair, *method, *ret;
+
+    pair = PyTuple_Pack(2, key, value);
+    if (!pair)
+        return -1;
+
+    method = PyObject_GetAttrString(cbor_map, "_append");
+    if (!method) {
+        Py_DECREF(pair);
+        return -1;
+    }
+
+    ret = PyObject_CallFunctionObjArgs(method, pair, NULL);
+    Py_DECREF(method);
+    Py_DECREF(pair);
+    if (!ret)
+        return -1;
+
+    Py_DECREF(ret);
+    return 0;
+}
+
+
+static PyObject *
+map_pairs_to_cbor_map(PyObject *pairs)
+{
+    // CBORMap(pairs)
+    return PyObject_CallFunctionObjArgs(_CBOR2_CBORMap, pairs, NULL);
+}
+
+
+static PyObject *
+map_apply_key_to_str(PyObject *value, int preserve_maps)
+{
+    // cbor_map_to_str_keys(value, preserve_maps=...)
+    PyObject *args, *kwargs, *ret;
+
+    if (!_CBOR2_cbor_map_to_str_keys && _CBOR2_init_cbor_map_to_str_keys() == -1)
+        return NULL;
+
+    kwargs = preserve_maps ? Py_BuildValue("{s:O}", "preserve_maps", Py_True) : NULL;
+    if (preserve_maps && !kwargs)
+        return NULL;
+
+    args = PyTuple_Pack(1, value);
+    if (args) {
+        ret = PyObject_Call(_CBOR2_cbor_map_to_str_keys, args, kwargs);
+        Py_DECREF(args);
+    } else
+        ret = NULL;
+    Py_XDECREF(kwargs);
+    return ret;
+}
+
+
+static PyObject *
+map_apply_key_to_str_with_alias(PyObject *value, PyObject *alias, int preserve_maps)
+{
+    // _cbor_map_to_str_keys_with_alias(value, alias, preserve_maps)
+    PyObject *args, *ret;
+
+    if (!_CBOR2_cbor_map_to_str_keys_with_alias &&
+            _CBOR2_init_cbor_map_to_str_keys_with_alias() == -1)
+        return NULL;
+
+    args = Py_BuildValue("(OOO)", value, alias, preserve_maps ? Py_True : Py_False);
+    if (!args)
+        return NULL;
+
+    ret = PyObject_CallObject(_CBOR2_cbor_map_to_str_keys_with_alias, args);
+    Py_DECREF(args);
+    return ret;
+}
+
+
 static PyObject *
 decode_map(CBORDecoderObject *self, uint8_t subtype)
 {
     // major type 5
     uint64_t length;
     bool indefinite = true;
-    PyObject *map, *key, *value, *ret = NULL;
+    bool failed = false;
+    PyObject *placeholder = NULL, *pairs = NULL, *key = NULL, *value = NULL,
+             *ret = NULL, *converted = NULL;
 
-    map = PyDict_New();
-    if (map) {
-        ret = map;
-        set_shareable(self, map);
-        if (decode_length(self, subtype, &length, &indefinite) == 0) {
-            if (indefinite) {
-                while (ret) {
-                    key = decode(self, DECODE_IMMUTABLE | DECODE_UNSHARED);
-                    if (key == break_marker) {
-                        Py_DECREF(key);
-                        break;
-                    } else if (key) {
-                        value = decode(self, DECODE_UNSHARED);
-                        if (value) {
-                            if (PyDict_SetItem(map, key, value) == -1)
-                                ret = NULL;
-                            Py_DECREF(value);
-                        } else
-                            ret = NULL;
-                        Py_DECREF(key);
-                    } else
-                        ret = NULL;
-                }
-            } else {
-                while (ret && length--) {
-                    key = decode(self, DECODE_IMMUTABLE | DECODE_UNSHARED);
-                    if (key) {
-                        value = decode(self, DECODE_UNSHARED);
-                        if (value) {
-                            if (PyDict_SetItem(map, key, value) == -1)
-                                ret = NULL;
-                            Py_DECREF(value);
-                        } else
-                            ret = NULL;
-                        Py_DECREF(key);
-                    } else
-                        ret = NULL;
-                }
-            }
-        } else
-            ret = NULL;
-        if (!ret)
-            Py_DECREF(map);
+    pairs = PyList_New(0);
+    if (!pairs)
+        return NULL;
+
+    // A mutable placeholder is made shareable before the contents are decoded
+    // so cyclic references can resolve back to this map.
+    if (self->map_pairs) {
+        if (!_CBOR2_CBORMap && _CBOR2_init_CBORMap() == -1)
+            goto done;
+        placeholder = PyObject_CallFunctionObjArgs(_CBOR2_CBORMap, NULL);
+    } else {
+        placeholder = PyDict_New();
     }
-    if (ret && self->immutable) {
-        // _CBOR2_FrozenDict is initialized in CBORDecoder_init
-        map = PyObject_CallFunctionObjArgs(_CBOR2_FrozenDict, ret, NULL);
-        if (map) {
-            set_shareable(self, map);
-            Py_DECREF(ret);
-            ret = map;
+    if (!placeholder)
+        goto done;
+    set_shareable(self, placeholder);
+
+    if (decode_length(self, subtype, &length, &indefinite) == -1) {
+        failed = true;
+        goto done;
+    }
+
+    if (indefinite) {
+        while (!failed) {
+            key = decode(self, DECODE_IMMUTABLE | DECODE_UNSHARED);
+            if (key == break_marker) {
+                Py_CLEAR(key);
+                break;
+            }
+            if (!key) {
+                failed = true;
+                break;
+            }
+
+            value = decode(self, DECODE_UNSHARED);
+            if (!value) {
+                failed = true;
+                break;
+            }
+
+            if ((self->map_pairs ?
+                        cbor_map_append(placeholder, key, value) :
+                        PyDict_SetItem(placeholder, key, value)) == -1 ||
+                    map_append_pair(pairs, key, value) == -1)
+                failed = true;
+            Py_CLEAR(value);
+            Py_CLEAR(key);
+        }
+    } else {
+        while (!failed && length--) {
+            key = decode(self, DECODE_IMMUTABLE | DECODE_UNSHARED);
+            if (!key) {
+                failed = true;
+                break;
+            }
+
+            value = decode(self, DECODE_UNSHARED);
+            if (!value) {
+                failed = true;
+                break;
+            }
+
+            if ((self->map_pairs ?
+                        cbor_map_append(placeholder, key, value) :
+                        PyDict_SetItem(placeholder, key, value)) == -1 ||
+                    map_append_pair(pairs, key, value) == -1)
+                failed = true;
+            Py_CLEAR(value);
+            Py_CLEAR(key);
         }
     }
-    if (ret && self->object_hook != Py_None) {
-        map = PyObject_CallFunctionObjArgs(self->object_hook, self, ret, NULL);
-        if (!map)
-            return NULL;
 
-        set_shareable(self, map);
-        Py_DECREF(ret);
-        ret = map;
+    if (failed)
+        goto done;
+
+    if (self->object_pairs_hook != Py_None) {
+        ret = PyObject_CallFunctionObjArgs(
+                self->object_pairs_hook, self, pairs, NULL);
+        if (ret && self->key_to_str) {
+            converted = map_apply_key_to_str(ret, 1);
+            Py_CLEAR(ret);
+            ret = converted;
+        }
+    } else if (self->map_pairs) {
+        ret = placeholder;
+        Py_INCREF(ret);
+        if (self->key_to_str) {
+            converted = map_apply_key_to_str(ret, 1);
+            Py_CLEAR(ret);
+            ret = converted;
+        }
+    } else if (self->object_hook != Py_None) {
+        ret = PyObject_CallFunctionObjArgs(self->object_hook, self, placeholder, NULL);
+        if (ret && self->key_to_str) {
+            converted = map_apply_key_to_str(ret, 1);
+            Py_CLEAR(ret);
+            ret = converted;
+        }
+    } else if (self->key_to_str) {
+        // Apply the conversion from the ordered pairs, before keys that
+        // compare equal (e.g. 1 and True) could collapse into one another.
+        // Self-references to the placeholder are redirected to the converted
+        // object so cyclic maps stay cyclic.
+        ret = map_pairs_to_cbor_map(pairs);
+        if (ret) {
+            converted = map_apply_key_to_str_with_alias(
+                    ret, placeholder, self->immutable);
+            Py_CLEAR(ret);
+            ret = converted;
+        }
+    } else if (self->immutable) {
+        // _CBOR2_FrozenDict is initialized in CBORDecoder_init
+        ret = PyObject_CallFunctionObjArgs(_CBOR2_FrozenDict, placeholder, NULL);
+    } else {
+        ret = placeholder;
+        Py_INCREF(ret);
     }
+
+    if (ret)
+        set_shareable(self, ret);
+
+done:
+    Py_XDECREF(key);
+    Py_XDECREF(value);
+    Py_XDECREF(placeholder);
+    Py_XDECREF(pairs);
     return ret;
 }
 
@@ -2114,6 +2415,16 @@ static PyGetSetDef CBORDecoder_getsetters[] = {
     {"object_hook",
         (getter) _CBORDecoder_get_object_hook, (setter) _CBORDecoder_set_object_hook,
         "hook called when decoding any dict", NULL},
+    {"object_pairs_hook",
+        (getter) _CBORDecoder_get_object_pairs_hook,
+        (setter) _CBORDecoder_set_object_pairs_hook,
+        "hook called with the ordered (key, value) pairs of each map", NULL},
+    {"map_pairs",
+        (getter) _CBORDecoder_get_map_pairs, (setter) _CBORDecoder_set_map_pairs,
+        "when True, decode maps as ordered CBORMap instances", NULL},
+    {"key_to_str",
+        (getter) _CBORDecoder_get_key_to_str, (setter) _CBORDecoder_set_key_to_str,
+        "when True, convert map keys to strings and report collisions", NULL},
     {"str_errors",
         (getter) _CBORDecoder_get_str_errors, (setter) _CBORDecoder_set_str_errors,
         "the error mode to use when decoding UTF-8 encoded strings"},
