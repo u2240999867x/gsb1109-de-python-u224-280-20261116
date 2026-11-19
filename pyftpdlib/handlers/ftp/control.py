@@ -28,6 +28,8 @@ from pyftpdlib.filesystems import AbstractedFS
 from pyftpdlib.ioloop import AsyncChat
 from pyftpdlib.log import debug
 from pyftpdlib.log import logger
+from pyftpdlib.quota import QuotaExceeded
+from pyftpdlib.quota import QuotaUploadFile
 from pyftpdlib.utils import has_dualstack_ipv6
 from pyftpdlib.utils import is_ssl_sock
 from pyftpdlib.utils import strerror
@@ -242,6 +244,12 @@ proto_cmds = {
         arg=True,
         help="Syntax: SITE CHMOD <SP> mode path (change file mode).",
     ),
+    "SITE QUOTA": dict(
+        perm=None,
+        auth=True,
+        arg=False,
+        help="Syntax: SITE QUOTA (show quota ledger for this data space).",
+    ),
     "SIZE": dict(
         perm="l",
         auth=True,
@@ -402,6 +410,11 @@ class FTPHandler(AsyncChat):
        the prefix string preceding any log line; all instance
        attributes can be used as arguments.
 
+     - (instance) quota_manager:
+       an optional pyftpdlib.quota.QuotaManager instance enabling
+       per-data-space upload quota accounting (default None, meaning
+       no quota enforcement).
+
 
     All relevant instance attributes initialized when client connects
     are reproduced below.  You may be interested in them in case you
@@ -442,6 +455,7 @@ class FTPHandler(AsyncChat):
     unicode_errors = "replace"
     log_prefix = "%(remote_ip)s:%(remote_port)s-[%(username)s]"
     auth_failed_timeout = 3
+    quota_manager = None
 
     def __init__(self, conn, server, ioloop=None):
         """Initialize the command channel.
@@ -478,6 +492,7 @@ class FTPHandler(AsyncChat):
         self._current_facts = ["type", "perm", "size", "modify"]
         self._rnfr = None
         self._idler = None
+        self._quota_reservation = None
         self._log_debug = (
             logging.getLogger("pyftpdlib").getEffectiveLevel() <= logging.DEBUG
         )
@@ -830,6 +845,7 @@ class FTPHandler(AsyncChat):
             AsyncChat.close(self)
 
             self._shutdown_connecting_dtp()
+            self._release_quota_reservation()
 
             if self.data_channel is not None:
                 self.data_channel.close()
@@ -1065,6 +1081,7 @@ class FTPHandler(AsyncChat):
         self._in_dtp_queue = None
         self._rnfr = None
         self._out_dtp_queue = None
+        self._release_quota_reservation()
 
     def run_as_current_user(self, function, *args, **kwargs):
         """Execute a function impersonating the current logged-in user."""
@@ -1073,6 +1090,62 @@ class FTPHandler(AsyncChat):
             return function(*args, **kwargs)
         finally:
             self.authorizer.terminate_impersonation(self.username)
+
+    # --- quota accounting
+
+    def _get_quota_ledger(self):
+        """Return the QuotaLedger for the current data space, or None
+        if quota accounting is not enabled.
+        """
+        manager = self.quota_manager
+        if manager is None or self.fs is None:
+            return None
+        return manager.ledger_for(self.fs.root)
+
+    def _take_quota_reservation(self):
+        reservation = self._quota_reservation
+        self._quota_reservation = None
+        return reservation
+
+    def _release_quota_reservation(self):
+        if self._quota_reservation is not None:
+            self._quota_reservation.cancel()
+            self._quota_reservation = None
+
+    def _quota_track_upload(self, fd, path, mode, rest_pos, ledger, baseline):
+        """Wrap an upload file object so that its growth is billed to
+        the data space quota ledger.  Return the file object to use,
+        which is fd unchanged when quota accounting is disabled.
+
+         - (str) mode: the mode the file was opened with ("w", "a" or
+           "r+").
+         - (int) rest_pos: the REST offset the upload resumes from.
+         - (instance) ledger: the QuotaLedger or None.
+         - (int) baseline: the backend-occupied bytes of the file
+           measured before it was opened.
+        """
+        if ledger is None:
+            return fd
+        if mode == "w":
+            # The open() above truncated the file: the bytes it
+            # previously occupied are reclaimed only now that the
+            # truncation actually happened on the backend.
+            if baseline:
+                ledger.reclaim(baseline)
+            baseline = 0
+            baseline_size = 0
+            start_pos = 0
+        else:
+            baseline_size = self.fs.getsize(path)
+            start_pos = baseline_size if mode == "a" else rest_pos
+        ctx = ledger.begin_upload(
+            self.fs,
+            path,
+            baseline,
+            baseline_size,
+            reservation=self._take_quota_reservation(),
+        )
+        return QuotaUploadFile(fd, ctx, start_pos)
 
     # --- logging wrappers
 
@@ -1575,6 +1648,13 @@ class FTPHandler(AsyncChat):
         self._restart_position = 0
         if rest_pos:
             mode = "r+"
+        ledger = self._get_quota_ledger()
+        baseline = 0
+        if ledger is not None:
+            # Measure the occupancy of the target before open(),
+            # which for mode "w" would truncate it.  If the backend
+            # cannot prove it, conservatively assume 0.
+            baseline = ledger.rules.measure(self.fs, file) or 0
         try:
             fd = self.run_as_current_user(self.fs.open, file, mode + "b")
         except (OSError, FilesystemError) as err:
@@ -1605,6 +1685,9 @@ class FTPHandler(AsyncChat):
                     self.respond(f"554 {why}")
                     return
 
+            fd = self._quota_track_upload(
+                fd, file, mode, rest_pos, ledger, baseline
+            )
             if self.data_channel is not None:
                 resp = "Data connection already open. Transfer starting."
                 self.respond("125 " + resp)
@@ -1670,6 +1753,9 @@ class FTPHandler(AsyncChat):
                 return
 
             # now just acts like STOR except that restarting isn't allowed
+            fd = self._quota_track_upload(
+                fd, fd.name, "w", 0, self._get_quota_ledger(), 0
+            )
             filename = os.path.basename(fd.name)
             if self.data_channel is not None:
                 self.respond(f"125 FILE: {filename}")
@@ -2038,12 +2124,21 @@ class FTPHandler(AsyncChat):
         """Delete the specified file.
         On success return the file path, else None.
         """
+        ledger = self._get_quota_ledger()
+        occupied = None
+        if ledger is not None:
+            occupied = ledger.rules.measure(self.fs, path)
         try:
             self.run_as_current_user(self.fs.remove, path)
         except (OSError, FilesystemError) as err:
             why = strerror(err)
             self.respond(f"550 {why}.")
         else:
+            # Refund the occupied bytes only after the backend
+            # confirmed the removal; a failed reclaim must not
+            # release quota early.
+            if ledger is not None and occupied:
+                ledger.reclaim(occupied)
             self.respond("250 File removed.")
             return path
 
@@ -2257,9 +2352,32 @@ class FTPHandler(AsyncChat):
         self.respond("215 UNIX Type: L8")
 
     def ftp_ALLO(self, line):
-        """Allocate bytes for storage (noop)."""
-        # not necessary (always respond with 202)
-        self.respond("202 No storage allocation necessary.")
+        """Allocate bytes for storage.
+
+        When quota accounting is enabled for the current data space
+        this creates an in-flight reservation, spent by the next
+        upload of this session; otherwise it is a noop.
+        """
+        ledger = self._get_quota_ledger()
+        if ledger is None:
+            # not necessary (always respond with 202)
+            self.respond("202 No storage allocation necessary.")
+            return
+        try:
+            size = int(line.split()[0])
+            if size < 0:
+                raise ValueError
+        except (IndexError, ValueError, OverflowError):
+            self.respond("501 Invalid parameter.")
+            return
+        try:
+            reservation = ledger.reserve(size)
+        except QuotaExceeded:
+            self.respond("552 Exceeded storage allocation.")
+        else:
+            self._release_quota_reservation()
+            self._quota_reservation = reservation
+            self.respond(f"200 Storage allocation of {size} bytes reserved.")
 
     def ftp_HELP(self, line):
         """Return help text to the client."""
@@ -2314,6 +2432,20 @@ class FTPHandler(AsyncChat):
             else:
                 self.respond("200 SITE CHMOD successful.")
                 return (path, mode)
+
+    def ftp_SITE_QUOTA(self, line):
+        """Show the quota ledger of the current data space."""
+        ledger = self._get_quota_ledger()
+        if ledger is None:
+            self.respond("550 Quota accounting is not enabled.")
+            return
+        stats = ledger.stats()
+        self.push("200-Quota ledger:\r\n")
+        self.push(f" Confirmed: {stats.confirmed} bytes\r\n")
+        self.push(f" Reserved: {stats.reserved} bytes\r\n")
+        self.push(f" Unknown: {stats.unknown} bytes\r\n")
+        self.push(f" Limit: {stats.limit} bytes\r\n")
+        self.respond(f"200 Available: {stats.available} bytes")
 
     def ftp_SITE_HELP(self, line):
         """Return help text to the client for a given SITE command."""

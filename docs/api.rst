@@ -31,6 +31,8 @@ Modules and classes hierarchy
   pyftpdlib.ioloop.AsyncChat
   pyftpdlib.ioloop.Connector
   pyftpdlib.ioloop.IOLoop
+  pyftpdlib.quota.QuotaLedger
+  pyftpdlib.quota.QuotaManager
   pyftpdlib.servers.FTPServer
   pyftpdlib.servers.MultiprocessFTPServer
   pyftpdlib.servers.ThreadedFTPServer
@@ -237,6 +239,12 @@ Control connection
     Default: ``3`` seconds.
 
     *New in version 1.5.0*
+
+  .. data:: quota_manager
+
+    An optional :class:`pyftpdlib.quota.QuotaManager` instance enabling
+    per-data-space upload quota accounting. Defaults to ``None``, meaning no
+    quota enforcement.
 
   Follows a list of callback methods that can be overridden in a subclass. For
   blocking operations read the FAQ on how to run time consuming tasks.
@@ -542,6 +550,58 @@ Filesystem
     It is expected to return a list of strings or a generator yielding strings.
 
     .. versionchanged:: 1.6.0 can also return a generator.
+
+Quota
+=====
+
+.. class:: pyftpdlib.quota.QuotaManager(rules=None)
+
+  Registry mapping data spaces (e.g. user home directories) to their
+  quota ledger, shared by all sessions of a server. Assign an instance to
+  :class:`pyftpdlib.handlers.FTPHandler` ``quota_manager`` class attribute to
+  enable per-data-space upload quota accounting. Uploads are billed according
+  to the injected backend occupancy rules: bytes overwriting an existing range
+  are not billed again, sparse or shared data is discounted only when the
+  backend can prove it, bytes left behind by an interrupted upload remain
+  billed, and a failed reclaim never releases quota early. Clients can inspect
+  the ledger via the ``SITE QUOTA`` command and pre-allocate storage via
+  ``ALLO``.
+
+  .. method:: set_quota(space, limit, rules=None, strong=True)
+
+    Enable quota accounting for a data space and return its
+    :class:`pyftpdlib.quota.QuotaLedger`. Raise
+    :class:`pyftpdlib.quota.QuotaNotSupported` if the occupancy rules cannot
+    provide the atomic guarantees required by strong enforcement.
+
+  .. method:: ledger_for(space)
+
+    Return the :class:`pyftpdlib.quota.QuotaLedger` for a data space, or
+    ``None`` if quota accounting is not enabled for it.
+
+  .. method:: remove_quota(space)
+
+    Disable quota accounting for a data space.
+
+.. class:: pyftpdlib.quota.QuotaLedger(limit, rules, strong=True)
+
+  A queryable quota ledger for a single data space. ``limit`` is the maximum
+  number of bytes the data space may occupy; ``rules`` is an occupancy rules
+  instance (e.g. :class:`pyftpdlib.quota.BlockOccupancyRules` or
+  :class:`pyftpdlib.quota.LogicalOccupancyRules`) deciding how backend
+  occupancy is measured.
+
+  .. method:: stats()
+
+    Return a ``QuotaStats`` named tuple snapshot of the ledger with
+    ``confirmed``, ``reserved``, ``unknown``, ``limit`` and ``available``
+    fields: confirmed bytes whose occupancy was settled, in-flight
+    reservations, and in-flight growth whose final size is not known yet.
+
+.. class:: pyftpdlib.quota.QuotaNotSupported
+
+  Exception raised when strong quota enforcement is requested for a backend
+  whose occupancy rules cannot provide the required atomic guarantees.
 
 Extended classes
 ================

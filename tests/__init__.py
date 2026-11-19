@@ -275,6 +275,7 @@ def reset_server_opts():
         klass.passive_ports = None
         klass.permit_foreign_addresses = False
         klass.permit_privileged_ports = False
+        klass.quota_manager = None
         klass.tcp_no_delay = hasattr(socket, "TCP_NODELAY")
         klass.timeout = 300
         klass.unicode_errors = "replace"
