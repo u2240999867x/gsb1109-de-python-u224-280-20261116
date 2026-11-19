@@ -29,3 +29,10 @@ dcmstack Package
     :members:
     :show-inheritance:
 
+:mod:`release` Module
+---------------------
+
+.. automodule:: dcmstack.release
+    :members:
+    :show-inheritance:
+
