@@ -334,12 +334,17 @@ class TestFtpDummyCmds(PyftpdlibTestCase):
 
         with pytest.raises(ftplib.error_perm, match="Invalid parameter"):
             self.client.sendcmd("rest 10.1")
-        # REST is not supposed to be allowed in ASCII mode
+        # REST is accepted in ASCII mode; the marker refers to the
+        # transmitted (CRLF) representation and gets validated when the
+        # transfer command is issued.
         self.client.sendcmd("type a")
+        resp = self.client.sendcmd("rest 10")
+        assert resp.startswith("350")
+        # A pending REST marker is reset once a transfer gets refused.
         with pytest.raises(
-            ftplib.error_perm, match="not allowed in ASCII mode"
+            ftplib.error_perm, match="Resuming text uploads"
         ):
-            self.client.sendcmd("rest 10")
+            self.client.sendcmd("stor " + self.get_testfn())
 
     def test_feat(self):
         resp = self.client.sendcmd("feat")
@@ -986,6 +991,25 @@ class TestFtpStoreData(PyftpdlibTestCase):
         self.dummy_sendfile.seek(0)
         self.client.storbinary("stor " + self.testfn, self.dummy_sendfile)
 
+    def test_rest_rejected_on_ascii_stor(self):
+        # Incoming ASCII bytes get CRLF -> local line ending translated
+        # while writing, so a wire marker cannot be mapped back to a
+        # single local offset. Text upload resumes must be refused rather
+        # than seeked to by an equal byte count.
+        self.client.sendcmd("type a")
+        self.client.sendcmd("rest 5")
+        with pytest.raises(
+            ftplib.error_perm, match="Resuming text uploads"
+        ):
+            self.client.sendcmd("stor " + self.testfn)
+        # the refused REST marker is reset, so a later binary STOR works
+        self.client.sendcmd("type i")
+        self.dummy_sendfile.write(b"abcdefghilm")
+        self.dummy_sendfile.seek(0)
+        self.client.storbinary("stor " + self.testfn, self.dummy_sendfile)
+        with open(self.testfn, "rb") as f:
+            assert f.read() == b"abcdefghilm"
+
     def test_quit_during_transfer(self):
         # RFC-959 states that if QUIT is sent while a transfer is in
         # progress, the connection must remain open for result response
@@ -1153,6 +1177,71 @@ class TestFtpRetrieveData(PyftpdlibTestCase):
         self.client.retrbinary("retr " + self.testfn, self.dummyfile.write)
         self.dummyfile.seek(0)
         assert self.dummyfile.read() == b""
+
+    def test_restore_on_retr_ascii(self):
+        # In ASCII mode the REST marker refers to the transmitted CRLF
+        # representation, which is longer than the local LF-terminated
+        # file. Resuming must translate the marker to a local range and
+        # must not seek by an equal byte count.
+        line = b"abcde12345\n"
+        data = line * 100000
+        with open(self.testfn, "wb") as f:
+            f.write(data)
+        expected = data.replace(b"\n", b"\r\n")
+
+        # Pick a marker on a provable boundary (after a full CRLF line).
+        marker = len(line.replace(b"\n", b"\r\n")) * 4000
+        received = 0
+        self.client.voidcmd("TYPE A")
+        with contextlib.closing(
+            self.client.transfercmd("retr " + self.testfn)
+        ) as conn:
+            conn.settimeout(GLOBAL_TIMEOUT)
+            while True:
+                chunk = conn.recv(BUFSIZE)
+                if not chunk:
+                    break
+                self.dummyfile.write(chunk)
+                received += len(chunk)
+                if received >= marker:
+                    break
+
+        # transfer wasn't finished yet so we expect a 426 response
+        assert self.client.getline()[:3] == "426"
+        # discard bytes received past the chosen resumable marker
+        assert received >= marker
+        self.dummyfile.seek(marker)
+        self.dummyfile.truncate()
+
+        self.client.sendcmd(f"rest {marker}")
+        self.retrieve_ascii("retr " + self.testfn, self.dummyfile.write)
+        self.dummyfile.seek(0)
+        datafile = self.dummyfile.read()
+        assert datafile == expected
+
+    def test_restore_on_retr_ascii_ambiguous_markers(self):
+        # Markers that do not identify a single local position are
+        # rejected with 554 instead of being seeked to.
+        self.client.voidcmd("TYPE A")
+        # local b"a\nb" -> wire b"a\r\nb": marker 2 is the inserted CR
+        with open(self.testfn, "wb") as f:
+            f.write(b"a\nb")
+        self.client.sendcmd("rest 2")
+        with pytest.raises(ftplib.error_perm, match="554"):
+            self.client.sendcmd("retr " + self.testfn)
+        # the refused REST marker must not linger: a plain RETR works
+        self.retrieve_ascii("retr " + self.testfn, self.dummyfile.write)
+        self.dummyfile.seek(0)
+        assert self.dummyfile.read() == b"a\r\nb"
+
+        # local b"a\r\nb": marker 2 is the CR half of the CRLF
+        self.dummyfile.seek(0)
+        self.dummyfile.truncate()
+        with open(self.testfn, "wb") as f:
+            f.write(b"a\r\nb")
+        self.client.sendcmd("rest 2")
+        with pytest.raises(ftplib.error_perm, match="554"):
+            self.client.sendcmd("retr " + self.testfn)
 
 
 @pytest.mark.skipif(not POSIX, reason="POSIX only")

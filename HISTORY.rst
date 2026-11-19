@@ -8,6 +8,15 @@ Version: 2.2.1 - (IN DEVELOPMENT)
 * 686: distribute wheel binaries, not only .tar.gz.
 * 689: Fix file existence check for certificate files
 * Add a SECURITY.md mechanism to report critical vulnerabilities.
+* REST markers are now accepted in ASCII (text) mode. The marker, which
+  identifies a position in the transmitted CRLF representation, is
+  translated into the corresponding local file range when a download
+  (RETR) is resumed; the CR/LF conversion state is preserved across read
+  chunks, and markers that do not map to a single local position are
+  rejected with a 554 reply instead of seeking by an equal byte count.
+  Text upload (STOR) resumes remain rejected because incoming CRLF bytes
+  are translated into the local line ending while writing. Binary mode
+  keeps using the raw file offset.
 
 **Bug fixes**
 

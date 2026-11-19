@@ -37,6 +37,8 @@ from .dispatchers import ActiveDTP
 from .dispatchers import PassiveDTP
 from .producers import BufferedIteratorProducer
 from .producers import FileProducer
+from .producers import TextResumeError
+from .producers import ascii_wire_marker_to_local
 
 __all__ = ["FTPHandler"]
 
@@ -1533,6 +1535,7 @@ class FTPHandler(AsyncChat):
             return
 
         try:
+            resume_pending_cr = False
             if rest_pos:
                 # Make sure that the requested offset is valid (within the
                 # size of the file being resumed).
@@ -1542,10 +1545,30 @@ class FTPHandler(AsyncChat):
                 ok = 0
                 try:
                     fsize = self.fs.getsize(file)
-                    if rest_pos > fsize:
-                        raise ValueError
-                    fd.seek(rest_pos)
+                    if (
+                        self._current_type == "a"
+                        and os.linesep != "\r\n"
+                    ):
+                        # In text mode the REST marker refers to a
+                        # position in the transmitted (CRLF)
+                        # representation, which does not map 1:1 onto the
+                        # local file once line endings differ. Translate
+                        # it into a provable local range instead of
+                        # seeking by an equal byte count. Markers that
+                        # cannot be mapped uniquely are rejected.
+                        local_pos, resume_pending_cr = (
+                            ascii_wire_marker_to_local(fd, rest_pos)
+                        )
+                        if local_pos > fsize:
+                            raise ValueError
+                        fd.seek(local_pos)
+                    else:
+                        if rest_pos > fsize:
+                            raise ValueError
+                        fd.seek(rest_pos)
                     ok = 1
+                except TextResumeError as err:
+                    why = str(err)
                 except ValueError:
                     why = f"REST position ({rest_pos}) > file size ({fsize})"
                 except (OSError, FilesystemError) as err:
@@ -1554,7 +1577,11 @@ class FTPHandler(AsyncChat):
                     fd.close()
                     self.respond(f"554 {why}")
                     return
-            producer = FileProducer(fd, self._current_type)
+            producer = FileProducer(
+                fd,
+                self._current_type,
+                resume_pending_cr=resume_pending_cr,
+            )
             self.push_dtp_data(producer, isproducer=True, file=fd, cmd="RETR")
             return file
         except Exception:
@@ -1574,6 +1601,19 @@ class FTPHandler(AsyncChat):
         rest_pos = self._restart_position
         self._restart_position = 0
         if rest_pos:
+            # A REST marker is a position in the representation
+            # transmitted over the data connection. In text mode the
+            # incoming CRLF bytes are translated into the local line
+            # ending while writing, so the marker cannot be turned back
+            # into a single local file offset at which to continue
+            # writing. Reject it instead of seeking by an equal byte
+            # count, which would corrupt the stored file.
+            if self._current_type == "a" and os.linesep != "\r\n":
+                self.respond(
+                    "554 Resuming text uploads is not allowed; use TYPE I"
+                    " to resume transfers."
+                )
+                return
             mode = "r+"
         try:
             fd = self.run_as_current_user(self.fs.open, file, mode + "b")
@@ -1694,10 +1734,15 @@ class FTPHandler(AsyncChat):
             return self.ftp_STOR(file, mode="a")
 
     def ftp_REST(self, line):
-        """Restart a file transfer from a previous mark."""
-        if self._current_type == "a":
-            self.respond("501 Resuming transfers not allowed in ASCII mode.")
-            return
+        """Restart a file transfer from a previous mark.
+
+        The marker always identifies a position in the byte stream
+        transmitted over the data connection. In binary mode that is a
+        plain file offset. In text (ASCII) mode it refers to the CRLF
+        representation and gets translated into a local file range when
+        the transfer starts (see ftp_RETR); markers that do not map to a
+        single local position are rejected at that point.
+        """
         try:
             marker = int(line)
             if marker < 0:
@@ -1906,9 +1951,9 @@ class FTPHandler(AsyncChat):
         # size of the file on the server.  Considering that calculating
         # such result could be very resource-intensive and also dangerous
         # (DoS) we reject SIZE when the current TYPE is ASCII.
-        # However, clients in general should not be resuming downloads
-        # in ASCII mode.  Resuming downloads in binary mode is the
-        # recommended way as specified in RFC-3659.
+        # ASCII REST markers are still accepted: unlike SIZE, a resume is
+        # an explicit, infrequent client action and the marker is
+        # translated by scanning the file when the transfer starts.
 
         line = self.fs.fs2ftp(path)
         if self._current_type == "a":

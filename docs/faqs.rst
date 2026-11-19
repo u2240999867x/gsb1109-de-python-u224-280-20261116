@@ -203,11 +203,22 @@ Properly handling the SIZE command when TYPE ASCII is used would require to
 scan the entire file to perform the ASCII translation logic
 (file.read().replace(os.linesep, '\r\n')), and then calculating the length of
 such data which may be different than the actual size of the file on the
-server. Considering that calculating such a result could be resource-intensive,
-it could be easy for a malicious client to use this as a DoS attack. As such
-thus pyftpdlib rejects SIZE when the current TYPE is ASCII. However, clients in
-general should not be resuming downloads in ASCII mode.  Resuming downloads in
-binary mode is the recommended way as specified in `RFC-3659`_.
+server. Considering that calculating a result could be resource-intensive, it
+could be easy for a malicious client to use this as a DoS attack. As such
+pyftpdlib rejects SIZE when the current TYPE is ASCII.
+
+REST markers always identify a position in the representation actually
+transmitted over the data connection (with CRLF line endings), not in the
+local file. On systems whose line ending differs from CRLF, pyftpdlib
+translates an ASCII REST marker into the corresponding local file range when
+a download (RETR) is resumed: markers that identify a single local position
+are accepted, the CR/LF conversion state is preserved across read chunks, and
+markers that cannot be mapped uniquely (for example the CR half of a CRLF
+sequence) are rejected with a 554 reply instead of seeking to an arbitrary
+byte offset. Text uploads (STOR) cannot be resumed because the incoming CRLF
+bytes are translated into the local line ending while writing, so no single
+local offset can reproduce a marker; use binary mode (TYPE I), the way
+recommended by `RFC-3659`_, to resume transfers.
 
 IPv6 support
 ------------
