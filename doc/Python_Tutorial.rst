@@ -60,11 +60,43 @@ Once you have created your *DicomStack* objects you will typically want to get
 the array of voxel data, get the affine transform, or create a Nifti1Image.
 
 .. code-block:: python
-    
+
     >>> stack_data = my_stack.get_data()
     >>> stack_affine = my_stack.affine
     >>> nii = my_stack.to_nifti()
-    
+
+Data Scaling
+^^^^^^^^^^^^
+
+Each DICOM image can carry its own *RescaleSlope* and *RescaleIntercept* pair
+(the modality LUT) and the pair can differ between the slices of one series
+and between the frames of one enhanced data set.  The scaling pairs are kept
+with the data as the stack is sorted and assembled:
+
+.. code-block:: python
+
+    >>> my_stack.get_data().shape
+    (192, 192, 2, 2)
+    >>> my_stack.get_scale_factors()
+    [[ScaleFactor(slope=2.0, intercept=1.0, ...)], [ScaleFactor(...)]]
+    >>> my_stack.get_scaling_plan().mode
+    'materialized'
+
+A Nifti header can hold only one ``scl_slope``/``scl_inter`` pair.  When every
+frame shares one pair and that pair is exactly representable in the header's
+32 bit fields, *to_nifti* writes the stored codes and the pair
+(``Scaling.DataEncoding`` is ``'header'``).  Otherwise it writes the
+engineering values directly (``'materialized'``); it never writes a pair that
+would silently round the values.  A single pair that float32 cannot hold is
+also materialized.  When the scaling is the identity (the usual case where
+neither tag is present) the raw codes are written unchanged and the encoding
+is ``'none'``.
+
+A missing *RescaleSlope* or *RescaleIntercept* is treated with the DICOM
+compatibility defaults of 1 and 0.  These defaults are recorded with their
+*Scaling.RescaleSlopePresent*/*Scaling.RescaleInterceptPresent* flags set to
+False, so they are not mistaken for measured zero values.
+
 Embedding Meta Data
 ^^^^^^^^^^^^^^^^^^^
 

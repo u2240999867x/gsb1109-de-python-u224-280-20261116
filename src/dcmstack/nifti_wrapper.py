@@ -15,6 +15,7 @@ with warnings.catch_warnings():
     from nibabel.nicom.dicomwrappers import wrapper_from_data
 
 from .dcmmeta import DcmMetaExtension, InvalidExtensionError, dcm_meta_ecode
+from . import scaling
 
 
 class MissingExtensionError(Exception):
@@ -115,6 +116,12 @@ class NiftiWrapper(object):
     def __init__(self, nii_img: Nifti1Image, make_empty: bool = False):
         self.nii_img = nii_img
         hdr = nii_img.header
+        # Per-slice scaling information for images built from DICOM.  Kept on
+        # the wrapper so split/merge can preserve or deliberately materialize
+        # it, and so callers can inspect the original coefficients.
+        self.scale_factors = None
+        self.scaling_plan = None
+        self.raw_data = None
         ext = None
         self.meta_ext: Nifti1Extension = None
         for extension in hdr.extensions:
@@ -141,6 +148,23 @@ class NiftiWrapper(object):
             else:
                 raise MissingExtensionError
         self.meta_ext: Nifti1Extension = ext
+        # Expose the recorded scaling when the extension was written by this
+        # package, so callers do not have to dig into it and split/merge can
+        # preserve the raw-vs-materialized distinction.
+        encoding, _ = ext.get_values_and_class('Scaling.DataEncoding')
+        if encoding is not None:
+            factors = scaling.scale_factors_from_meta(ext)
+            if factors:
+                self.scale_factors = factors
+                self.scaling_plan = scaling.NiftiScalingPlan(
+                    encoding,
+                    factors[0].slope,
+                    factors[0].intercept,
+                    factors[0].is_lossless_in_nifti_header(),
+                    tuple(factors),
+                    "encoding recorded in the meta extension",
+                    len(factors) == 1,
+                )
 
     def __getitem__(self, key):
         '''Get the value for the given meta data key. Only considers meta data
@@ -298,9 +322,35 @@ class NiftiWrapper(object):
 
         '''
         shape = self.nii_img.shape
-        data = np.asanyarray(self.nii_img.dataobj)
         header = self.nii_img.header
         slice_dim = header.get_dim_info()[2]
+        scale_factor = scaling.get_nifti_scale_factor(self.nii_img)
+        recorded_factors, recorded_shape, recorded_mode = \
+            scaling.get_wrapper_scale_info(self)
+        plan = getattr(self, 'scaling_plan', None)
+        if plan is None:
+            plan = scaling.make_scaling_plan(recorded_factors)
+            if recorded_mode is not None:
+                plan = scaling.NiftiScalingPlan(
+                    recorded_mode,
+                    plan.slope,
+                    plan.intercept,
+                    plan.header_lossless,
+                    plan.factors,
+                    "encoding recorded in the meta extension",
+                    plan.single_factor,
+                )
+        values_materialized = (
+            plan is not None and
+            plan.mode == scaling.SCALING_MODE_MATERIALIZED
+        )
+        # When a header pair is in use the file holds stored codes, so split
+        # those and keep the pair.  When the values were materialized the
+        # array already holds engineering values and must be split as-is.
+        if values_materialized:
+            data = np.asanyarray(self.nii_img.dataobj)
+        else:
+            data = np.asanyarray(scaling.get_wrapper_raw_data(self))
 
         #If dim is None, choose the vector/time/slice dim in that order
         if dim is None:
@@ -344,6 +394,10 @@ class NiftiWrapper(object):
                 split_hdr.get_best_affine(),
                 header=split_hdr
             )
+            if not values_materialized and not scale_factor.is_identity():
+                split_nii.header.set_slope_inter(
+                    scale_factor.slope, scale_factor.intercept
+                )
 
             #Replace the meta data with the appropriate subset
             meta_dim = dim
@@ -352,6 +406,38 @@ class NiftiWrapper(object):
             split_meta = self.meta_ext.get_subset(meta_dim, idx)
             result = NiftiWrapper(split_nii)
             result.replace_extension(split_meta)
+
+            # Determine which recorded pair belongs to this subset.  The
+            # extension has already removed the other entries for dimensions
+            # that were split, so its recorded pairs line up with the subset.
+            split_factors = scaling.scale_factors_from_meta(split_meta)
+            frame_shape = scaling.frame_shape_from_meta(split_meta)
+            if frame_shape is not None:
+                split_factors, frame_shape = scaling.subset_scale_factors(
+                    recorded_factors, frame_shape, meta_dim, idx
+                )
+                const = split_meta.get_class_dict(('global', 'const'))
+                if frame_shape is None:
+                    const.pop('Scaling.FrameShape', None)
+                else:
+                    const['Scaling.FrameShape'] = list(frame_shape)
+            if not split_factors:
+                split_factors = [scale_factor]
+            result.scale_factors = split_factors
+            if values_materialized:
+                # Engineering values are already in the array; the plan only
+                # describes them, and must not trigger a second conversion.
+                result.scaling_plan = scaling.NiftiScalingPlan(
+                    scaling.SCALING_MODE_MATERIALIZED,
+                    split_factors[0].slope,
+                    split_factors[0].intercept,
+                    split_factors[0].is_lossless_in_nifti_header(),
+                    tuple(split_factors),
+                    "split of materialized data",
+                    len(split_factors) == 1,
+                )
+            else:
+                result.scaling_plan = scaling.make_scaling_plan(split_factors)
 
             yield result
 
@@ -398,14 +484,12 @@ class NiftiWrapper(object):
         n_dims = len(shape)
         if n_dims > 4:
             raise ValueError("5D+ multiframe not supported")
-        # Figure out any data rescaling
-        scale_factors = dcm_wrp.scale_factors
-        if dcm_wrp.is_multiframe and scale_factors.shape[1] > 1:
-            slope, inter = 1, 0
-            data = dcm_wrp.get_data()
-        else:
-            slope, inter = scale_factors[0, :]
-            data = dcm_wrp.get_unscaled_data()
+        # Always keep the stored codes here.  Scaling is carried on the
+        # wrapper, and only an exact single pair is pushed into the Nifti
+        # header.  This avoids silently materializing per-frame scaling into a
+        # lower precision float array before the caller can inspect it.
+        scale_factors = scaling.get_scale_factors(dcm_wrp)
+        data = dcm_wrp.get_unscaled_data()
         # The Nifti patient space flips the x and y directions
         affine = np.dot(np.diag([-1., -1., 1., 1.]), dcm_wrp.affine)
         n_vols = 1
@@ -417,11 +501,23 @@ class NiftiWrapper(object):
             slices_per_vol = shape[2]
         if n_dims == 4:
             n_vols = shape[3]
+        # Decide how the scaling will be carried.  When a single exact pair
+        # is available the stored codes go into the file and the pair goes in
+        # the header.  Otherwise the engineering values are materialized here,
+        # and the raw codes are retained on the wrapper for reference.
+        plan = scaling.make_scaling_plan(scale_factors)
+        raw_data = data
+        if plan.mode == scaling.SCALING_MODE_MATERIALIZED:
+            factor_shape = scaling.factor_shape_for_data(data.shape, len(scale_factors))
+            data = scaling.apply_scale_factors(
+                data, scale_factors, factor_shape=factor_shape, dtype=np.float64
+            )
+            data = scaling.downcast_float_if_exact(data)
         # Create the nifti image and set header data
         nii_img = Nifti1Image(data, affine)
         hdr = nii_img.header
-        if (slope, inter) != (1.0, 0.0):
-            hdr.set_slope_inter(slope, inter)
+        if plan.mode == scaling.SCALING_MODE_HEADER:
+            hdr.set_slope_inter(plan.slope, plan.intercept)
         hdr.set_xyzt_units('mm', 'sec')
         # Determine phase encoding direction, set dimension info in header
         phase_info = None
@@ -445,7 +541,15 @@ class NiftiWrapper(object):
         hdr.set_dim_info(**dim_info)
         # Create result and embed any provided meta data
         result = klass(nii_img, make_empty=True)
+        result.scale_factors = scale_factors
+        result.scaling_plan = plan
+        result.raw_data = raw_data
         result.meta_ext.reorient_transform = np.eye(4)
+        frame_shape = scaling.factor_shape_for_data(
+            raw_data.shape, len(scale_factors)
+        )
+        scaling.inject_scale_meta(result.meta_ext, scale_factors, frame_shape)
+        scaling.annotate_encoding(result.meta_ext, plan)
         if meta_dict:
             if not dcm_wrp.is_multiframe:
                 global_meta = result.meta_ext.get_class_dict(('global', 'const'))
@@ -623,6 +727,48 @@ class NiftiWrapper(object):
         result_dtype = max(input_wrp.nii_img.get_data_dtype()
                            for input_wrp in seq)
         result_data = np.empty(result_shape, dtype=result_dtype)
+        input_factors = []
+        input_modes = []
+        for wrp in seq:
+            factors, frame_shape, mode = scaling.get_wrapper_scale_info(wrp)
+            input_factors.append(factors)
+            input_modes.append(mode)
+        flat_factors = [f for factors in input_factors for f in factors]
+        result_plan = scaling.make_scaling_plan(flat_factors)
+        if any(mode == scaling.SCALING_MODE_MATERIALIZED for mode in input_modes):
+            if not all(mode == scaling.SCALING_MODE_MATERIALIZED
+                       for mode in input_modes):
+                raise ValueError(
+                    "Cannot join images that mix raw stored codes with "
+                    "materialized engineering values"
+                )
+            # Every input already holds engineering values.  Taking their
+            # recorded pairs would apply the conversion a second time.
+            result_plan = scaling.NiftiScalingPlan(
+                scaling.SCALING_MODE_MATERIALIZED,
+                result_plan.slope,
+                result_plan.intercept,
+                result_plan.header_lossless,
+                tuple(flat_factors),
+                "inputs already hold engineering values",
+                result_plan.single_factor,
+            )
+        result_frame_shape = None
+        if result_plan.mode == scaling.SCALING_MODE_MATERIALIZED:
+            # Record enough shape for a consumer to map the flat factor list
+            # back onto the data.  A 3D result uses one pair per slice; a
+            # merge along time or vector uses the trailing frame dimensions.
+            if len(result_shape) == 3 and \
+                    len(flat_factors) == result_shape[2]:
+                result_frame_shape = tuple(result_shape)
+            elif dim >= 3 and len(result_shape) > 3 and \
+                    int(np.prod(result_shape[3:])) == len(flat_factors):
+                result_frame_shape = tuple(result_shape[3:])
+            # Accumulate the engineering values in float64 so intermediate
+            # products are not rounded, then keep float32 only if the final
+            # values are exactly representable.
+            result_dtype = np.dtype(np.float64)
+            result_data = np.empty(result_shape, dtype=result_dtype)
         #Start with the header info from the first input
         hdr_info = {'qform' : first_hdr.get_qform(),
                     'qform_code' : first_hdr['qform_code'],
@@ -682,7 +828,25 @@ class NiftiWrapper(object):
                     raise ValueError("Cannot join images with different "
                                      "orientations.")
             data_slices[dim] = input_idx
-            result_data[tuple(data_slices)] = np.asanyarray(input_nii.dataobj).squeeze()
+            if input_modes[input_idx] == scaling.SCALING_MODE_MATERIALIZED:
+                # This input already holds engineering values, so use them
+                # directly rather than applying its recorded pair again.
+                input_data = np.asanyarray(input_nii.dataobj)
+            else:
+                input_data = scaling.get_wrapper_raw_data(input_wrp)
+                if result_plan.mode == scaling.SCALING_MODE_MATERIALIZED:
+                    # The result holds engineering values directly, so make
+                    # sure each input contributes its scaled values rather
+                    # than raw codes.
+                    input_data = scaling.apply_scale_factors(
+                        input_data,
+                        input_factors[input_idx],
+                        scaling.factor_shape_for_data(
+                            input_data.shape, len(input_factors[input_idx])
+                        ),
+                        dtype=result_dtype,
+                    )
+            result_data[tuple(data_slices)] = input_data.squeeze()
             if input_idx != 0:
                 if (hdr_info['qform'] is None or
                     input_hdr.get_qform() is None or
@@ -728,9 +892,13 @@ class NiftiWrapper(object):
         if dim < 3:
             scaled_dim_dir = seq[1].nii_img.affine[:3, 3] - trans
             affine[:3, dim] = scaled_dim_dir
+        if result_plan.mode == scaling.SCALING_MODE_MATERIALIZED:
+            result_data = scaling.downcast_float_if_exact(result_data)
         #Create the resulting Nifti and wrapper
         result_nii = Nifti1Image(result_data, affine)
         result_hdr = result_nii.header
+        if result_plan.mode == scaling.SCALING_MODE_HEADER:
+            result_hdr.set_slope_inter(result_plan.slope, result_plan.intercept)
         #Update the header with any info that is consistent across inputs
         if hdr_info['qform'] is not None and hdr_info['qform_code'] is not None:
             if not scaled_dim_dir is None:
@@ -771,5 +939,10 @@ class NiftiWrapper(object):
                 result_ext.time_dim = dim_key
             else:
                 result_ext.vector_dim = dim_key
+        scaling.inject_scale_meta(result_ext, flat_factors, result_frame_shape)
+        scaling.annotate_encoding(result_ext, result_plan)
         result_hdr.extensions.append(result_ext)
-        return NiftiWrapper(result_nii)
+        result = NiftiWrapper(result_nii)
+        result.scale_factors = flat_factors
+        result.scaling_plan = result_plan
+        return result

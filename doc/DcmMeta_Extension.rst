@@ -63,12 +63,44 @@ reorientation transform ('dcmmeta_reorient_transform'), and the slice dimension
 ('dcmmeta_slice_dim') of the data described by the meta data. A version number 
 for the DcmMeta extension ('dcmmeta_version') is also included.
 
-The affine, shape, and slice dimension are used to determine if varying meta 
-data is still valid. For example, if the image affine no longer matches 
-the meta data affine (i.e. the image has been coregistered) then we cannot 
+The affine, shape, and slice dimension are used to determine if varying meta
+data is still valid. For example, if the image affine no longer matches
+the meta data affine (i.e. the image has been coregistered) then we cannot
 directly match the per-slice meta data values to slices of the data array.
 
-The reorientation transform can be used to update directional meta data to 
+Data Scaling
+------------
+
+The effective modality LUT for each frame is recorded under keys prefixed with
+``Scaling.``.  ``Scaling.RescaleSlope`` and ``Scaling.RescaleIntercept`` hold
+the pairs, classified per slice or per sample when they vary.  A coefficient
+that was absent from the DICOM data is marked by
+``Scaling.RescaleSlopePresent`` or ``Scaling.RescaleInterceptPresent`` being
+False, in which case the compatibility default (1 or 0) was used.
+
+When an enhanced multi-frame input has more than one frame dimension, the
+pairs are stored as a flat C-order list in
+``Scaling.FrameRescaleSlope``/``Scaling.FrameRescaleIntercept`` (with matching
+``...Present`` keys).  ``Scaling.FrameShape`` gives the trailing frame
+dimensions that the list covers, so a consumer can reshape it to match the
+data.  The list is not split into per-slice lists because DcmMeta orders those
+slice-major while the frame factors are C order.
+
+``Scaling.DataEncoding`` records how the Nifti voxel values relate to those
+pairs:
+
+- ``none``: the values are the stored codes and the scaling is the identity.
+- ``header``: the values are stored codes; the single effective pair is in
+  ``Scaling.NiftiSlope``/``Scaling.NiftiIntercept`` and in the Nifti header.
+- ``materialized``: the values are engineering values; applying the recorded
+  pairs again would scale them twice.
+
+``Scaling.HeaderLossless`` is False only when a single pair could not be
+written into the header exactly and had to be materialized instead.  It stays
+True when differing per-frame pairs are materialized, since the header was
+never a representable option for them.
+
+The reorientation transform can be used to update directional meta data to
 match the image orientation. This transform encodes any reordering of the 
 voxel data that occurred during conversion. If the image affine does not match 
 the meta data affine, then an additional transformation needs to be done after 

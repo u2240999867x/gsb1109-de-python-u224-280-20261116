@@ -29,3 +29,10 @@ dcmstack Package
     :members:
     :show-inheritance:
 
+:mod:`scaling` Module
+---------------------
+
+.. automodule:: dcmstack.scaling
+    :members:
+    :show-inheritance:
+

@@ -28,6 +28,7 @@ with warnings.catch_warnings():
 
 from .globals import SORT_GUESSES
 from . import snd
+from . import scaling
 from .dcmmeta import DcmMetaExtension
 
 
@@ -410,10 +411,6 @@ class DicomStack(object):
         snd.inject(nii_wrp.meta_ext)
         # Sanity check against existing inputs, then pull some data we will need later
         self._chk_congruent(nii_wrp)
-        slp, inter = nii_wrp.nii_img.header.get_slope_inter()
-        slp = 1 if slp is None else slp
-        inter = 0 if inter is None else inter
-        self._slope_inter.add((slp, inter))
         self._phase_enc_dirs.add(nii_wrp.get_meta('InPlanePhaseEncodingDirection'))
         self._repetition_times.add(nii_wrp.get_meta('RepetitionTime'))
         # Pull the info used for sorting if the keys to use are already specified
@@ -451,7 +448,6 @@ class DicomStack(object):
         self._sorting_tuples = set()
         self._phase_enc_dirs = set()
         self._repetition_times = set()
-        self._slope_inter = set()
         self._ref_input = None
         self._shape_dirty = True
         self._shape = None
@@ -607,13 +603,58 @@ class DicomStack(object):
 
     shape = property(fget=get_shape)
 
+    def get_scale_factors(self):
+        '''Get the modality LUT scaling pairs for every input in the stack.
+
+        Returns
+        -------
+        factors : list
+            One entry per file, in the current assembly order.  Each entry is
+            a list of `dcmstack.scaling.ScaleFactor` objects: one pair for a
+            single frame file, or one pair per frame for an enhanced file.
+
+        Notes
+        -----
+        A missing coefficient is reported with the DICOM compatibility
+        default and a ``*_present`` flag of False.  It is not reported as a
+        measured zero.
+        '''
+        self.get_shape()
+        return [list(file_info[0].scale_factors)
+                for file_info in self._files_info]
+
+    def get_scaling_plan(self):
+        '''Get the plan for carrying scaling into a Nifti header.
+
+        The plan is ``'none'`` for identity scaling, ``'header'`` when a
+        single pair is exactly representable in the Nifti float32 fields, and
+        ``'materialized'`` when the engineering values have to be written
+        directly because a header pair would round them.
+
+        Returns
+        -------
+        plan : dcmstack.scaling.NiftiScalingPlan
+        '''
+        self.get_shape()
+        return scaling.make_scaling_plan(self._flat_scale_factors())
+
+    def _flat_scale_factors(self):
+        factors = []
+        for file_info in self._files_info:
+            factors.extend(file_info[0].scale_factors)
+        return factors
+
     def get_data(self, scaled=True):
         '''Get an array of the voxel values.
 
         Parameters
         ----------
         scaled
-            Set to False to get unscaled data
+            Set to False to get the stored (unscaled) codes.  When True the
+            DICOM modality LUT scaling is applied per frame, so a stack whose
+            slices have different slopes or intercepts returns the correct
+            engineering value for each slice instead of applying one pair to
+            the whole volume.
 
         Returns
         -------
@@ -627,28 +668,38 @@ class DicomStack(object):
         if len(self._files_info) == 0:
             raise InvalidStackError("No valid files in the stack")
         # Determine output dtype
-        stack_dtype = self._files_info[0][0].nii_img.dataobj.dtype
+        stack_dtype = scaling.get_wrapper_raw_data(
+            self._files_info[0][0]
+        ).dtype
         bits_stored = self._files_info[0][0].get_meta('BitsStored', default=16)
         out_dtype = stack_dtype
         if scaled:
-            if len(self._slope_inter) > 1 or list(self._slope_inter)[0] != (1.0, 0.0):
-                out_dtype = np.float32
+            flat_factors = self._flat_scale_factors()
+            if any(not factor.is_identity() for factor in flat_factors):
+                # Engineering values may need the full precision of a high
+                # precision slope.  Use float64 here and let to_nifti decide
+                # whether a lossless float32 downcast is possible.
+                out_dtype = np.float64
             else:
                 scaled = False
         # This is a hack to keep fslview happy, it does not like unsigned short
-        # data. If less than 16 bits are being used for each pixel we default 
-        # to signed short.        
+        # data. If less than 16 bits are being used for each pixel we default
+        # to signed short.
         if out_dtype == np.uint16 and bits_stored < 16:
             out_dtype = np.int16
         # Optimization for single file
         if len(self._files_info) == 1:
-            vox_array = np.asarray(
-                self._files_info[0][0].nii_img.dataobj, dtype=out_dtype
+            file_wrp = self._files_info[0][0]
+            vox_array = scaling.get_wrapper_raw_data(file_wrp).astype(
+                out_dtype, copy=False
             )
             if scaled:
-                slope, inter = list(self._slope_inter)[0]
-                vox_array *= slope
-                vox_array += inter
+                vox_array = scaling.apply_scale_factors(
+                    vox_array,
+                    file_wrp.scale_factors,
+                    self._factor_shape_for_file(0, vox_array),
+                ).astype(out_dtype, copy=False)
+                vox_array = scaling.downcast_float_if_exact(vox_array)
             return vox_array
         # Allocate output array
         stack_shape = self.shape
@@ -666,32 +717,48 @@ class DicomStack(object):
             for time_idx in range(stack_shape[3]):
                 if files_per_vol == 1 and file_shape[2] != 1:
                     file_idx = vec_idx*(stack_shape[3]) + time_idx
-                    vox_array[:, :, :, time_idx, vec_idx] = \
-                        np.asarray(self._files_info[file_idx][0].nii_img.dataobj)
+                    file_wrp = self._files_info[file_idx][0]
+                    data = scaling.get_wrapper_raw_data(file_wrp)
                     if scaled:
-                        slope, inter = self._files_info[file_idx][0].nii_img.header.get_slope_inter()
-                        vox_array[:, :, :, time_idx, vec_idx] *= slope
-                        vox_array[:, :, :, time_idx, vec_idx] += inter
+                        data = scaling.apply_scale_factors(
+                            data,
+                            file_wrp.scale_factors,
+                            self._factor_shape_for_file(file_idx, data),
+                        )
+                    vox_array[:, :, :, time_idx, vec_idx] = data
                 else:
                     for slice_idx in range(files_per_vol):
                         file_idx = (vec_idx*(stack_shape[3]*stack_shape[2]) +
                                     time_idx*(stack_shape[2]) + slice_idx)
-                        vox_array[:, :, slice_idx, time_idx, vec_idx] = \
-                             np.asarray(self._files_info[file_idx][0].nii_img.dataobj[:, :, 0])
+                        file_wrp = self._files_info[file_idx][0]
+                        data = scaling.get_wrapper_raw_data(file_wrp)[:, :, 0]
                         if scaled:
-                            slope, inter = self._files_info[file_idx][0].nii_img.header.get_slope_inter()
-                            if slope is None:
-                                slope = 1.0
-                            if inter is None:
-                                inter = 0.0
-                            vox_array[:, :, slice_idx, time_idx, vec_idx] *= slope
-                            vox_array[:, :, slice_idx, time_idx, vec_idx] += inter
+                            data = scaling.apply_scale_factors(
+                                data,
+                                file_wrp.scale_factors,
+                                self._factor_shape_for_file(file_idx, data),
+                            )
+                        vox_array[:, :, slice_idx, time_idx, vec_idx] = data
         # Trim unused time/vector dimensions
         if stack_shape[4] == 1:
             vox_array = vox_array[...,0]
             if stack_shape[3] == 1:
                 vox_array = vox_array[...,0]
+        if scaled:
+            vox_array = scaling.downcast_float_if_exact(vox_array)
         return vox_array
+
+    def _factor_shape_for_file(self, file_idx, data):
+        '''Get the trailing data shape that a file's scaling pairs map onto.'''
+        factors = self._files_info[file_idx][0].scale_factors
+        if len(factors) == 1:
+            return None
+        shape = scaling.factor_shape_for_data(np.asarray(data).shape, len(factors))
+        if shape is None:
+            raise InvalidStackError(
+                "Scaling factors for a frame do not match its data dimensions"
+            )
+        return shape
 
     data = property(fget=get_data)
 
@@ -751,9 +818,15 @@ class DicomStack(object):
         -------
         A nibabel.nifti1.Nifti1Image created with the stack's data and affine.
         '''
-        #Get the voxel data and affine
-        pre_scaled = len(self._slope_inter) > 1
-        data = self.get_data(scaled=pre_scaled)
+        #Get the voxel data and affine.  A single exact scaling pair stays in
+        #the Nifti header next to the stored codes.  Anything else (per-slice
+        #differences, or a pair that float32 can not hold exactly) is written
+        #as materialized engineering values so no value is silently rounded.
+        plan = self.get_scaling_plan()
+        if plan.mode == scaling.SCALING_MODE_MATERIALIZED:
+            data = scaling.downcast_float_if_exact(self.get_data(scaled=True))
+        else:
+            data = self.get_data(scaled=False)
         affine = self.affine
 
         #Figure out the number of three (or two) dimensional volumes
@@ -797,10 +870,8 @@ class DicomStack(object):
         #Create the nifti image using the data array
         nifti_image = nb.Nifti1Image(data, affine)
         nifti_header = nifti_image.header
-        if not pre_scaled:
-            slope, inter = list(self._slope_inter)[0]
-            if (slope, inter) != (1.0, 0.0):
-                nifti_header.set_slope_inter(slope, inter)
+        if plan.mode == scaling.SCALING_MODE_HEADER:
+            nifti_header.set_slope_inter(plan.slope, plan.intercept)
 
         #Set the units and dimension info
         nifti_header.set_xyzt_units('mm', 'msec')
@@ -909,6 +980,8 @@ class DicomStack(object):
                     ord = self._vector_order
                     if ord is not None:
                         meta_ext.vector_dim = ord.key
+            # Record how the voxel values map back to the source codes
+            scaling.annotate_encoding(meta_ext, plan)
             #Filter and embed the meta data
             meta_ext.filter_meta(self._meta_filter)
             nifti_header.extensions = Nifti1Extensions([meta_ext])
