@@ -313,6 +313,55 @@ BaseMailBox ``login,xoauth2`` arg ``initial_folder`` is "INBOX" by default, use 
         # DELETE: delete folder
         mailbox.folder.delete('folder4')
 
+🗂️ Folder identity catalog
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Folder names are not durable identities. A folder may be renamed, or deleted
+and recreated under the same name. ``imap_tools.catalog`` keeps folder
+generations and message occurrences explicitly, so history is not guessed from
+folder-name similarity or equal message content.
+
+.. code-block:: python
+
+    from imap_tools import Catalog, FolderObservation, ServerIdentity, parse_copyuid
+
+    server = ServerIdentity('imap.mail.com', 'test@mail.com')
+    catalog = Catalog()
+
+    # snapshot: UIDVALIDITY is the generation evidence, UIDNEXT helps continuity
+    catalog.observe_folders(server, [
+        FolderObservation.from_status('INBOX', mailbox.folder.status('INBOX')),
+        FolderObservation.from_status('Archive', mailbox.folder.status('Archive')),
+    ])
+
+    # rename: same UIDVALIDITY plus equal/monotonic UIDNEXT is one generation
+    report = catalog.observe_folders(server, [
+        FolderObservation(name='Archive 2026', uidvalidity=7, uidnext=120),
+    ])
+    print(report.renamed)
+
+    # delete and recreate under the same name: UIDVALIDITY changes -> new
+    # generation, the old record is kept as superseded and never deleted
+
+    # move: only explicit source -> destination UID mapping is accepted
+    copy_result = mailbox.copy(['10', '11'], 'Archive 2026')
+    mapping = parse_copyuid(copy_result[0])
+    evidence = MoveEvidence.from_copyuid(server, source_id, destination_id, mapping)
+    catalog.record_move(evidence)  # old occurrence stays, status "moved"
+
+Rules the catalog enforces:
+
+* A rename needs UIDVALIDITY and supporting continuity evidence. A bare
+  UIDVALIDITY match is ambiguous when several folders share the value, because
+  UIDVALIDITY is unique per mailbox, not per server; such observations are
+  reported as conflicts and kept as a new generation.
+* A lower UIDNEXT inside one UIDVALIDITY contradicts the catalog and is
+  reported, never applied.
+* A folder missing from a complete snapshot becomes ``absent``; nothing is
+  deleted. Pass ``complete=False`` for subtree listings.
+* Moves require explicit UID pairs (``COPYUID``). Message content equality is
+  never used to infer a move, and a moved-from occurrence is never deleted.
+
 ⏳ IDLE workflow
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 

@@ -1,3 +1,12 @@
+1.17.0
+======
+* Added: imap_tools.catalog - durable folder generations and message occurrences.
+  Renames are tracked with UIDVALIDITY plus continuity evidence; delete/recreate
+  under the same name creates a new generation; absent folders are marked, not deleted.
+* Added: Catalog.record_move - explicit COPYUID source/destination UID mapping only;
+  old occurrences are retained with status "moved". No content-based move matching.
+* Added: parse_copyuid, expand_uid_set, FolderObservation.from_status, capture_observations.
+
 1.16.0
 ======
 * Fixed: silent no-op behavior at BaseMailBox.<action> when using iterables. (#274)
