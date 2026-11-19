@@ -286,6 +286,12 @@ class IMAP4(object):
     back to "AUTH", and once the client has logged out, the state changes
     to "LOGOUT" and no further commands may be issued.
 
+    The companion instance variable, 'mailbox', names the confirmed
+    selected mailbox, and is None when no mailbox is selected. It is
+    only updated once the server confirms a SELECT/EXAMINE with a
+    tagged OK response; a failed selection clears it, because the
+    server leaves no mailbox selected in that case.
+
     Note: to use this module, you must read the RFCs pertaining to the
     IMAP4 protocol, as the semantics of the arguments to each IMAP4
     command are left to the invoker, not to mention the results. Also,
@@ -745,6 +751,7 @@ class IMAP4(object):
         try:
             typ, dat = self._simple_command('CLOSE')
         finally:
+            self.mailbox = None         # No mailbox selected any more
             self.state = AUTH
             if __debug__: self._log(1, 'state => AUTH')
             self._release_state_change()
@@ -1060,11 +1067,13 @@ class IMAP4(object):
         Select a mailbox. (Flushes all untagged responses.)
         'data' is count of messages in mailbox ('EXISTS' response).
         Mandated responses are ('FLAGS', 'EXISTS', 'RECENT', 'UIDVALIDITY'), so
-        other responses should be obtained via "response('FLAGS')" etc."""
+        other responses should be obtained via "response('FLAGS')" etc.
+        NB: the untagged responses belong to the pending selection, but
+        'self.mailbox' and 'self.is_readonly' keep describing the previously
+        confirmed mailbox until the server answers with a tagged OK. If the
+        selection fails, no mailbox is selected any more ('self.mailbox' is
+        None) and a new SELECT/EXAMINE is required before mailbox commands."""
 
-        self.mailbox = mailbox
-
-        self.is_readonly = bool(readonly)
         if readonly:
             name = 'EXAMINE'
         else:
@@ -1073,12 +1082,18 @@ class IMAP4(object):
             rqb = self._command(name, mailbox)
             typ, dat = rqb.get_response('command: %s => %%s' % rqb.name)
             if typ != 'OK':
+                # Failed SELECT/EXAMINE: the server deselected the previous
+                # mailbox, so forget it - a re-selection is now required.
+                self.mailbox = None
                 if self.state == SELECTED:
                     self.state = AUTH
                 if __debug__: self._log(1, 'state => AUTH')
                 if typ == 'BAD':
                     self._deliver_exc(self.error, '%s command error: %s %s. Data: %.100s' % (name, typ, dat, mailbox), kw)
                 return self._deliver_dat(typ, dat, kw)
+            # Selection confirmed - only now publish the new mailbox.
+            self.mailbox = mailbox
+            self.is_readonly = bool(readonly)
             self.state = SELECTED
             if __debug__: self._log(1, 'state => SELECTED')
         finally:

@@ -130,6 +130,12 @@ mailbox changes the state to be ``"SELECTED"``, closing a mailbox
 changes back to ``"AUTH"``, and once the client has logged out, the
 state changes to ``"LOGOUT"`` and no further commands may be issued.
 
+The companion instance variable, ``mailbox``, names the confirmed
+selected mailbox, and is ``None`` when no mailbox is selected. It is
+only updated once the server confirms a ``SELECT``/``EXAMINE`` with a
+tagged ``OK`` response; a failed selection clears it, because the
+server leaves no mailbox selected in that case.
+
 There is another instance variable, ``capabilities``, that holds a list
 of the capabilities provided by the server (the same as the list
 returned by the IMAP4 ``CAPABILITY`` command).
@@ -265,6 +271,12 @@ An ``IMAP4`` instance has the following methods:
    count of messages in mailbox (EXISTS response). Mandated responses
    are ``'FLAGS', 'EXISTS', 'RECENT', 'UIDVALIDITY'``, so other
    responses should be obtained by calling ``response('FLAGS')`` etc.
+   The ``mailbox`` instance variable keeps naming the previously
+   confirmed mailbox while the selection is in progress, and is only
+   updated once the server answers with a tagged ``OK``. If the
+   selection fails, no mailbox is selected any more (``mailbox`` is
+   ``None``) and a new ``select``/``examine`` is required before
+   mailbox commands may be issued.
 ``setacl``\ (*mailbox, who, what*)
    Set the Access Control Lists for a mailbox.
 ``setannotation``\ (*mailbox_name, entry, attribute_value[, entry, attribute_value]\**)
