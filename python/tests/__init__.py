@@ -9,6 +9,7 @@ from .phonenumbermatchertest import PhoneNumberMatchTest, PhoneNumberMatcherTest
 from .geocodertest import PhoneNumberGeocoderTest
 from .carriertest import PhoneNumberToCarrierMapperTest
 from .timezonetest import PhoneNumberToTimeZonesMapperTest
+from .privacytest import PrivacyReleasePlanTest, ReleasePlanTypesTest
 
 if __name__ == '__main__':
     unittest.main()

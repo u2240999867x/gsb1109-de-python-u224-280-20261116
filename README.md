@@ -178,6 +178,35 @@ belongs to.
 ('Atlantic/Reykjavik', 'Europe/London')
 ```
 
+Privacy-preserving regional statistics
+--------------------------------------
+
+If you hold directory statistics (counts of numbers broken down by region and number category) that
+need to be published without revealing small groups, the `phonenumbers.privacy` module plans a
+safe release.  It only accepts aggregate counts — never individual numbers — and builds a
+mutually exclusive partition of the directory in which every published group reaches a configurable
+minimum group size (the threshold).  Regions may only be merged along the levels of an explicitly
+supplied hierarchy, the partition with the smallest information loss is chosen, and records whose
+fixed-line/mobile status is uncertain stay in a separate `fixed_or_mobile` category rather than
+being forced into mobile.
+
+```pycon
+>>> from phonenumbers.privacy import DirectoryRecord, RegionLevel, NumberCategory, build_release_plan
+>>> records = [DirectoryRecord("Berlin", NumberCategory.MOBILE, 4),
+...            DirectoryRecord("Munich", NumberCategory.MOBILE, 6)]
+>>> hierarchy = [RegionLevel("Berlin", 0), RegionLevel("Munich", 0),
+...              RegionLevel("Germany", 1, "Berlin"), RegionLevel("Germany", 1, "Munich")]
+>>> plan = build_release_plan(records, hierarchy, threshold=5)
+>>> [(g.region, g.number_category, g.count) for g in plan.groups]
+[('Germany', 'mobile', 10)]
+>>> plan.reconciled
+True
+```
+
+When no allowed merge can bring every group above the threshold, `build_release_plan` does not
+release any group counts (which would allow small groups to be reconstructed by subtraction);
+instead `plan.publishable` is `False` and the ranges that cannot be published are reported.
+
 For more information about the other functionality available from the library, look in the unit tests or in the original
 [libphonenumber project](https://github.com/google/libphonenumber).
 

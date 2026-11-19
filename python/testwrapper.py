@@ -11,6 +11,7 @@ from phonenumbers import unicode_util
 from phonenumbers import geocoder
 from phonenumbers import carrier
 from phonenumbers import timezone
+from phonenumbers import privacy
 from tests import *
 
 
@@ -23,6 +24,7 @@ class DocTest(unittest.TestCase):
         self.assertEqual(0, doctest.testmod(geocoder)[0])
         self.assertEqual(0, doctest.testmod(carrier)[0])
         self.assertEqual(0, doctest.testmod(timezone)[0])
+        self.assertEqual(0, doctest.testmod(privacy)[0])
 
 
 if __name__ == '__main__':
