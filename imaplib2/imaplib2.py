@@ -58,7 +58,7 @@ __author__ = "Piers Lauder <piers@janeelix.com>"
 __URL__ = "https://github.com/jazzband/imaplib2"
 __license__ = "MIT"
 
-import binascii, calendar, errno, os, queue, random, re, select, socket, sys, time, threading, zlib
+import binascii, calendar, codecs, errno, os, queue, random, re, select, socket, sys, time, threading, zlib
 
 
 select_module = select
@@ -169,6 +169,78 @@ def Int2AP(num):
         val = AP[mod:mod+1] + val
     return val
 
+
+# Charsets attempted, in order, when a SEARCH is rejected with BADCHARSET and
+# the server does not publish a more specific list.  UTF-8 precedes the legacy
+# CJK codecs so that text shared by several codecs keeps its widest reading.
+DEFAULT_SEARCH_CHARSETS = ('UTF-8', 'ISO-8859-1', 'GB18030', 'BIG5',
+                           'SHIFT-JIS', 'EUC-KR')
+
+# IMAP SEARCH keys whose following argument is free text (RFC 3501 section
+# 6.4.4), possibly split over several arguments.  Every such argument is
+# re-encoded as one unit; structural keywords, parentheses and operators are
+# never treated as text.
+_SEARCH_TEXT_KEYS = frozenset((
+    b'BCC', b'BODY', b'CC', b'FROM', b'SUBJECT', b'TEXT', b'TO',
+    b'HEADER',                      # HEADER <field-name> <string>
+))
+
+
+def _canonical_charset(charset):
+    """Return a comparable, uppercased charset token, or None."""
+    if charset is None:
+        return None
+    if isinstance(charset, (bytes, bytearray)):
+        charset = charset.decode('ASCII', 'replace')
+    return str(charset).strip().upper().replace('_', '-')
+
+
+def _is_badcharset_response(typ, dat):
+    """True only when the tagged response rejects the SEARCH charset."""
+    if typ != 'NO':
+        return False
+    for item in (dat or []):
+        if isinstance(item, (bytes, bytearray)) and b'BADCHARSET' in item.upper():
+            return True
+    return False
+
+
+def _encode_search_criteria(criteria, charset):
+    """Re-encode every text argument of SEARCH ``criteria`` for ``charset``.
+
+    Structural tokens (SEARCH keys, ``NOT``, ``OR``, parentheses, dates,
+    message sets and quoted strings) keep their exact original bytes, so the
+    logical predicate is unchanged.  Encoding uses ``errors='strict'``: a word
+    that the charset cannot represent makes the candidate unusable instead of
+    being dropped or turned into a question mark.
+
+    :raises LookupError: the charset is not known to the local codec registry.
+    :raises UnicodeError: some text cannot be represented in the charset.
+    """
+    codec = codecs.lookup(charset)           # LookupError if unsupported locally
+    encoded = []
+    expecting_text = 0
+    for arg in criteria:
+        if expecting_text:
+            if isinstance(arg, bytes):
+                # Caller-supplied raw bytes have an unknown source encoding,
+                # so they are passed through untouched rather than guessed at.
+                encoded.append(arg)
+            else:
+                encoded.append(codec.encode(arg, 'strict')[0])
+            expecting_text -= 1
+            continue
+        token = arg if isinstance(arg, bytes) else bytes(arg, 'ASCII')
+        upper = token.upper()
+        if upper == b'HEADER':
+            expecting_text = 2               # field name, then header text
+            encoded.append(token)
+        elif upper in _SEARCH_TEXT_KEYS:
+            expecting_text = 1
+            encoded.append(token)
+        else:
+            encoded.append(token)
+    return tuple(encoded)
 
 
 class Request(object):
@@ -328,6 +400,11 @@ class IMAP4(object):
         self.compressor = None          # COMPRESS/DEFLATE if not None
         self.decompressor = None
         self._tls_established = False
+
+        # Charsets the current server declared support for (cached, or None
+        # if not queried yet), and extra fallback charsets enabled by policy.
+        self._server_charsets = None
+        self._search_charset_policy = ()
 
         # Create unique tag for this session,
         # and compile tagged response matcher.
@@ -1044,15 +1121,155 @@ class IMAP4(object):
         """(typ, [data]) = search(charset, criterion, ...)
         Search mailbox for matching messages.
         If UTF8 is enabled, charset MUST be None.
-        'data' is space separated list of matching message numbers."""
+        'data' is space separated list of matching message numbers.
+
+        If the server rejects the search with a BADCHARSET response, the
+        original ``criteria`` are preserved and the search is retried with
+        other charsets: first those declared by the server (via the
+        ``CHARSET`` LIST response), then any registered with
+        :meth:`set_search_charset_policy`, then this module's built-in
+        candidates.  Text arguments are re-encoded strictly for each attempt -
+        a word a charset cannot represent disqualifies that charset rather than
+        being dropped or replaced with '?'.  Each charset is attempted at most
+        once, so a repeated rejection cannot loop.  A successful search with no
+        matches returns an empty result; if no charset can execute the
+        predicate, the final BADCHARSET response is returned unchanged.
+        """
 
         name = 'SEARCH'
         kw['untagged_response'] = name
         if charset:
             if self.utf8_enabled:
                 raise self.error("Non-None charset not valid in UTF8 mode")
-            return self._simple_command(name, 'CHARSET', charset, *criteria, **kw)
+            typ, dat = self._simple_command(name, 'CHARSET', charset,
+                                            *criteria, **kw)
+            if not _is_badcharset_response(typ, dat):
+                return typ, dat
+            return self._search_retry_charsets(charset, criteria, kw, dat)
         return self._simple_command(name, *criteria, **kw)
+
+
+    def set_search_charset_policy(self, charsets):
+        """Register extra charsets to try after a BADCHARSET SEARCH rejection.
+
+        ``charsets`` is an iterable of charset names (e.g. ``['GB18030']``).
+        Names are de-duplicated and only consulted after the charsets declared
+        by the server itself; widening this list can never remove a candidate,
+        so a fallback search never silently narrows the original predicate.
+        """
+        seen = set()
+        policy = []
+        for charset in charsets:
+            canon = _canonical_charset(charset)
+            if canon and canon not in seen:
+                seen.add(canon)
+                policy.append(canon)
+        self._search_charset_policy = tuple(policy)
+
+
+    def _get_server_charsets(self):
+        """Return the tuple of server-declared search charsets (cached).
+
+        Uses the CHARSET mailbox listing convention (RFC 2683): each entry of
+        ``LIST "" "CHARSET:*"`` names a charset the server will accept on
+        SEARCH.  A listing that cannot be read leaves the answer undecided
+        (None) rather than being mistaken for "no charsets available".
+        """
+        if self._server_charsets is not None:
+            return self._server_charsets
+
+        charsets = None
+        try:
+            typ, dat = self.list('""', '"CHARSET:*"')
+        except self.abort:
+            raise
+        except Exception:
+            dat = None
+        if dat and dat != [None]:
+            found = []
+            seen = set()
+            for line in dat:
+                if not isinstance(line, (bytes, bytearray)):
+                    continue
+                match = re.search(br'CHARSET:([^\s"\)]+)', line, re.IGNORECASE)
+                if not match:
+                    continue
+                canon = _canonical_charset(match.group(1).decode('ASCII', 'replace'))
+                if canon and canon not in seen:
+                    seen.add(canon)
+                    found.append(canon)
+            if found:
+                charsets = tuple(found)
+        self._server_charsets = charsets
+        return charsets
+
+
+    def _search_charset_candidates(self, original):
+        """Build the ordered, de-duplicated list of fallback charset names.
+
+        The original charset is excluded here (it was already tried and
+        rejected).  Server-declared charsets take precedence, then the explicit
+        policy list, then the built-in defaults - the set only widens, it is
+        never shrunk to a collection that could miss messages.
+        """
+        original = _canonical_charset(original)
+        candidates = []
+        seen = set()
+
+        def add(name):
+            canon = _canonical_charset(name)
+            if canon and canon != original and canon not in seen:
+                seen.add(canon)
+                candidates.append(canon)
+
+        for name in (self._get_server_charsets() or ()):
+            add(name)
+        for name in self._search_charset_policy:
+            add(name)
+        for name in DEFAULT_SEARCH_CHARSETS:
+            add(name)
+        return candidates
+
+
+    def _search_retry_charsets(self, original, criteria, kw, last_dat):
+        """Retry a BADCHARSET-rejected SEARCH under legal fallback charsets."""
+        tried = {_canonical_charset(original)}
+        untestable = []
+
+        for charset in self._search_charset_candidates(original):
+            if charset in tried:
+                continue
+            tried.add(charset)
+            try:
+                encoded = _encode_search_criteria(criteria, charset)
+            except LookupError:
+                # No local codec: the candidate stays undecided, not failed.
+                untestable.append(charset)
+                continue
+            except UnicodeError:
+                # The charset cannot represent some original word: using it
+                # would lose part of the predicate, so skip without mutation.
+                untestable.append(charset)
+                continue
+
+            typ, dat = self._simple_command('SEARCH', 'CHARSET', charset,
+                                            *encoded, **kw)
+            if not _is_badcharset_response(typ, dat):
+                # Executed: an empty match is a real result, distinct from a
+                # search that could not be run at all.
+                if __debug__:
+                    self._log(1, 'SEARCH charset %s accepted after BADCHARSET'
+                                 % charset)
+                return typ, dat
+            last_dat = dat
+
+        if __debug__:
+            self._log(1, 'SEARCH unusable charsets (no codec or unrepresentable'
+                         ' text): %s' % ', '.join(untestable))
+        # Every candidate was rejected or undecidable: surface the last
+        # BADCHARSET response so the caller can tell "not executable" apart
+        # from a successful, empty search.
+        return 'NO', last_dat
 
 
     def select(self, mailbox='INBOX', readonly=False, **kw):
