@@ -81,6 +81,14 @@ class ConnectionError(MPDError):
     pass
 
 
+class StaleReplyError(ConnectionError):
+    """A reply arrived for a connection incarnation that is no longer live.
+
+    The reply must be discarded; it must not be interpreted as a reply from
+    the connection that replaced the one which issued the request.
+    """
+
+
 class ProtocolError(MPDError):
     pass
 
@@ -159,8 +167,11 @@ class MPDClientBase:
     subclasses.
     """
 
-    def __init__(self, use_unicode: Optional[bool] = None) -> None:
+    def __init__(
+        self, use_unicode: Optional[bool] = None, _connection_epoch: int = 0
+    ) -> None:
         self.iterate = False
+        self._connection_epoch = _connection_epoch
         if use_unicode is not None:
             warnings.warn(
                 "use_unicode parameter to ``MPDClientBase`` constructor is deprecated",
@@ -202,6 +213,16 @@ class MPDClientBase:
     def _reset(self) -> None:
         self.mpd_version: Optional[str] = None
         self._command_list: Optional[list[Any]] = None
+
+    @property
+    def connection_epoch(self) -> int:
+        """Incarnation number of the current (or last) connection.
+
+        A late reply may only be consumed by the connection incarnation that
+        issued the request.  The epoch is intentionally separate from
+        :attr:`mpd_version` and from any service-generation value.
+        """
+        return self._connection_epoch
 
     def _parse_pair(self, line: str, separator: str = ": ") -> List[str]:
         pair = line.split(separator, 1)
@@ -538,6 +559,7 @@ class MPDClient(MPDClientBase):
 
     def _reset(self) -> None:
         super()._reset()
+        self._connection_epoch += 1
         self._iterating = False
         self._sock: Optional[socket.socket] = None
         self._rbfile: Union[IO[bytes], _NotConnected] = _NotConnected()

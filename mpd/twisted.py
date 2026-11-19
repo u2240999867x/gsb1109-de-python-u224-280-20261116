@@ -94,6 +94,7 @@ class MPDProtocol(basic.LineReceiver, MPDClientBase):
     def _reset(self) -> None:
         super(MPDProtocol, self)._reset()
         self.mpd_version = None
+        self._connection_epoch += 1
         self._in_command_list = False
         self._command_list_results: List[List[defer.Deferred]] = []
         self._rcvd_lines: List[str] = []

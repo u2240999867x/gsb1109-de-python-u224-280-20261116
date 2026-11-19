@@ -1523,6 +1523,21 @@ class TestAsyncioMPD(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(art, {})
 
+    async def test_stale_command_result_never_reads_new_connection(self) -> None:
+        await self.init_client()
+
+        result = mpd.asyncio.CommandResult(
+            "status",
+            [],
+            self.client._parse_object,
+            self.client.connection_epoch,
+        )
+        self.client._connection_epoch += 1
+
+        await result._feed_from(self.client)
+        with self.assertRaises(mpd.StaleReplyError):
+            await result
+
     async def test_mocker(self) -> None:
         """Does the mock server refuse unexpected writes?"""
         await self.init_client()
@@ -1612,6 +1627,360 @@ class TestAsyncioMPD(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(self.client.IMMEDIATE_COMMAND_TIMEOUT)
         await self.client.currentsong()
         self.client.disconnect()
+
+
+class TestReconnectState(unittest.TestCase):
+    def gen(self, token: str) -> "mpd.recovery.ServiceGeneration":
+        return mpd.recovery.ServiceGeneration(token)
+
+    def test_same_generation_keeps_unchanged_domains(self) -> None:
+        from mpd.recovery import (
+            AuthScope,
+            CachedState,
+            CacheDisposition,
+            DatabaseState,
+            DirectoryIdentity,
+            ObservedState,
+            QueueState,
+            StateDomain,
+            classify_caches,
+        )
+
+        generation = self.gen("boot-1")
+        database = DatabaseState(db_update=100, songs=5)
+        directory = DirectoryIdentity(
+            "Music/a", last_modified="2026-11-20T00:00:00Z", size=123
+        )
+        queue = QueueState("boot-1", 7, 2)
+        cached = CachedState(
+            generation=generation,
+            database=database,
+            directories={"Music/a": directory},
+            queue=queue,
+            tagtypes=("Artist", "Album"),
+            auth_scope=AuthScope("main"),
+        )
+        observed = ObservedState(
+            generation=generation,
+            database=database,
+            directories={"Music/a": directory},
+            queue=queue,
+            tagtypes=("Artist", "Album"),
+            auth_scope=AuthScope("main"),
+        )
+        classification = classify_caches(cached, observed)
+
+        self.assertIs(
+            classification.disposition(StateDomain.LIBRARY), CacheDisposition.REUSE
+        )
+        self.assertIs(
+            classification.disposition(StateDomain.DIRECTORY, "Music/a"),
+            CacheDisposition.REUSE,
+        )
+        self.assertIs(
+            classification.disposition(StateDomain.QUEUE), CacheDisposition.REUSE
+        )
+        self.assertIs(
+            classification.disposition(StateDomain.SETTINGS), CacheDisposition.REUSE
+        )
+        self.assertIs(
+            classification.disposition(StateDomain.AUTH), CacheDisposition.REUSE
+        )
+
+    def test_restart_invalidates_queue_not_library(self) -> None:
+        from mpd.recovery import (
+            CachedState,
+            CacheDisposition,
+            DatabaseState,
+            DirectoryIdentity,
+            ObservedState,
+            QueueState,
+            StateDomain,
+            classify_caches,
+        )
+
+        database = DatabaseState(db_update=100, songs=5)
+        directory = DirectoryIdentity(
+            "Music/a", last_modified="2026-11-20T00:00:00Z", size=123
+        )
+        cached = CachedState(
+            generation=self.gen("boot-1"),
+            database=database,
+            directories={"Music/a": directory},
+            queue=QueueState("boot-1", 7, 2),
+        )
+        observed = ObservedState(
+            generation=self.gen("boot-2"),
+            database=database,
+            directories={"Music/a": directory},
+            queue=QueueState("boot-2", 7, 2),
+        )
+        classification = classify_caches(cached, observed)
+
+        self.assertIs(
+            classification.disposition(StateDomain.LIBRARY), CacheDisposition.REUSE
+        )
+        self.assertIs(
+            classification.disposition(StateDomain.DIRECTORY, "Music/a"),
+            CacheDisposition.REUSE,
+        )
+        self.assertIs(
+            classification.disposition(StateDomain.QUEUE), CacheDisposition.INVALID
+        )
+
+    def test_changed_database_invalidates_library(self) -> None:
+        from mpd.recovery import (
+            CachedState,
+            CacheDisposition,
+            DatabaseState,
+            ObservedState,
+            StateDomain,
+            classify_caches,
+        )
+
+        cached = CachedState(database=DatabaseState(db_update=100, songs=5))
+        observed = ObservedState(database=DatabaseState(db_update=101, songs=6))
+        self.assertIs(
+            classify_caches(cached, observed).disposition(StateDomain.LIBRARY),
+            CacheDisposition.INVALID,
+        )
+
+    def test_update_in_progress_is_verify(self) -> None:
+        from mpd.recovery import (
+            CachedState,
+            CacheDisposition,
+            DatabaseState,
+            ObservedState,
+            StateDomain,
+            classify_caches,
+        )
+
+        cached = CachedState(database=DatabaseState(db_update=100, songs=5))
+        observed = ObservedState(
+            database=DatabaseState(db_update=100, updating_db=42, songs=5)
+        )
+        self.assertIs(
+            classify_caches(cached, observed).disposition(StateDomain.LIBRARY),
+            CacheDisposition.VERIFY,
+        )
+
+    def test_missing_directory_evidence_stays_pending(self) -> None:
+        from mpd.recovery import (
+            CachedState,
+            CacheDisposition,
+            DirectoryIdentity,
+            ObservedState,
+            StateDomain,
+            classify_caches,
+        )
+
+        cached = CachedState(
+            directories={"Music/a": DirectoryIdentity("Music/a")}
+        )
+        observed = ObservedState(
+            directories={"Music/a": DirectoryIdentity("Music/a")}
+        )
+        self.assertIs(
+            classify_caches(cached, observed).disposition(
+                StateDomain.DIRECTORY, "Music/a"
+            ),
+            CacheDisposition.VERIFY,
+        )
+
+    def test_confirmed_unchanged_directory_is_not_refetched(self) -> None:
+        from mpd.recovery import (
+            CachedState,
+            CacheDisposition,
+            DirectoryIdentity,
+            ObservedState,
+            RecoveryAction,
+            StateDomain,
+            build_recovery_plan,
+            classify_caches,
+        )
+
+        directory = DirectoryIdentity(
+            "Music/a", last_modified="2026-11-20T00:00:00Z", size=123
+        )
+        cached = CachedState(directories={"Music/a": directory})
+        observed = ObservedState(directories={"Music/a": directory})
+        classification = classify_caches(cached, observed)
+        plan = build_recovery_plan(cached, observed, classification)
+
+        self.assertIs(
+            classification.disposition(StateDomain.DIRECTORY, "Music/a"),
+            CacheDisposition.REUSE,
+        )
+        self.assertIs(
+            plan.step(StateDomain.DIRECTORY, "Music/a").action,
+            RecoveryAction.REUSE_CACHE,
+        )
+
+    def test_songid_reuse_is_not_request_continuation(self) -> None:
+        from mpd.recovery import QueueState
+
+        old = QueueState("boot-1", 4, 2).song(9)
+        new = QueueState("boot-2", 4, 2).song(9)
+        self.assertIsNotNone(old)
+        self.assertIsNotNone(new)
+        assert old is not None and new is not None
+        self.assertTrue(old.continues(old))
+        self.assertFalse(old.continues(new))
+        self.assertTrue(old.songid_reused_by(new))
+        self.assertFalse(old.songid_reused_by(old))
+        self.assertTrue(old.is_same_songid(new))
+
+    def test_queue_inherits_service_generation(self) -> None:
+        from mpd.recovery import (
+            CachedState,
+            CacheDisposition,
+            ObservedState,
+            QueueState,
+            StateDomain,
+            classify_caches,
+        )
+
+        cached = CachedState(
+            generation="boot-1",
+            queue=QueueState(version=5, length=1),
+        )
+        same = ObservedState(
+            generation="boot-1",
+            queue=QueueState(version=5, length=1),
+        )
+        restarted = ObservedState(
+            generation="boot-2",
+            queue=QueueState(version=5, length=1),
+        )
+        self.assertIs(
+            classify_caches(cached, same).disposition(StateDomain.QUEUE),
+            CacheDisposition.REUSE,
+        )
+        self.assertIs(
+            classify_caches(cached, restarted).disposition(StateDomain.QUEUE),
+            CacheDisposition.INVALID,
+        )
+
+    def test_conflicting_auth_closes_only_affected_scope(self) -> None:
+        from mpd.recovery import (
+            AuthScope,
+            CachedState,
+            CacheDisposition,
+            ObservedState,
+            StateDomain,
+            build_recovery_plan,
+            classify_caches,
+        )
+
+        main = AuthScope.from_endpoint("mpd.local", 6600, partition="main")
+        other = AuthScope.from_endpoint("mpd.local", 6600, partition="other")
+        cached = CachedState(auth_scope=main)
+        observed = ObservedState(
+            auth_scope=main,
+            conflicting_auth_scopes=frozenset({main}),
+        )
+        classification = classify_caches(cached, observed)
+        self.assertIs(
+            classification.disposition(StateDomain.AUTH), CacheDisposition.INVALID
+        )
+        plan = build_recovery_plan(cached, observed, classification)
+        self.assertEqual(frozenset({main}), plan.closed_auth_scopes)
+        self.assertNotIn(other, plan.closed_auth_scopes)
+
+    def test_recovery_records_actual_source_per_domain(self) -> None:
+        from mpd.recovery import (
+            CachedState,
+            CacheDisposition,
+            DatabaseState,
+            DirectoryIdentity,
+            ObservedState,
+            QueueState,
+            RecoveryAction,
+            StateDomain,
+            StateSource,
+            build_recovery_plan,
+            classify_caches,
+            execute_recovery_plan,
+        )
+
+        database = DatabaseState(db_update=100, songs=5)
+        directory = DirectoryIdentity(
+            "Music/a", last_modified="2026-11-20T00:00:00Z", size=123
+        )
+        cached = CachedState(
+            generation=self.gen("boot-1"),
+            database=database,
+            directories={"Music/a": directory},
+            queue=QueueState("boot-1", 7, 2),
+            tagtypes=("Artist",),
+        )
+        observed = ObservedState(
+            generation=self.gen("boot-2"),
+            database=database,
+            directories={"Music/a": directory},
+            queue=QueueState("boot-2", 7, 2),
+            tagtypes=("Artist", "Album"),
+        )
+        classification = classify_caches(cached, observed)
+        plan = build_recovery_plan(cached, observed, classification)
+
+        self.assertIs(
+            plan.step(StateDomain.LIBRARY).action, RecoveryAction.REUSE_CACHE
+        )
+        self.assertIs(
+            plan.step(StateDomain.QUEUE).action, RecoveryAction.ADOPT_SERVER
+        )
+        self.assertIs(
+            plan.step(StateDomain.SETTINGS).action, RecoveryAction.ADOPT_SERVER
+        )
+
+        result = execute_recovery_plan(
+            plan,
+            cached,
+            observed,
+            probe=lambda step: None,
+        )
+        self.assertIs(result.source_for(StateDomain.LIBRARY), StateSource.CACHE)
+        self.assertIs(result.source_for(StateDomain.QUEUE), StateSource.SERVER)
+        self.assertIs(result.source_for(StateDomain.SETTINGS), StateSource.SERVER)
+        self.assertEqual(
+            result.adopted_state(StateDomain.QUEUE).version,
+            7,
+        )
+
+    def test_missing_evidence_remains_pending_without_probe(self) -> None:
+        from mpd.recovery import (
+            CachedState,
+            ObservedState,
+            StateDomain,
+            StateSource,
+            build_recovery_plan,
+            execute_recovery_plan,
+        )
+
+        cached = CachedState()
+        observed = ObservedState()
+        plan = build_recovery_plan(cached, observed)
+        result = execute_recovery_plan(plan, cached, observed)
+        self.assertIs(result.source_for(StateDomain.LIBRARY), StateSource.NONE)
+        self.assertIs(result.source_for(StateDomain.QUEUE), StateSource.NONE)
+        self.assertIs(result.source_for(StateDomain.SETTINGS), StateSource.NONE)
+
+    def test_late_reply_belongs_to_original_connection(self) -> None:
+        from mpd.recovery import ReplyContext
+
+        old = ReplyContext(connection_epoch=1)
+        current = ReplyContext(connection_epoch=2)
+        self.assertTrue(mpd.recovery.reply_belongs_to(old, old))
+        self.assertFalse(mpd.recovery.reply_belongs_to(old, current))
+
+    def test_sync_client_epoch_advances_on_reset(self) -> None:
+        client = mpd.MPDClient()
+        initial = client.connection_epoch
+        client._reset()
+        self.assertEqual(initial + 1, client.connection_epoch)
+        client.disconnect()
+        self.assertEqual(initial + 2, client.connection_epoch)
 
 
 if __name__ == "__main__":

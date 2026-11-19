@@ -35,6 +35,8 @@ from typing import (
     cast,
 )
 
+from mpd.base import MPDClient as SyncMPDClient
+from mpd.base import MPDClientBase, ProtocolError, mpd_command_provider
 from mpd.base import (
     ERROR_PREFIX,
     SUCCESS,
@@ -42,20 +44,26 @@ from mpd.base import (
     CommandListError,
     ConnectionError,
     CallableWithCommands,
+    StaleReplyError,
 )
-from mpd.base import MPDClient as SyncMPDClient
-from mpd.base import MPDClientBase, ProtocolError, mpd_command_provider
 
 
 class BaseCommandResult(asyncio.Future):
     """A future that carries its command/args/callback with it for the
     convenience of passing it around to the command queue."""
 
-    def __init__(self, command: str, args: List[str], callback: Callable) -> None:
+    def __init__(
+        self,
+        command: str,
+        args: List[str],
+        callback: Callable,
+        connection_epoch: int,
+    ) -> None:
         super().__init__()
         self._command = command
         self._args = args
         self._callback = callback
+        self._connection_epoch = connection_epoch
 
     def _feed_line(self, line: Optional[str]) -> None:  # FIXME just inline?
         raise NotImplementedError
@@ -65,6 +73,19 @@ class BaseCommandResult(asyncio.Future):
 
     async def _feed_from(self, mpdclient: "MPDClient") -> None:
         while True:
+            if self._connection_epoch != mpdclient.connection_epoch:
+                # The result was bound to a connection incarnation that has
+                # already ended.  It is not a result of the replacing
+                # connection and must not be applied to it.
+                self._feed_error(
+                    StaleReplyError(
+                        "Reply belongs to connection incarnation {}, "
+                        "current is {}".format(
+                            self._connection_epoch, mpdclient.connection_epoch
+                        )
+                    )
+                )
+                return
             line = await mpdclient._read_line()
             self._feed_line(line)
             if line is None:
@@ -111,7 +132,21 @@ class BinaryCommandResult(asyncio.Future):
     # Unlike the regular commands that defer to any callback that may be
     # defined for them, this uses the predefined _read_binary mechanism of the
     # mpdclient
+    def __init__(self, connection_epoch: int) -> None:
+        super().__init__()
+        self._connection_epoch = connection_epoch
+
     async def _feed_from(self, mpdclient: "MPDClient") -> None:
+        if self._connection_epoch != mpdclient.connection_epoch:
+            self._feed_error(
+                StaleReplyError(
+                    "Reply belongs to connection incarnation {}, "
+                    "current is {}".format(
+                        self._connection_epoch, mpdclient.connection_epoch
+                    )
+                )
+            )
+            return
         # Data must be pulled out no matter whether will later be ignored or not
         binary = await mpdclient._read_binary()
         if self.cancelled():
@@ -120,7 +155,8 @@ class BinaryCommandResult(asyncio.Future):
             self.set_result(binary)
 
     def _feed_error(self, error: Exception) -> None:
-        return CommandResult._feed_error(cast(CommandResult, self), error)
+        if not self.done():
+            self.set_exception(error)
 
 
 class CommandResultIterable(BaseCommandResult):
@@ -231,6 +267,7 @@ class MPDClient(MPDClientBase):
     ] = None
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
+        self._connection_epoch = 0
         super().__init__(*args, **kwargs)
         self.__rfile: Optional[asyncio.StreamReader] = None
         self.__wfile: Optional[asyncio.StreamWriter] = None
@@ -253,6 +290,7 @@ class MPDClient(MPDClientBase):
         else:
             r, w = await asyncio.open_connection(host, port)
         self.__rfile, self.__wfile = r, w
+        self._connection_epoch += 1
 
         self.__command_queue = asyncio.Queue(maxsize=self.COMMAND_QUEUE_LENGTH)
         self.__idle_consumers = []
@@ -353,7 +391,12 @@ class MPDClient(MPDClientBase):
                     # Careful: There can't be any await points between the
                     # except and here, or the sequence between the idle and the
                     # command processor might be wrong.
-                    result = CommandResult("idle", subsystems, self._parse_list)
+                    result = CommandResult(
+                        "idle",
+                        subsystems,
+                        self._parse_list,
+                        self._connection_epoch,
+                    )
                     result.add_done_callback(self.__idle_result)
                     self.__in_idle = True
                     self._write_command(result._command, result._args)
@@ -527,7 +570,7 @@ class MPDClient(MPDClientBase):
         if self.__command_queue is None:
             raise ConnectionError("Can not send command to disconnected client")
         while True:
-            partial_result = BinaryCommandResult()
+            partial_result = BinaryCommandResult(self._connection_epoch)
             await self.__command_queue.put(partial_result)
             self._end_idle()
             self._write_command(command, args)
@@ -619,7 +662,9 @@ class MPDClient(MPDClientBase):
                 return
 
             def sync_func(self: Any, *args: Any) -> BaseCommandResult:
-                result = command_class(name, args, partial(callback, self))
+                result = command_class(
+                    name, args, partial(callback, self), self._connection_epoch
+                )
                 if self.__run_task is None:
                     raise ConnectionError("Can not send command to disconnected client")
 
