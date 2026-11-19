@@ -68,10 +68,34 @@ Docs for ``imap_tools`` are at: *this page*, docstrings,
 * *limit* = None, limit on the number of read emails, useful for actions with a large number of messages, like "move". May be int or slice.
 * *mark_seen* = True, mark emails as seen on fetch
 * *reverse* = False, in order from the larger date to the smaller, works at client side
-* *headers_only* = False, get only email headers (without text, html, attachments)
+* *headers_only* = False, get only email headers (without text, html, attachments). BODYSTRUCTURE is requested too, so material refs are available.
 * *bulk* = False, False - fetch each message separately per N commands - low memory consumption, slow; True - fetch all messages per 1 command - high memory consumption, fast; int - fetch all messages by bulks of the specified size, for 20 messages and bulk=5 -> 4 IMAP commands
 * *sort* = None, criteria for sort messages on server, use SortCriteria constants. Charset arg is important for sort
 * *uid_list* = None, UIDs for fetch. If set: (criteria, charset, sort) will be ignored, SEARCH will not be used.
+* *structure* = None, request BODYSTRUCTURE. Defaults to True with *headers_only*, False otherwise.
+
+.. code-block:: python
+
+    # Bandwidth friendly flow: headers first, then body and selected attachments
+    with MailBox('imap.mail.com').login('test@mail.com', 'pwd') as mailbox:
+        msg = next(mailbox.fetch(limit=1, headers_only=True, mark_seen=False))
+        msg.status.headers      # 'complete'
+        msg.status.body         # 'pending'
+        msg.size_rfc822         # server-declared whole message size
+        msg.size                # measured bytes received (headers only here)
+        msg.attachment_refs     # refs from BODYSTRUCTURE, payloads not fetched yet
+
+        mailbox.fetch_body([msg])
+        mailbox.fetch_attachments([msg], ['report.pdf'])
+
+``MailMessage.part_refs`` / ``body_refs`` / ``attachment_refs`` - material references. Each
+``MaterialRef`` has ``declared_size`` (BODYSTRUCTURE) and ``size`` (measured payload, available
+after fetching). A declared size is never used as body length evidence.
+
+Backfill requires the same folder and ``UIDVALIDITY`` that produced the headers: compare
+``msg.ref`` with ``mailbox.folder.uidvalidity``; a changed generation raises
+``MessageGenerationError`` instead of merging stale bytes. Missing attachments only mark that
+material as ``missing``; the already complete header scope is unchanged.
 
 ``BaseMailBox.uids`` - search mailbox for matching message uids in current folder, returns List[str], args:
 
@@ -118,8 +142,13 @@ MailMessage and MailAttachment public attributes are cached by functools.cached_
         msg.html         # str: '<b>Hello 你 Привет</b>'
         msg.flags        # tuple: ('\\Seen', '\\Flagged', 'ENCRYPTED')
         msg.headers      # dict-like: {'received': ('from 1.m.ru', 'from 2.m.ru'), 'anti-virus': ('s2',)}
-        msg.size_rfc822  # int: 20664 bytes - size info from server (*useful with headers_only arg)
-        msg.size         # int: 20377 bytes - size of received message
+        msg.size_rfc822  # int: 20664 bytes - size declared by server (*useful with headers_only arg)
+        msg.size         # int: 20377 bytes - measured bytes received (headers size with headers_only)
+        msg.size_declared  # alias: declared whole-message size, never body evidence
+        msg.body_size    # int | None - measured body bytes, None until body fetched
+        msg.body_size_declared  # int | None - BODYSTRUCTURE body size, not evidence
+        msg.status       # MessageStatus: headers/body/attachments + complete/partial
+        msg.ref          # MessageRef: folder + UIDVALIDITY + uid
 
         for att in msg.attachments:  # list: imap_tools.MailAttachment
             att.filename             # str: 'cat.jpg'

@@ -45,13 +45,27 @@ class MailBoxFolderManager:
     def __init__(self, mailbox) -> None:
         self.mailbox = mailbox
         self._current_folder = None
+        self._uidvalidity = None
 
     def set(self, folder: StrOrBytes, readonly: bool = False) -> tuple:
         """Select current folder"""
         result = self.mailbox.client.select(encode_folder(folder), readonly)
         check_command_status(result, MailboxFolderSelectError)
         self._current_folder = folder
+        self._uidvalidity = self._extract_uidvalidity()
         return result
+
+    def _extract_uidvalidity(self) -> Optional[int]:
+        """UIDVALIDITY of the current selection, from the SELECT/EXAMINE responses."""
+        values = getattr(self.mailbox.client, 'untagged_responses', {}).get('UIDVALIDITY', ())
+        for value in values:
+            if isinstance(value, bytes):
+                match = re.search(rb'\d+', value)
+                if match:
+                    return int(match.group(0))
+            elif isinstance(value, int):
+                return value
+        return None
 
     def unset(self) -> tuple:
         """Unselect current folder"""
@@ -60,7 +74,23 @@ class MailBoxFolderManager:
         result = self.mailbox.client._simple_command('UNSELECT')
         check_command_status(result, MailboxFolderUnselectError)
         self._current_folder = None
+        self._uidvalidity = None
         return result
+
+    @property
+    def uidvalidity(self) -> Optional[int]:
+        """UIDVALIDITY of the current folder selection, None if unknown/unselected."""
+        if self._uidvalidity is None and self._current_folder is not None:
+            try:
+                self._uidvalidity = self.status(options=('UIDVALIDITY',)).get('UIDVALIDITY')
+            except Exception:  # noqa
+                self._uidvalidity = None
+        return self._uidvalidity
+
+    @property
+    def generation(self) -> Optional[int]:
+        """Alias for UIDVALIDITY - the folder generation that gives UIDs meaning."""
+        return self.uidvalidity
 
     def exists(self, folder: str) -> bool:
         """Checks whether a folder exists on the server."""

@@ -103,3 +103,27 @@ class MailboxAppendError(UnexpectedCommandStatusError):
 
 class MailboxTaggedResponseError(UnexpectedCommandStatusError):
     pass
+
+
+class MessagePartialError(ImapToolsError):
+    """Message operation requires a part that has not been fetched"""
+
+
+class MessageGenerationError(ImapToolsError):
+    """Message UID refers to another folder or another UIDVALIDITY generation"""
+
+
+class MessageFolderMismatchError(MessageGenerationError):
+    """Backfill requested from a folder other than the message source folder"""
+
+
+class MessageStructureError(MessagePartialError):
+    """Server did not return BODYSTRUCTURE needed to address message materials"""
+
+
+class MessageMaterialError(MessagePartialError):
+    """Selected material is unknown or missing at the server"""
+
+    def __init__(self, message: str, sections: tuple = ()) -> None:
+        super().__init__(message)
+        self.sections = sections
