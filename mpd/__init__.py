@@ -19,6 +19,7 @@
 
 from mpd.base import CommandError as CommandError
 from mpd.base import CommandListError as CommandListError
+from mpd.base import CatalogTruncatedError as CatalogTruncatedError
 from mpd.base import ConnectionError as ConnectionError
 from mpd.base import FailureResponseCode as FailureResponseCode
 from mpd.base import IteratingError as IteratingError
@@ -27,6 +28,13 @@ from mpd.base import MPDError as MPDError
 from mpd.base import PendingCommandError as PendingCommandError
 from mpd.base import ProtocolError as ProtocolError
 from mpd.base import VERSION as VERSION
+from mpd.catalog import CatalogParseError as CatalogParseError
+from mpd.catalog import CatalogResult as CatalogResult
+from mpd.catalog import CatalogRow as CatalogRow
+from mpd.catalog import FieldOccurrence as FieldOccurrence
+from mpd.catalog import FieldSource as FieldSource
+from mpd.catalog import GroupedListParser as GroupedListParser
+from mpd.catalog import parse_grouped_list as parse_grouped_list
 
 try:
     from mpd.twisted import MPDProtocol

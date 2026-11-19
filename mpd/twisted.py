@@ -26,7 +26,7 @@ from __future__ import absolute_import, unicode_literals
 
 import threading
 import types
-from typing import Any, Callable, List, Optional, Protocol, Union, cast
+from typing import Any, Callable, Iterable, List, Optional, Protocol, Union, cast
 
 from twisted.internet import defer
 from twisted.protocols import basic
@@ -43,6 +43,13 @@ from mpd.base import (
     logger,
     mpd_command_provider,
     mpd_commands,
+)
+from mpd.catalog import (
+    CatalogResult,
+    GroupedListParser,
+    build_catalog_args,
+    normalize_groups,
+    split_list_args,
 )
 
 
@@ -203,6 +210,28 @@ class MPDProtocol(basic.LineReceiver, MPDClientBase):
 
     def _parse_command_list_end(self, lines: List[str]) -> Any:
         return self._command_list_results.pop(0)
+
+    def list_catalog(
+        self, tag: str, *args: Any, groups: Union[str, Iterable[str]] = ()
+    ) -> defer.Deferred:
+        """Run ``list`` and reconstruct grouped rows with provenance.
+
+        Mirrors :meth:`mpd.MPDClient.list_catalog`.  The deferred fires with a
+        :class:`mpd.catalog.CatalogResult` once the response is complete.
+        """
+        parsed_tag, filters, argument_groups = split_list_args((tag,) + args)
+        if groups and argument_groups:
+            raise ValueError("groups given both as keyword and as arguments")
+        group_order = normalize_groups(groups) if groups else argument_groups
+        arguments, order = build_catalog_args(parsed_tag, filters, group_order)
+        parser = GroupedListParser(parsed_tag, order)
+
+        def parse(lines: List[str]) -> CatalogResult:
+            for line in lines:
+                parser.feed(line)
+            return parser.finish(complete=True)
+
+        return self._execute("list", arguments, parse)
 
     @mpd_commands(*MPDClientBase._parse_nothing.mpd_commands)
     def _parse_nothing(self, lines: List[str]) -> None:

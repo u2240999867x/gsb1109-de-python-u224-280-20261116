@@ -1,6 +1,16 @@
 python-mpd2 Changes List
 ========================
 
+Unreleased
+----------
+
+* ``list_catalog`` reconstructs grouped ``list`` responses into catalog rows:
+  per-value declaration/inheritance provenance, protocol-boundary resets
+  between groups, explicit-empty versus missing fields, multi-value tags, and
+  truncated responses.  Available on the synchronous, asyncio and twisted
+  clients.  The existing ``list`` return shape is unchanged.
+
+
 Changes in v3.1.1
 -----------------
 

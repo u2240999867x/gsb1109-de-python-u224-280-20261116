@@ -30,6 +30,8 @@ The following features were added:
 -  support for :doc:`logging <topics/logging>`
 -  improved support for sticker
 -  improved support for ranges
+-  provenance-preserving :doc:`reconstruction of grouped list results
+   <topics/grouped-list>`
 
 
 Getting Started
@@ -47,6 +49,13 @@ Command Reference
 A complete list of all available commands:
 
 * :doc:`Commands <topics/commands>`
+
+Grouped list results
+====================
+
+How ``list ... group`` responses are reconstructed into catalog rows:
+
+* :doc:`Grouped list results <topics/grouped-list>`
 
 Changelog
 =========

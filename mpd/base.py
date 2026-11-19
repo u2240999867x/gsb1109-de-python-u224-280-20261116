@@ -38,6 +38,15 @@ from typing import (
     Union,
 )
 
+from mpd.catalog import (
+    CatalogResult,
+    CatalogTruncatedError as _CatalogTruncatedError,
+    GroupedListParser,
+    build_catalog_args,
+    normalize_groups,
+    split_list_args,
+)
+
 VERSION = (3, 1, 2)
 HELLO_PREFIX = "OK MPD "
 ERROR_PREFIX = "ACK "
@@ -110,6 +119,14 @@ class PendingCommandError(MPDError):
 
 class IteratingError(MPDError):
     pass
+
+
+class CatalogTruncatedError(_CatalogTruncatedError, ConnectionError):
+    """Raised when a grouped ``list`` response ends before ``OK``.
+
+    ``result`` holds the rows that the received lines already support, marked
+    as truncated (a :class:`mpd.catalog.CatalogResult`).
+    """
 
 
 class CallableWithCommands:
@@ -735,6 +752,41 @@ class MPDClient(MPDClientBase):
         finally:
             self._command_list = None
         self._parse_nothing(self._read_lines())
+
+    def list_catalog(
+        self, tag: str, *args: Any, groups: Union[str, Iterable[str]] = ()
+    ) -> CatalogResult:
+        """Run ``list`` and reconstruct grouped rows with provenance.
+
+        The group order is taken from the request and is not inferred from
+        the response.  ``groups`` may be given either as a single tag, an
+        iterable of tags, or as the usual ``"group", tag`` pairs in ``args``.
+        Returns a :class:`mpd.catalog.CatalogResult`; use
+        :meth:`CatalogResult.combinations` for the response-backed entries.
+
+        If the connection ends before MPD's ``OK`` terminator, the rows that
+        the received lines already support are attached to a
+        :class:`mpd.CatalogTruncatedError` instead of being silently
+        completed or dropped.
+        """
+        parsed_tag, filters, argument_groups = split_list_args((tag,) + args)
+        if groups and argument_groups:
+            raise ValueError("groups given both as keyword and as arguments")
+        group_order = normalize_groups(groups) if groups else argument_groups
+        arguments, order = build_catalog_args(parsed_tag, filters, group_order)
+        if self._iterating:
+            raise IteratingError("Cannot execute 'list' while iterating")
+        if self._command_list is not None:
+            raise CommandListError("'list' not allowed in command list")
+        self._write_command("list", arguments)
+        parser = GroupedListParser(parsed_tag, order)
+        try:
+            for line in self._read_lines():
+                parser.feed(line)
+        except ConnectionError as error:
+            result = parser.finish(complete=False)
+            raise CatalogTruncatedError(str(error), result) from error
+        return parser.finish(complete=True)
 
     def _iterator_wrapper(
         self, iterator: Iterator[Dict[str, str]]

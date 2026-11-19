@@ -677,6 +677,10 @@ The music database
 
 
         list album group albumartist
+
+    When the response uses implicit group inheritance, use
+    :meth:`MPDClient.list_catalog` to keep per-value provenance; see
+    :doc:`grouped-list`.
 .. function:: MPDClient.listall(uri)
 
 

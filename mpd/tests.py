@@ -46,8 +46,7 @@ class TestMPDClient(unittest.TestCase):
         self.socket_mock = self.socket_patch.start()
         self.socket_mock.getaddrinfo.return_value = [range(5)]
 
-        self.socket_mock.socket.side_effect = (
-            lambda *a, **kw:
+        self.socket_mock.socket.side_effect = lambda *a, **kw: (
             # Create a new socket.socket() mock with default attributes,
             # each time we are calling it back (otherwise, it keeps set
             # attributes across calls).
@@ -675,6 +674,276 @@ class TestMPDClient(unittest.TestCase):
             ],
             sorted(res[5].items()),
         )
+
+    def test_list_catalog_provenance(self) -> None:
+        # ``group date`` is requested last, so MPD prints it outermost; the
+        # first requested group (albumartist) is the innermost level.
+        self.MPDWillReturn(
+            "AlbumArtist: Kraftwerk\n",
+            "Date: 1970\n",
+            "Album: Tone Float (Unofficial)\n",
+            "Date: 1974\n",
+            "Album: Autobahn\n",
+            "Album: Autobahn (2009 Der Katalog)\n",
+            "OK\n",
+        )
+        result = self.client.list_catalog(
+            "album", "group", "date", "group", "albumartist"
+        )
+        self.assertMPDReceived('list "album" "group" "date" "group" "albumartist"\n')
+        self.assertIsInstance(result, mpd.catalog.CatalogResult)
+        self.assertTrue(result.complete)
+        self.assertEqual(result.groups, ("date", "albumartist"))
+        self.assertEqual(
+            [row.as_dict() for row in result.rows],
+            [
+                {
+                    "albumartist": "Kraftwerk",
+                    "date": "1970",
+                    "album": "Tone Float (Unofficial)",
+                },
+                {"albumartist": "Kraftwerk", "date": "1974", "album": "Autobahn"},
+                {
+                    "albumartist": "Kraftwerk",
+                    "date": "1974",
+                    "album": "Autobahn (2009 Der Katalog)",
+                },
+            ],
+        )
+        first = result.rows[0]
+        self.assertEqual(
+            first.provenance("albumartist").source,
+            mpd.catalog.FieldSource.DECLARED,
+        )
+        self.assertEqual(first.provenance("albumartist").line, 0)
+        second = result.rows[1]
+        self.assertEqual(
+            second.provenance("albumartist").source,
+            mpd.catalog.FieldSource.INHERITED,
+        )
+        self.assertEqual(second.provenance("albumartist").line, 0)
+        self.assertEqual(
+            second.provenance("date").source, mpd.catalog.FieldSource.DECLARED
+        )
+        self.assertTrue(second.provenance("date").declared)
+
+    def test_list_catalog_group_order_changes_columns(self) -> None:
+        # The same response is only meaningful together with the request
+        # order that produced it.  Here the response was produced by
+        # "group date group albumartist" (Date outermost, AlbumArtist
+        # innermost).
+        lines = [
+            "AlbumArtist: Kraftwerk\n",
+            "Date: 1970\n",
+            "Album: Tone Float (Unofficial)\n",
+            "OK\n",
+        ]
+        self.MPDWillReturn(*lines)
+        normal = self.client.list_catalog(
+            "album", "group", "date", "group", "albumartist"
+        )
+        self.MPDWillReturn(*lines)
+        swapped = self.client.list_catalog(
+            "album", "group", "albumartist", "group", "date"
+        )
+
+        self.assertEqual(
+            normal.rows[0].as_dict(),
+            {
+                "date": "1970",
+                "albumartist": "Kraftwerk",
+                "album": "Tone Float (Unofficial)",
+            },
+        )
+        self.assertEqual(normal.rows[0].provenance("albumartist").line, 0)
+        self.assertEqual(normal.rows[0].provenance("date").line, 1)
+
+        # Under the swapped request the columns are read in a different
+        # order: the second line declares the outer "date", which resets the
+        # inner "albumartist" level.  The resulting row is therefore not
+        # allowed to borrow the albumartist declared before the outer group.
+        self.assertTrue(swapped.rows[0].is_missing("albumartist"))
+        self.assertEqual(
+            swapped.rows[0].as_dict(),
+            {"date": "1970", "album": "Tone Float (Unofficial)"},
+        )
+        self.assertEqual(
+            list(swapped.combinations()),
+            [{"date": "1970", "album": "Tone Float (Unofficial)"}],
+        )
+
+    def test_list_catalog_resets_deeper_levels(self) -> None:
+        # group date is outermost; group albumartist is innermost.
+        self.MPDWillReturn(
+            "Date: 1970\n",
+            "AlbumArtist: First\n",
+            "Album: One\n",
+            "Date: 1971\n",
+            "Album: Two\n",
+            "OK\n",
+        )
+        result = self.client.list_catalog(
+            "album", "group", "albumartist", "group", "date"
+        )
+        self.assertEqual(
+            [row.as_dict() for row in result.rows],
+            [
+                {"albumartist": "First", "date": "1970", "album": "One"},
+                {"date": "1971", "album": "Two"},
+            ],
+        )
+        second = result.rows[1]
+        self.assertEqual(second.missing, ("albumartist",))
+        self.assertTrue(second.is_missing("albumartist"))
+        self.assertRaises(KeyError, second.provenance, "albumartist")
+        # The new date must not inherit the previous date's albumartist; the
+        # row is emitted without that level rather than with a borrowed value.
+        self.assertEqual(
+            list(result.combinations()),
+            [
+                {"albumartist": "First", "date": "1970", "album": "One"},
+                {"date": "1971", "album": "Two"},
+            ],
+        )
+
+    def test_list_catalog_empty_and_missing_are_distinct(self) -> None:
+        # Request order albumartist, date => Date outermost.
+        self.MPDWillReturn(
+            "Date: 1970\n",
+            "AlbumArtist: \n",
+            "Album: One\n",
+            "Date: 1971\n",
+            "Album: Two\n",
+            "OK\n",
+        )
+        result = self.client.list_catalog(
+            "album", "group", "albumartist", "group", "date"
+        )
+        empty, missing = result.rows
+        self.assertFalse(empty.is_missing("albumartist"))
+        self.assertTrue(empty.is_empty("albumartist"))
+        self.assertEqual(empty.as_dict()["albumartist"], "")
+        self.assertTrue(missing.is_missing("albumartist"))
+        self.assertFalse(missing.is_empty("albumartist"))
+        self.assertNotIn("albumartist", missing.as_dict())
+        # An explicitly empty value is still a declared value, so the row is
+        # supported; a missing level is not.
+        self.assertTrue(empty.supported)
+        self.assertFalse(missing.supported)
+        self.assertEqual(
+            list(result.combinations()),
+            [
+                {"albumartist": "", "date": "1970", "album": "One"},
+                {"date": "1971", "album": "Two"},
+            ],
+        )
+
+    def test_list_catalog_multi_value_tags_keep_occurrences(self) -> None:
+        self.MPDWillReturn(
+            "Artist: A\n",
+            "Artist: B\n",
+            "Album: One\n",
+            "Album: Two\n",
+            "OK\n",
+        )
+        result = self.client.list_catalog("album", "group", "artist")
+        row = result.rows[0]
+        self.assertEqual([o.value for o in row.occurrences("artist")], ["A", "B"])
+        self.assertEqual(row.as_dict()["artist"], ["A", "B"])
+        # One entry per actual album line; artist occurrences are not
+        # expanded into a Cartesian product.
+        self.assertEqual(
+            [entry["album"] for entry in result.combinations()], ["One", "Two"]
+        )
+        second = result.rows[1]
+        self.assertEqual(
+            second.provenance("artist").source,
+            mpd.catalog.FieldSource.INHERITED,
+        )
+
+    def test_list_catalog_truncation_preserves_supported_rows(self) -> None:
+        # Request order albumartist, date => Date is the outer column.
+        self.MPDWillReturn(
+            "Date: 1970\n",
+            "AlbumArtist: Kraftwerk\n",
+            "Album: One\n",
+        )
+        with self.assertRaises(mpd.CatalogTruncatedError) as raised:
+            self.client.list_catalog("album", "group", "albumartist", "group", "date")
+        result = raised.exception.result
+        self.assertFalse(result.complete)
+        self.assertEqual(
+            [row.as_dict() for row in result.rows],
+            [{"albumartist": "Kraftwerk", "date": "1970", "album": "One"}],
+        )
+        self.assertTrue(result.rows[0].truncated)
+        self.assertTrue(result.rows[0].supported)
+
+    def test_list_catalog_truncation_reports_pending_context(self) -> None:
+        self.MPDWillReturn(
+            "Date: 1970\n",
+            "AlbumArtist: Kraftwerk\n",
+            "Album: One\n",
+            "Date: 1974\n",
+        )
+        with self.assertRaises(mpd.CatalogTruncatedError) as raised:
+            self.client.list_catalog("album", "group", "albumartist", "group", "date")
+        result = raised.exception.result
+        self.assertEqual(len(result.rows), 1)
+        self.assertIsNotNone(result.pending)
+        assert result.pending is not None
+        self.assertEqual(result.pending["date"].value, "1974")
+        # The new date reset the inner albumartist level, so the incomplete
+        # tail is not turned into a row borrowing the previous artist.
+        self.assertNotIn("albumartist", result.pending)
+
+    def test_parse_grouped_list_output_backed(self) -> None:
+        result = mpd.catalog.parse_grouped_list(
+            ["AlbumArtist: A", "Date: 1970", "Album: One", "Album: Two"],
+            "album",
+            ["date", "albumartist"],
+        )
+        self.assertEqual(
+            list(result.combinations()),
+            [
+                {"albumartist": "A", "date": "1970", "album": "One"},
+                {"albumartist": "A", "date": "1970", "album": "Two"},
+            ],
+        )
+
+    def test_list_catalog_keyword_groups(self) -> None:
+        self.MPDWillReturn(
+            "Date: 1970\n",
+            "AlbumArtist: A\n",
+            "Album: One\n",
+            "OK\n",
+        )
+        result = self.client.list_catalog(
+            "album", "artist", "A", groups=["albumartist", "date"]
+        )
+        self.assertMPDReceived(
+            'list "album" "artist" "A" "group" "albumartist" "group" "date"\n'
+        )
+        self.assertEqual(result.groups, ("albumartist", "date"))
+        self.assertEqual(
+            result.rows[0].as_dict(),
+            {"albumartist": "A", "date": "1970", "album": "One"},
+        )
+
+    def test_list_catalog_rejects_duplicate_group(self) -> None:
+        self.MPDWillReturn("OK\n")
+        with self.assertRaises(ValueError):
+            self.client.list_catalog("album", "group", "artist", "group", "artist")
+        with self.assertRaises(ValueError):
+            self.client.list_catalog("album", groups=["artist", "Artist"])
+        with self.assertRaises(ValueError):
+            self.client.list_catalog("album", groups=["album"])
+
+    def test_list_catalog_rejects_group_in_command_list(self) -> None:
+        self.MPDWillReturn("list_OK\n", "OK\n")
+        self.client.command_list_ok_begin()
+        with self.assertRaises(mpd.CommandListError):
+            self.client.list_catalog("album")
 
 
 # MPD client tests which do not mock the socket, but rather replace it
@@ -1449,6 +1718,59 @@ class TestAsyncioMPD(unittest.IsolatedAsyncioTestCase):
         async for o in list_:
             self.assertEqual(o, next(expected))
         self.assertRaises(StopIteration, next, expected)
+
+    async def test_list_catalog(self) -> None:
+        await self.init_client()
+        self.mockserver.expect_exchange(
+            [b'list "album" "group" "albumartist" "group" "date"\n'],
+            [
+                b"Date: 1970\n",
+                b"AlbumArtist: Kraftwerk\n",
+                b"Album: One\n",
+                b"Date: 1974\n",
+                b"Album: Two\n",
+                b"OK\n",
+            ],
+        )
+
+        result = await self.client.list_catalog(
+            "album", "group", "albumartist", "group", "date"
+        )
+        self.assertTrue(result.complete)
+        self.assertEqual(
+            [row.as_dict() for row in result.rows],
+            [
+                {"albumartist": "Kraftwerk", "date": "1970", "album": "One"},
+                {"date": "1974", "album": "Two"},
+            ],
+        )
+        self.assertTrue(result.rows[1].is_missing("albumartist"))
+        self.assertEqual(
+            result.rows[1].provenance("date").source,
+            mpd.catalog.FieldSource.DECLARED,
+        )
+
+    async def test_list_catalog_truncated(self) -> None:
+        await self.init_client()
+        # The stream ends (empty read) without the terminating OK line.
+        self.mockserver.expect_exchange(
+            [b'list "album" "group" "date"\n'],
+            [
+                b"Date: 1970\n",
+                b"Album: One\n",
+                b"",
+            ],
+        )
+
+        with self.assertRaises(mpd.CatalogTruncatedError) as raised:
+            await self.client.list_catalog("album", "group", "date")
+        result = raised.exception.result
+        self.assertFalse(result.complete)
+        self.assertEqual(
+            [row.as_dict() for row in result.rows],
+            [{"date": "1970", "album": "One"}],
+        )
+        self.assertTrue(result.rows[0].truncated)
 
     async def test_albumart(self) -> None:
         await self.init_client()

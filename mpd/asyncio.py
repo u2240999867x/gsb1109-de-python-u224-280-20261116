@@ -38,6 +38,7 @@ from typing import (
 from mpd.base import (
     ERROR_PREFIX,
     SUCCESS,
+    CatalogTruncatedError,
     CommandError,
     CommandListError,
     ConnectionError,
@@ -45,6 +46,13 @@ from mpd.base import (
 )
 from mpd.base import MPDClient as SyncMPDClient
 from mpd.base import MPDClientBase, ProtocolError, mpd_command_provider
+from mpd.catalog import (
+    CatalogResult,
+    GroupedListParser,
+    build_catalog_args,
+    normalize_groups,
+    split_list_args,
+)
 
 
 class BaseCommandResult(asyncio.Future):
@@ -105,6 +113,39 @@ class CommandResult(BaseCommandResult):
             # known right now); instead, the run loop yields initially with a
             # sleep(0) that ensures it can be cancelled properly at any time.
             raise error
+
+
+class _CatalogCommandResult(asyncio.Future):
+    """Collect a grouped ``list`` response directly into a catalog parser."""
+
+    def __init__(
+        self, command: str, args: List[Any], parser: "GroupedListParser"
+    ) -> None:
+        super().__init__()
+        self._command = command
+        self._args = args
+        self._parser = parser
+
+    async def _feed_from(self, mpdclient: "MPDClient") -> None:
+        while True:
+            line = await mpdclient._read_line()
+            if line is None:
+                break
+            self._parser.feed(line)
+        if not self.done():
+            self.set_result(self._parser.finish(complete=True))
+
+    def _feed_error(self, error: Exception) -> None:
+        if self.done():
+            return
+        if isinstance(error, ConnectionError):
+            # The connection is gone; the rows that arrived before the end
+            # are still useful, but the result must stay marked truncated.
+            self.set_exception(
+                CatalogTruncatedError(str(error), self._parser.finish(complete=False))
+            )
+        else:
+            self.set_exception(error)
 
 
 class BinaryCommandResult(asyncio.Future):
@@ -658,6 +699,32 @@ class MPDClient(MPDClientBase):
             setattr(cls, escaped_name, sync_func)
 
     # commands that just work differently
+    async def list_catalog(
+        self, tag: str, *args: Any, groups: Union[str, Iterable[str]] = ()
+    ) -> CatalogResult:
+        """Run ``list`` and reconstruct grouped rows with provenance.
+
+        Mirrors :meth:`mpd.MPDClient.list_catalog`, using the same request
+        order and the same per-request parser state.
+        """
+        parsed_tag, filters, argument_groups = split_list_args((tag,) + args)
+        if groups and argument_groups:
+            raise ValueError("groups given both as keyword and as arguments")
+        group_order = normalize_groups(groups) if groups else argument_groups
+        arguments, order = build_catalog_args(parsed_tag, filters, group_order)
+        parser = GroupedListParser(parsed_tag, order)
+        result = _CatalogCommandResult("list", arguments, parser)
+        if self.__run_task is None:
+            raise ConnectionError("Can not send command to disconnected client")
+        self.__command_queue.put_nowait(result)
+        self._end_idle()
+        try:
+            self._write_command(result._command, result._args)
+        except BaseException as e:
+            self.disconnect()
+            result.set_exception(e)
+        return await result
+
     async def idle(
         self, subsystems: Union[List[str], Tuple[str]] = []
     ) -> AsyncIterator[Union[List[str], Exception]]:
