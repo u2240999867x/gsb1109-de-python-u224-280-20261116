@@ -39,6 +39,14 @@ A quick guide for getting started python-mpd2:
 
 * :doc:`Getting Started <topics/getting-started>`
 
+Queue Planning
+==============
+
+Transform the current playlist into a target queue of URIs with auditable,
+cost-minimized insert/delete/move actions:
+
+* :doc:`Queue Planning <topics/queue-planning>`
+
 .. _python-mpd: https://pypi.python.org/pypi/python-mpd/
 
 Command Reference
