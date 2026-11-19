@@ -212,6 +212,107 @@ def test_image_collision():
         stack.add_dcm(dcm)
 
 
+class TestSliceGeometry(object):
+    '''Slice order must be recovered from the image position and orientation
+    using the common geometry of the whole group, within a geometric
+    tolerance.'''
+    def _make_stack(self, positions, **kwargs):
+        stack = dcmstack.DicomStack(**kwargs)
+        for idx, pos in enumerate(positions):
+            attrs = {'ImagePositionPatient': [0.0, 0.0, pos]}
+            stack.add_dcm(make_dicom(attrs, pix_val=idx + 1))
+        return stack
+
+    def test_out_of_order_slices(self):
+        #Slices added out of order get ordered by their geometry. For the
+        #default axial orientation the slice normal points towards inferior,
+        #so the most superior slice comes first.
+        stack = self._make_stack([2.0, 0.0, 1.0])
+        assert stack.shape == (16, 16, 3)
+        data = stack.get_data()
+        assert (data[:, :, 0] == 1).all()
+        assert (data[:, :, 1] == 3).all()
+        assert (data[:, :, 2] == 2).all()
+
+    def test_affine_from_geometry(self):
+        #The slice axis of the affine comes from the slice positions
+        stack = self._make_stack([0.0, 2.0])
+        affine = stack.affine
+        assert np.allclose(affine[:3, 2], [0.0, 0.0, -2.0])
+        assert np.allclose(affine[:3, 3], [0.0, 0.0, 2.0])
+
+    def test_descending_positions(self):
+        #The input order does not matter, only the geometry does
+        stack = self._make_stack([0.0, -2.0])
+        affine = stack.affine
+        assert np.allclose(affine[:3, 2], [0.0, 0.0, -2.0])
+        assert np.allclose(affine[:3, 3], [0.0, 0.0, 0.0])
+
+    def test_duplicate_plane(self):
+        stack = self._make_stack([0.0, 1.0, 1.0])
+        with pytest.raises(dcmstack.InvalidStackError) as exc_info:
+            stack.get_shape()
+        assert 'uplicate' in str(exc_info.value)
+
+    def test_near_duplicate_plane(self):
+        #Positions closer than the geometric tolerance are the same plane
+        stack = self._make_stack([0.0, 1.0, 1.0 + 1e-6])
+        with pytest.raises(dcmstack.InvalidStackError) as exc_info:
+            stack.get_shape()
+        assert 'uplicate' in str(exc_info.value)
+
+    def test_spacing_jump(self):
+        stack = self._make_stack([0.0, 1.0, 2.0, 5.0])
+        with pytest.raises(dcmstack.InvalidStackError):
+            stack.get_shape()
+
+    def test_orientation_mismatch(self):
+        stack = dcmstack.DicomStack()
+        stack.add_dcm(make_dicom({'ImagePositionPatient': [0.0, 0.0, 0.0]}))
+        ds = make_dicom({'ImagePositionPatient': [0.0, 0.0, 1.0],
+                         'ImageOrientationPatient': [1., 0., 0., 0., 0., 1.]})
+        with pytest.raises(dcmstack.IncongruentImageError):
+            stack.add_dcm(ds)
+
+    def test_missing_position(self):
+        #Missing spatial evidence is an error, the instance number must not
+        #be used to fabricate a slice order
+        stack = dcmstack.DicomStack()
+        for inst_num in (1, 2, 3):
+            ds = make_dicom({'InstanceNumber': inst_num})
+            del ds.ImagePositionPatient
+            with pytest.raises(dcmstack.InvalidStackError):
+                stack.add_dcm(ds)
+        with pytest.raises(dcmstack.InvalidStackError):
+            stack.get_shape()
+
+    def test_missing_orientation(self):
+        stack = dcmstack.DicomStack()
+        ds = make_dicom({'InstanceNumber': 1})
+        del ds.ImageOrientationPatient
+        with pytest.raises(dcmstack.InvalidStackError):
+            stack.add_dcm(ds)
+
+    def test_collision_within_tolerance(self):
+        #Two data sets with the same time ordinate landing on the same plane
+        #(within the geometric tolerance) collide
+        stack = dcmstack.DicomStack(time_order='InstanceNumber')
+        stack.add_dcm(make_dicom({'InstanceNumber': 1,
+                                  'ImagePositionPatient': [0.0, 0.0, 0.0]}))
+        with pytest.raises(dcmstack.ImageCollisionError):
+            stack.add_dcm(make_dicom({'InstanceNumber': 1,
+                                      'ImagePositionPatient': [0.0, 0.0, 5e-4]}))
+
+    def test_same_plane_distinct_ordinate(self):
+        #The same plane in two distinct volumes is not a duplicate
+        stack = dcmstack.DicomStack(time_order='InstanceNumber')
+        stack.add_dcm(make_dicom({'InstanceNumber': 1,
+                                  'ImagePositionPatient': [0.0, 0.0, 0.0]}))
+        stack.add_dcm(make_dicom({'InstanceNumber': 2,
+                                  'ImagePositionPatient': [0.0, 0.0, 0.0]}))
+        assert stack.shape == (16, 16, 1, 2)
+
+
 class TestIncongruentImage(object):
     def setup_method(self, method):
         self.dcm = make_dicom()

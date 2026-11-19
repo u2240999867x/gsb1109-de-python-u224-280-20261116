@@ -24,7 +24,7 @@ from nibabel.orientations import (io_orientation,
                                   axcodes2ornt)
 with warnings.catch_warnings():
     warnings.simplefilter('ignore')
-    from nibabel.nicom.dicomwrappers import wrapper_from_data
+    from nibabel.nicom.dicomwrappers import wrapper_from_data, WrapperError
 
 from .globals import SORT_GUESSES
 from . import snd
@@ -268,8 +268,13 @@ multi-dimensional array together.'''
 
 
 DEFAULT_CLOSE_KEYS = ('ImageOrientationPatient',)
-'''Default keys needing np.allclose instead of equaulity testing when grouping 
+'''Default keys needing np.allclose instead of equaulity testing when grouping
 '''
+
+SLICE_POS_ATOL = 1e-3
+'''Geometric tolerance (in mm) used when comparing slice positions. Two
+slice positions closer than this tolerance are considered to lie on the
+same plane.'''
 
 
 _pix_tags = tuple(tag_for_keyword(x) for x in ('PixelData', 'FloatPixelData', 'DoubleFloatPixelData'))
@@ -402,6 +407,23 @@ class DicomStack(object):
             meta = EXTRACTORS[ExtractionLevel.MINIMAL](dcm)
         # Covert to DicomWrapper and NiftiWrapper
         dw = wrapper_from_data(dcm)
+        # The slice order is recovered from the image position and the image
+        # orientation. Missing spatial evidence is an error, it is never
+        # filled in from non-spatial meta data (such as the instance number).
+        try:
+            img_pos = dw.image_position
+        except WrapperError:
+            img_pos = None
+        if img_pos is None:
+            raise InvalidStackError(
+                "Missing image position (ImagePositionPatient), unable to "
+                "determine the slice order from the image geometry"
+            )
+        if dw.slice_normal is None:
+            raise InvalidStackError(
+                "Missing image orientation (ImageOrientationPatient), unable "
+                "to determine the slice order from the image geometry"
+            )
         nii_wrp = NiftiWrapper.from_dicom_wrapper(dw, meta)
         # TODO: Look into if / why this check is needed?
         if nii_wrp is None:
@@ -416,8 +438,14 @@ class DicomStack(object):
         self._slope_inter.add((slp, inter))
         self._phase_enc_dirs.add(nii_wrp.get_meta('InPlanePhaseEncodingDirection'))
         self._repetition_times.add(nii_wrp.get_meta('RepetitionTime'))
-        # Pull the info used for sorting if the keys to use are already specified
-        slice_pos = dw.slice_indicator
+        # Pull the info used for sorting if the keys to use are already
+        # specified. The slice position is the image position projected onto
+        # the slice normal shared by the whole stack. A single data set may
+        # look reasonable on its own, but the slice order is only meaningful
+        # with respect to the common geometry of the group.
+        if self._slice_normal is None:
+            self._slice_normal = dw.slice_normal
+        slice_pos = float(np.inner(img_pos, self._slice_normal))
         self._slice_pos_vals.add(slice_pos)
         time_val = None
         if self._time_order:
@@ -428,12 +456,16 @@ class DicomStack(object):
             vector_val = self._vector_order.get_ordinate(nii_wrp)
         self._vector_vals.add(vector_val)
         sorting_tuple = (vector_val, time_val, slice_pos)
-        # Also check for collisions if we already know how to sort
-        if ((not self._time_order is None or
-             not self._vector_order is None) and
-            sorting_tuple in self._sorting_tuples
-           ):
-            raise ImageCollisionError()
+        # Also check for collisions if we already know how to sort. Planes
+        # are compared with a geometric tolerance, so two data sets landing
+        # on the same plane collide even if their positions are not exactly
+        # equal.
+        if not self._time_order is None or not self._vector_order is None:
+            for existing_tuple in self._sorting_tuples:
+                if (existing_tuple[:2] == sorting_tuple[:2] and
+                    abs(existing_tuple[2] - sorting_tuple[2]) <= SLICE_POS_ATOL
+                   ):
+                    raise ImageCollisionError()
         # Add image to our internal set
         self._sorting_tuples.add(sorting_tuple)
         self._files_info.append((nii_wrp, sorting_tuple))
@@ -446,6 +478,7 @@ class DicomStack(object):
     def clear(self):
         '''Remove any DICOM datasets from the stack.'''
         self._slice_pos_vals = set()
+        self._slice_normal = None
         self._time_vals = set()
         self._vector_vals = set()
         self._sorting_tuples = set()
@@ -458,6 +491,40 @@ class DicomStack(object):
         self._meta_dirty = True
         self._meta = None
         self._files_info = []
+
+    def _cluster_slice_positions(self):
+        '''Cluster the observed slice positions into distinct planes using
+        the geometric tolerance `SLICE_POS_ATOL`.
+
+        Returns
+        -------
+        A sorted list of slice positions, one per distinct plane.
+        '''
+        positions = sorted(self._slice_pos_vals)
+        clusters = [positions[0]]
+        for pos in positions[1:]:
+            if pos - clusters[-1] > SLICE_POS_ATOL:
+                clusters.append(pos)
+        return clusters
+
+    def _find_duplicate_plane(self):
+        '''Look for data sets that share the same time/vector ordinates and
+        land on the same slice plane (within the geometric tolerance).
+
+        Returns
+        -------
+        The slice position of the first duplicate plane found, or None if
+        there are no duplicates.
+        '''
+        vol_positions = {}
+        for _, sorting_tuple in self._files_info:
+            vol_key = sorting_tuple[:2]
+            slice_pos = sorting_tuple[2]
+            for prev_pos in vol_positions.get(vol_key, ()):
+                if abs(prev_pos - slice_pos) <= SLICE_POS_ATOL:
+                    return slice_pos
+            vol_positions.setdefault(vol_key, []).append(slice_pos)
+        return None
 
     def _chk_order(self, slice_positions, files_per_vol, num_volumes,
                    num_time_points, num_vec_comps):
@@ -483,8 +550,12 @@ class DicomStack(object):
                         raise InvalidStackError("Not enough images with the " +
                                                 "vector value of " +
                                                 str(curr_vec_val))
-                    if (file_info[1][2] != slice_positions[slice_idx]):
-                        if (file_info[1][2] == slice_positions[slice_idx-1]):
+                    file_pos = file_info[1][2]
+                    if abs(file_pos - slice_positions[slice_idx]) > SLICE_POS_ATOL:
+                        if (slice_idx > 0 and
+                            abs(file_pos - slice_positions[slice_idx-1])
+                                <= SLICE_POS_ATOL
+                           ):
                             error_msg = ["Duplicate slice position"]
                         else:
                             error_msg = ["Missing slice position"]
@@ -516,9 +587,11 @@ class DicomStack(object):
         n_files = len(self._files_info)
         if n_files == 0:
             raise InvalidStackError("No files in the stack")
-        #Figure out number of files and slices per volume
-        files_per_vol = len(self._slice_pos_vals)
-        slice_positions = sorted(list(self._slice_pos_vals))
+        #Figure out number of files and slices per volume. Slice positions
+        #are clustered with the geometric tolerance, positions on the same
+        #plane do not count as distinct slices.
+        slice_positions = self._cluster_slice_positions()
+        files_per_vol = len(slice_positions)
         #If more than one file per volume, check that slice spacing is equal
         if files_per_vol > 1:
             spacings = []
@@ -530,6 +603,12 @@ class DicomStack(object):
                 raise InvalidStackError("Slice spacings are not consistent")
         #Simple check for an incomplete stack
         if n_files % files_per_vol != 0:
+            dup_pos = self._find_duplicate_plane()
+            if not dup_pos is None:
+                raise InvalidStackError(
+                    "Duplicate slice position %s, multiple data sets map to "
+                    "the same plane" % str(dup_pos)
+                )
             raise InvalidStackError("Number of files is not an even multiple "
                                     "of the number of unique slice positions.")
         num_volumes = n_files // files_per_vol
