@@ -42,6 +42,7 @@ from pynetdicom.dimse_primitives import (
     DimseServiceType,
 )
 from pynetdicom.dsutils import decode, encode, pretty_dataset
+from pynetdicom.retrieval import TerminalStateType
 from pynetdicom.status import (
     GENERAL_STATUS,
     NON_PATIENT_SERVICE_CLASS_STATUS,
@@ -76,6 +77,28 @@ DestinationType = tuple[str, int] | tuple[str, int, dict[str, Any]]
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _store_sub_message_id(request_message_id: int, yield_index: int) -> int:
+    """Return the C-STORE sub-operation *Message ID* for a yielded result.
+
+    Parameters
+    ----------
+    request_message_id : int
+        The *Message ID* of the C-GET/C-MOVE request.
+    yield_index : int
+        The zero-based index of the pending result yielded by the handler.
+
+    Returns
+    -------
+    int
+        The US-ranged (0 to 65535) *Message ID* of the C-STORE request.
+    """
+    msg_id = request_message_id + yield_index + 1
+    if msg_id > 65535:
+        msg_id -= 65535
+
+    return msg_id
 
 
 class attempt:
@@ -1565,6 +1588,16 @@ class StorageServiceClass(ServiceClass):
         rsp = self.validate_status(cast(StatusType, rsp_status), rsp)
         self.dimse.send_msg(rsp, cx_id)
 
+        # Retain the material actually received as evidence, regardless of
+        #   whether it can be attributed to a retrieval task. A matching UID
+        #   alone is never enough to attribute the store.
+        try:
+            self.assoc.retrieval_ledger.record_store_from_request(
+                req, status_code=cast(int, rsp.Status)
+            )
+        except Exception:
+            LOGGER.exception("Unable to record the C-STORE in the retrieval ledger")
+
 
 class QueryRetrieveServiceClass(ServiceClass):
     """Implementation of the Query/Retrieve Service Class."""
@@ -1697,6 +1730,12 @@ class QueryRetrieveServiceClass(ServiceClass):
                 # The user should deal with decoding failures
                 pass
 
+        # Preserve the retrieval request as evidence, even if the handler
+        #   fails, it is later cancelled or its sub-operations cannot be
+        #   uniquely attributed
+        ledger = self.assoc.retrieval_ledger
+        qr_task = ledger.begin_from_request(req)
+
         # Try and trigger EVT_C_GET
         with attempt(rsp, self.dimse, cx_id, self.assoc) as ctx:
             ctx.error_msg = "Exception in handler bound to 'evt.EVT_C_GET'"
@@ -1713,6 +1752,7 @@ class QueryRetrieveServiceClass(ServiceClass):
 
         # Exception in context or handler aborted/released - before any yields
         if not ctx.success or not self.assoc.is_established:
+            ledger.close(qr_task.task_id, "aborted")
             return
 
         generator = cast(Iterator[Any], generator)
@@ -1727,7 +1767,10 @@ class QueryRetrieveServiceClass(ServiceClass):
             nr_suboperations = int(next(generator))
 
         if not ctx.success:
+            ledger.close(qr_task.task_id, "aborted")
             return
+
+        ledger.set_expected_total(qr_task.task_id, nr_suboperations)
 
         if nr_suboperations < 1:
             rsp.Status = 0x0000
@@ -1735,6 +1778,7 @@ class QueryRetrieveServiceClass(ServiceClass):
             rsp.NumberOfWarningSuboperations = 0
             rsp.NumberOfCompletedSuboperations = 0
             self.dimse.send_msg(rsp, cx_id)
+            ledger.close(qr_task.task_id, "success")
             return
 
         if nr_suboperations > 65535:
@@ -1744,6 +1788,7 @@ class QueryRetrieveServiceClass(ServiceClass):
             LOGGER.error("The C-GET request handler yielded more than 65535 matches")
             rsp.Status = 0xC416
             self.dimse.send_msg(rsp, cx_id)
+            ledger.close(qr_task.task_id, "failure")
             return
 
         # Track the sub operation results
@@ -1780,6 +1825,7 @@ class QueryRetrieveServiceClass(ServiceClass):
 
             # Event handler has aborted or released - after any yields
             if not self.assoc.is_established:
+                ledger.close(qr_task.task_id, "aborted")
                 return
 
             # All sub-operations are complete
@@ -1799,6 +1845,7 @@ class QueryRetrieveServiceClass(ServiceClass):
                 # Unknown status
                 store_results[1] += 1
                 self.dimse.send_msg(rsp, cx_id)
+                ledger.close(qr_task.task_id, "unknown")
                 return
 
             if status[0] == STATUS_CANCEL:
@@ -1806,6 +1853,9 @@ class QueryRetrieveServiceClass(ServiceClass):
                 # 'FailedSOPInstanceUIDList' element
                 LOGGER.info("Received C-CANCEL-GET RQ from peer")
                 LOGGER.info(f"Get SCP Response {ii + 1}: 0x{rsp.Status:04X} (Cancel)")
+                # The cancellation does not erase previously verified
+                #   sub-operations and does not affect any other task
+                ledger.confirm_cancel(qr_task.task_id)
                 rsp.NumberOfRemainingSuboperations = store_results[0]
                 rsp.NumberOfFailedSuboperations = store_results[1]
                 rsp.NumberOfWarningSuboperations = store_results[2]
@@ -1827,6 +1877,7 @@ class QueryRetrieveServiceClass(ServiceClass):
                 )
                 rsp.Identifier = BytesIO(cast(bytes, bytestream))
                 self.dimse.send_msg(rsp, cx_id)
+                ledger.close(qr_task.task_id, "cancel")
                 return
             elif status[0] in [STATUS_FAILURE, STATUS_WARNING]:
                 # If failure or warning, dataset is a Dataset with a
@@ -1855,6 +1906,10 @@ class QueryRetrieveServiceClass(ServiceClass):
                 )
                 rsp.Identifier = BytesIO(cast(bytes, bytestream))
                 self.dimse.send_msg(rsp, cx_id)
+                ledger.close(
+                    qr_task.task_id,
+                    "failure" if status[0] == STATUS_FAILURE else "warning",
+                )
                 return
             elif status[0] == STATUS_SUCCESS:
                 # If user yields Success, check it
@@ -1880,6 +1935,7 @@ class QueryRetrieveServiceClass(ServiceClass):
                 rsp.NumberOfCompletedSuboperations = store_results[3]
 
                 self.dimse.send_msg(rsp, cx_id)
+                ledger.close(qr_task.task_id)
                 return
             elif status[0] == STATUS_PENDING and dataset:
                 # If pending, dataset is the Dataset to send
@@ -1888,6 +1944,13 @@ class QueryRetrieveServiceClass(ServiceClass):
                     # Count as a sub-operation failure
                     store_results[1] += 1
                     failed_instances.append("")
+                    sub_msg_id = _store_sub_message_id(
+                        cast(int, req.MessageID), ii
+                    )
+                    ledger.record_sub_operation(qr_task.task_id, sub_msg_id)
+                    ledger.record_sub_operation_result(
+                        qr_task.task_id, sub_msg_id, None
+                    )
                     rsp.Identifier = None
                     rsp.NumberOfRemainingSuboperations = store_results[0]
                     rsp.NumberOfFailedSuboperations = store_results[1]
@@ -1943,12 +2006,20 @@ class QueryRetrieveServiceClass(ServiceClass):
                 # Send `dataset` via C-STORE sub-operations over the existing
                 #   association and check that the response's Status exists and
                 #   is a known value
-                try:
-                    # Message ID is VR 'US' and has range 0 <= n < 2**16
-                    msg_id = cast(int, req.MessageID) + ii + 1
-                    if msg_id > 65535:
-                        msg_id -= 65535
+                # Message ID is VR 'US' and has range 0 <= n < 2**16
+                msg_id = _store_sub_message_id(cast(int, req.MessageID), ii)
 
+                # Record the sub-operation and its command evidence before the
+                #   C-STORE, so a late arrival can be attributed even if the
+                #   response itself is delayed. Missing UIDs are tolerated:
+                #   `send_c_store` still validates the dataset as before.
+                ledger.record_sub_operation(
+                    qr_task.task_id,
+                    msg_id,
+                    getattr(dataset, "SOPClassUID", None),
+                    getattr(dataset, "SOPInstanceUID", None),
+                )
+                try:
                     status_ds = self.assoc.send_c_store(dataset, msg_id=msg_id)
                     store_status_int = status_ds.Status
                     store_status = STORAGE_SERVICE_CLASS_STATUS[store_status_int]
@@ -1958,6 +2029,10 @@ class QueryRetrieveServiceClass(ServiceClass):
                     LOGGER.error(str(exc))
                     store_status_int = None
                     store_status = (STATUS_FAILURE, "Unknown")
+
+                ledger.record_sub_operation_result(
+                    qr_task.task_id, msg_id, store_status_int
+                )
 
                 if store_status_int is not None:
                     msg = (
@@ -1989,23 +2064,28 @@ class QueryRetrieveServiceClass(ServiceClass):
 
         # Event handler has aborted or released - prevent final message
         if not self.assoc.is_established:
+            ledger.close(qr_task.task_id, "aborted")
             return
 
         # If not already done, send the final 'Success' or 'Warning' response
+        final_state: TerminalStateType
         if not store_results[1] and not store_results[2]:
             # Success response - no failures or warnings
             LOGGER.info(f"Get SCP Response {ii + 2}: 0x0000 (Success)")
             rsp.Status = 0x0000
             rsp.Identifier = None
+            final_state = "success"
         else:
             if nr_suboperations == store_results[1]:
                 # Failure response - all sub-operations failed
                 LOGGER.info(f"Get SCP Response {ii + 2}: 0xA702 (Failure)")
                 rsp.Status = 0xA702  # Unable to perform sub-ops
+                final_state = "failure"
             else:
                 # Warning response - one or more failures or warnings
                 LOGGER.info(f"Get SCP Response {ii + 2}: 0xB000 (Warning)")
                 rsp.Status = 0xB000
+                final_state = "warning"
 
             # If Failure or Warning response, need to return an Identifier with
             #   (0008,0058) Failed SOP Instance UID List element
@@ -2024,6 +2104,7 @@ class QueryRetrieveServiceClass(ServiceClass):
         rsp.NumberOfCompletedSuboperations = store_results[3]
 
         self.dimse.send_msg(rsp, cx_id)
+        ledger.close(qr_task.task_id, final_state)
 
     def _move_scp(self, req: C_MOVE, context: "PresentationContext") -> None:
         """The SCP implementation for Query/Retrieve - Move.
@@ -2062,6 +2143,14 @@ class QueryRetrieveServiceClass(ServiceClass):
                 # The user should deal with decoding failures
                 pass
 
+        # Preserve the retrieval request as evidence, even if the handler
+        #   fails, it is later cancelled or its sub-operations cannot be
+        #   uniquely attributed
+        ledger = self.assoc.retrieval_ledger
+        qr_task = ledger.begin_from_request(req)
+        # The C-STORE sub-operations identify this SCP as the move originator
+        qr_task.originator_ae_title = str(self.ae.ae_title)
+
         # Try and trigger EVT_C_MOVE
         with attempt(rsp, self.dimse, cx_id, self.assoc) as ctx:
             ctx.error_msg = "Exception in handler bound to 'evt.EVT_C_MOVE'"
@@ -2078,6 +2167,7 @@ class QueryRetrieveServiceClass(ServiceClass):
 
         # Exception in context or handler aborted/released - before any yields
         if not ctx.success or not self.assoc.is_established:
+            ledger.close(qr_task.task_id, "aborted")
             return
 
         generator = cast(Iterator[Any], generator)
@@ -2095,6 +2185,7 @@ class QueryRetrieveServiceClass(ServiceClass):
 
         # Exception in context or handler aborted/released - first yield
         if not ctx.success or not self.assoc.is_established:
+            ledger.close(qr_task.task_id, "aborted")
             return
 
         # Try to check the Move Destination is OK and known
@@ -2109,9 +2200,11 @@ class QueryRetrieveServiceClass(ServiceClass):
                 # Failure - Move destination unknown
                 rsp.Status = 0xA801
                 self.dimse.send_msg(rsp, cx_id)
+                ledger.close(qr_task.task_id, "failure")
                 return
 
         if not ctx.success:
+            ledger.close(qr_task.task_id, "aborted")
             return
 
         # Try to check number of C-STORE sub-operations yield is OK
@@ -2125,7 +2218,10 @@ class QueryRetrieveServiceClass(ServiceClass):
 
         # Exception in context or handler aborted/released - second yield
         if not ctx.success or not self.assoc.is_established:
+            ledger.close(qr_task.task_id, "aborted")
             return
+
+        ledger.set_expected_total(qr_task.task_id, nr_suboperations)
 
         if nr_suboperations < 1:
             rsp.Status = 0x0000
@@ -2133,6 +2229,7 @@ class QueryRetrieveServiceClass(ServiceClass):
             rsp.NumberOfWarningSuboperations = 0
             rsp.NumberOfCompletedSuboperations = 0
             self.dimse.send_msg(rsp, cx_id)
+            ledger.close(qr_task.task_id, "success")
             return
 
         if nr_suboperations > 65535:
@@ -2142,6 +2239,7 @@ class QueryRetrieveServiceClass(ServiceClass):
             LOGGER.error("The C-MOVE request handler yielded more than 65535 matches")
             rsp.Status = 0xC516
             self.dimse.send_msg(rsp, cx_id)
+            ledger.close(qr_task.task_id, "failure")
             return
 
         # Try to request new association with Move Destination
@@ -2160,6 +2258,7 @@ class QueryRetrieveServiceClass(ServiceClass):
             )
 
         if not ctx.success:
+            ledger.close(qr_task.task_id, "aborted")
             return
 
         if not store_assoc.is_established:
@@ -2171,6 +2270,7 @@ class QueryRetrieveServiceClass(ServiceClass):
             # FIXME - shouldn't have to manually close the socket like this
             sock = cast("AssociationSocket", store_assoc.dul.socket)
             sock.close()
+            ledger.close(qr_task.task_id, "failure")
             return
 
         # Track the sub operation results
@@ -2208,6 +2308,7 @@ class QueryRetrieveServiceClass(ServiceClass):
             # Event handler has aborted or released - during any status yields
             if not self.assoc.is_established:
                 store_assoc.release()
+                ledger.close(qr_task.task_id, "aborted")
                 return
 
             # All sub-operations are complete
@@ -2227,6 +2328,7 @@ class QueryRetrieveServiceClass(ServiceClass):
                 # Unknown status
                 store_assoc.release()
                 self.dimse.send_msg(rsp, cx_id)
+                ledger.close(qr_task.task_id, "unknown")
                 return
 
             # If usr_status is Cancel, Failure, Warning or Success then
@@ -2237,6 +2339,9 @@ class QueryRetrieveServiceClass(ServiceClass):
                 #   'FailedSOPInstanceUIDList' element
                 LOGGER.info("Received C-CANCEL-MOVE RQ from peer")
                 LOGGER.info(f"Move SCP Response {ii + 1}: 0x{rsp.Status:04X} (Cancel)")
+                # Cancellation preserves previously verified sub-operations
+                #   and does not affect any other retrieval task
+                ledger.confirm_cancel(qr_task.task_id)
                 store_assoc.release()
 
                 # In case user didn't include it
@@ -2261,6 +2366,7 @@ class QueryRetrieveServiceClass(ServiceClass):
                 rsp.NumberOfCompletedSuboperations = store_results[3]
 
                 self.dimse.send_msg(rsp, cx_id)
+                ledger.close(qr_task.task_id, "cancel")
                 return
             elif status[0] in [STATUS_FAILURE, STATUS_WARNING]:
                 # If failed or warning, then dataset is a Dataset with a
@@ -2292,6 +2398,10 @@ class QueryRetrieveServiceClass(ServiceClass):
                 rsp.NumberOfCompletedSuboperations = store_results[3]
 
                 self.dimse.send_msg(rsp, cx_id)
+                ledger.close(
+                    qr_task.task_id,
+                    "failure" if status[0] == STATUS_FAILURE else "warning",
+                )
                 return
             elif status[0] == STATUS_SUCCESS:
                 # If Success, then dataset is None
@@ -2323,6 +2433,7 @@ class QueryRetrieveServiceClass(ServiceClass):
                 rsp.NumberOfCompletedSuboperations = store_results[3]
 
                 self.dimse.send_msg(rsp, cx_id)
+                ledger.close(qr_task.task_id)
                 return
             elif status[0] == STATUS_PENDING and dataset:
                 # If pending, then dataset is the Dataset to send
@@ -2331,6 +2442,13 @@ class QueryRetrieveServiceClass(ServiceClass):
                     # Count as a sub-operation failure
                     store_results[1] += 1
                     failed_instances.append("")
+                    sub_msg_id = _store_sub_message_id(
+                        cast(int, req.MessageID), ii
+                    )
+                    ledger.record_sub_operation(qr_task.task_id, sub_msg_id)
+                    ledger.record_sub_operation_result(
+                        qr_task.task_id, sub_msg_id, None
+                    )
                     rsp.Identifier = None
                     rsp.NumberOfRemainingSuboperations = store_results[0]
                     rsp.NumberOfFailedSuboperations = store_results[1]
@@ -2344,12 +2462,20 @@ class QueryRetrieveServiceClass(ServiceClass):
                 # Send `dataset` via C-STORE sub-operations over the
                 #   association and check that the response's Status exists
                 #   and is a known value
-                try:
-                    # Message ID is VR 'US' and has range 0 <= n < 2**16
-                    msg_id = cast(int, req.MessageID) + ii + 1
-                    if msg_id > 65535:
-                        msg_id -= 65535
+                # Message ID is VR 'US' and has range 0 <= n < 2**16
+                msg_id = _store_sub_message_id(cast(int, req.MessageID), ii)
 
+                # Record the sub-operation and its originator command
+                #   evidence before the C-STORE is performed. Missing UIDs are
+                #   tolerated: `send_c_store` still validates the dataset.
+                ledger.record_sub_operation(
+                    qr_task.task_id,
+                    msg_id,
+                    getattr(dataset, "SOPClassUID", None),
+                    getattr(dataset, "SOPInstanceUID", None),
+                    originator_ae_title=str(self.ae.ae_title),
+                )
+                try:
                     status_ds = store_assoc.send_c_store(
                         dataset,
                         msg_id=msg_id,
@@ -2365,6 +2491,10 @@ class QueryRetrieveServiceClass(ServiceClass):
                     LOGGER.error(str(exc))
                     store_status_int = None
                     store_status = (STATUS_FAILURE, "Unknown")
+
+                ledger.record_sub_operation_result(
+                    qr_task.task_id, msg_id, store_status_int
+                )
 
                 if store_status_int is not None:
                     msg = (
@@ -2400,23 +2530,28 @@ class QueryRetrieveServiceClass(ServiceClass):
 
         # Event handler has aborted or released - after any yields
         if not self.assoc.is_established:
+            ledger.close(qr_task.task_id, "aborted")
             return
 
         # If not already done, send the final 'Success' or 'Warning' response
+        final_state: TerminalStateType
         if not store_results[1] and not store_results[2]:
             # Success response - no failures or warnings
             LOGGER.info(f"Move SCP Response {ii + 2}: 0x0000 (Success)")
             rsp.Status = 0x0000
             rsp.Identifier = None
+            final_state = "success"
         else:
             if nr_suboperations == store_results[1]:
                 # Failure response - all sub-operations failed
                 LOGGER.info(f"Move SCP Response {ii + 2}: 0xA702 (Failure)")
                 rsp.Status = 0xA702  # Unable to perform sub-ops
+                final_state = "failure"
             else:
                 # Warning response - one or more failures or warnings
                 LOGGER.info(f"Move SCP Response {ii + 2}: 0xB000 (Warning)")
                 rsp.Status = 0xB000
+                final_state = "warning"
 
             # If Failure or Warning response, need to return an Identifier with
             #   (0008, 0058) Failed SOP Instance UID List element
@@ -2435,6 +2570,7 @@ class QueryRetrieveServiceClass(ServiceClass):
         rsp.NumberOfCompletedSuboperations = store_results[3]
 
         self.dimse.send_msg(rsp, cx_id)
+        ledger.close(qr_task.task_id, final_state)
 
 
 class BasicWorklistManagementServiceClass(QueryRetrieveServiceClass):

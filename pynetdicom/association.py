@@ -69,6 +69,7 @@ from pynetdicom.pdu_primitives import (
     _UITypes,
 )
 from pynetdicom.presentation import PresentationContext
+from pynetdicom.retrieval import RetrievalLedger
 from pynetdicom.sop_class import (  # type: ignore
     RepositoryQuery,
     UnifiedProcedureStepEvent,
@@ -121,6 +122,9 @@ class Association(threading.Thread):
         network timeout, otherwise issue an A-ABORT (default).
     requestor : association.ServiceUser
         Representation of the association's *requestor* AE.
+    retrieval_ledger : retrieval.RetrievalLedger
+        The evidence ledger for the association's C-GET/C-MOVE retrieval
+        tasks and the C-STORE material actually received.
     """
 
     def __init__(self, ae: "ApplicationEntity", mode: str) -> None:
@@ -168,6 +172,9 @@ class Association(threading.Thread):
         self.acse: ACSE = ACSE(self)
         self.dul: DULServiceProvider = DULServiceProvider(self)
         self.dimse: DIMSEServiceProvider = DIMSEServiceProvider(self)
+
+        # Evidence ledger for C-GET/C-MOVE tasks and received C-STOREs
+        self.retrieval_ledger: RetrievalLedger = RetrievalLedger()
 
         # Timeouts (in seconds), needs to be set after DUL init
         self.acse_timeout: float | None = self.ae.acse_timeout

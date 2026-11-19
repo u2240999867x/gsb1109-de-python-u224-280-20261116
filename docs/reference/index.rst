@@ -27,6 +27,7 @@ This API reference guide details the functions, modules and objects included in
    events
    fsm
    presentation
+   retrieval
    service_classes
    sop_classes
    status
