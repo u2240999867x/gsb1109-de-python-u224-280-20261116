@@ -264,6 +264,16 @@ from pyomo.opt import (
 )
 from pyomo.core.base.units_container import units, as_quantity
 
+from pyomo.scenario import (
+    DataLayer,
+    ScenarioGraph,
+    ScenarioRuntime,
+    build_graph,
+    build_inputs,
+    build_runtime,
+    load_scenarios,
+)
+
 # These APIs are deprecated and should be removed in the near future
 from pyomo.common.deprecation import relocated_module_attribute
 
