@@ -20,7 +20,7 @@ from typing import (
 from ._message_queue import KeyedMessage, LogTimeOrderQueue
 from .data_stream import ReadDataStream, RecordBuilder
 from .decoder import DecoderFactory
-from .exceptions import DecoderNotFoundError, McapError
+from .exceptions import DecoderNotFoundError, McapError, McapTransformError
 from .records import (
     Attachment,
     AttachmentIndex,
@@ -44,6 +44,14 @@ from .stream_reader import (
     read_magic,
 )
 from .summary import Summary
+from .transforms import (
+    FrameTransform,
+    ProjectedMessage,
+    TransformRecordError,
+    TransformTimeline,
+    parse_point_message,
+    parse_transform_message,
+)
 
 
 def _resolve_time_range(
@@ -174,6 +182,151 @@ class DecodedMessageTuple(NamedTuple):
     decoded_message: Any
 
 
+TRANSFORM_TOPIC = "/tf"
+
+
+class _TransformCollector:
+    """Gathers parseable JSON transform messages out of a scan.
+
+    ``topics`` defaults to the conventional ``/tf`` topic.  A channel is treated as
+    a transform channel when its topic matches and its messages decode as JSON
+    transform objects; other topics are left alone.  A channel whose schema is
+    named ``foxglove.FrameTransform`` is also accepted even when it lives on a
+    differently named topic.
+    """
+
+    TRANSFORM_SCHEMA_NAMES = frozenset(
+        {
+            "foxglove.FrameTransform",
+            "foxglove.FrameTransforms",
+            "tf2_msgs/TFMessage",
+            "tf2_msgs/msg/TFMessage",
+        }
+    )
+
+    def __init__(self, topics: Optional[Iterable[str]] = None):
+        if topics is None:
+            # Auto-detect: accept a channel by its schema or by message shape.
+            self.topics: Optional[List[str]] = None
+        elif isinstance(topics, str):
+            self.topics = [topics]
+        else:
+            self.topics = list(topics)
+        self.samples: List[FrameTransform] = []
+        self.errors: List[TransformRecordError] = []
+
+    def is_known_transform_channel(
+        self, channel: Channel, schema: Optional[Schema] = None
+    ) -> bool:
+        if channel.message_encoding != "json":
+            return False
+        if self.topics is not None and channel.topic in self.topics:
+            return True
+        return schema is not None and schema.name in self.TRANSFORM_SCHEMA_NAMES
+
+    def matches_topic(self, topic: str) -> bool:
+        return self.topics is None or topic in self.topics
+    def _parse(self, channel: Channel, message: Message) -> Tuple[FrameTransform, ...]:
+        return parse_transform_message(
+            message.data,
+            log_time=message.log_time,
+            topic=channel.topic,
+            channel_id=message.channel_id,
+            sequence=message.sequence,
+        )
+
+    def consume(
+        self,
+        channel: Channel,
+        message: Message,
+        schema: Optional[Schema] = None,
+    ) -> bool:
+        """Collect ``message`` if it is a transform record; report whether it was.
+
+        With an explicit topic list (or a recognized transform schema), a message on
+        a transform channel that fails to parse is recorded in ``errors`` and still
+        counts as consumed, so it never surfaces as a point message.  Under
+        auto-detection, unparseable JSON is left for the point path.
+        """
+        if channel.message_encoding != "json":
+            return False
+        known = self.is_known_transform_channel(channel, schema)
+        if self.topics is not None and not known:
+            return False
+        try:
+            samples = self._parse(channel, message)
+        except McapTransformError as error:
+            if self.topics is None:
+                return False
+            self.errors.append(
+                TransformRecordError(
+                    topic=channel.topic,
+                    channel_id=message.channel_id,
+                    log_time=message.log_time,
+                    sequence=message.sequence,
+                    reason=str(error),
+                )
+            )
+            return True
+        self.samples.extend(samples)
+        return True
+
+
+def _project_message(
+    timeline: TransformTimeline,
+    target_frame: str,
+    schema: Optional[Schema],
+    channel: Channel,
+    message: Message,
+    *,
+    include_unresolved: bool,
+    on_error: str,
+) -> Iterator[ProjectedMessage]:
+    """Parse one point message and project each of its points into ``target_frame``."""
+    try:
+        point_message = parse_point_message(message.data, log_time=message.log_time)
+    except (McapTransformError, ValueError) as error:
+        if on_error == "raise":
+            raise
+        yield ProjectedMessage(
+            schema=schema,
+            channel=channel,
+            message=message,
+            frame_id="",
+            target_frame=target_frame,
+            sample_time=message.log_time,
+            time_source="log_time",
+            projections=(),
+            error=str(error),
+        )
+        return
+    local_points = point_message.local_points()
+    query = timeline.prepare_projection(
+        point_message.frame_id,
+        target_frame,
+        point_message.sample_time,
+        order_time=message.log_time,
+    )
+    projections = [
+        query.project(point, origin=origin)
+        for origin, point in zip(point_message.points, local_points)
+    ]
+    if not include_unresolved and any(
+        projection.status == "unresolved" for projection in projections
+    ):
+        return
+    yield ProjectedMessage(
+        schema=schema,
+        channel=channel,
+        message=message,
+        frame_id=point_message.frame_id,
+        target_frame=target_frame,
+        sample_time=point_message.sample_time,
+        time_source=point_message.time_source,
+        projections=tuple(projections),
+    )
+
+
 class McapReader(ABC):
     """Reads data out of an MCAP file, using the summary section where available to efficiently
     read only the parts of the file that are needed.
@@ -302,6 +455,125 @@ class McapReader(ABC):
     def iter_metadata(self) -> Iterator[Metadata]:
         """Iterates through metadata records in the MCAP."""
         raise NotImplementedError()
+
+    def scan_transforms(
+        self,
+        collector: "_TransformCollector",
+        starting_at: Optional[int] = None,
+        ending_before: Optional[int] = None,
+    ) -> None:
+        """Feed matching transform messages to ``collector``.
+
+        The default implementation walks every message in log time order; subclasses
+        with an index override it to read only the transform topics.
+        """
+        for schema, channel, message in self.iter_messages(
+            log_time_order=True,
+            starting_at=starting_at,
+            ending_before=ending_before,
+        ):
+            collector.consume(channel, message, schema)
+
+    def get_transform_timeline(
+        self,
+        *,
+        transform_topics: Optional[Iterable[str]] = TRANSFORM_TOPIC,
+        interpolation: str = "linear",
+        max_interval_ns: Optional[int] = None,
+        tolerance: float = 1e-6,
+        starting_at: Optional[int] = None,
+        ending_before: Optional[int] = None,
+    ) -> TransformTimeline:
+        """Collect every frame transform in the file into a timeline.
+
+        :param transform_topics: topics carrying frame transform JSON.  Defaults to
+            ``/tf``; pass ``None`` to treat every JSON topic as a candidate.
+        :param interpolation: ``"linear"`` (default), ``"step"``,
+            ``"zero_order_hold"``, or ``"nearest"``.
+        :param max_interval_ns: maximum gap allowed when interpolating, or maximum
+            distance from a held/nearest sample.  ``None`` disables the limit;
+            interpolation never crosses a re-parent or clock restart regardless.
+        :param tolerance: distance under which multiple paths count as agreeing.
+        :param starting_at: if given, only transforms logged at or after this time
+            are collected.  Leave unset when points before the range need history.
+        :param ending_before: if given, only transforms logged before this time are
+            collected.
+        """
+        collector = _TransformCollector(transform_topics)
+        self.scan_transforms(collector, starting_at, ending_before)
+        return TransformTimeline(
+            collector.samples,
+            interpolation=interpolation,
+            max_interval_ns=max_interval_ns,
+            tolerance=tolerance,
+            errors=collector.errors,
+        )
+
+    def iter_projected_messages(
+        self,
+        target_frame: str,
+        topics: Union[Iterable[str], str, None] = None,
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
+        *,
+        starting_at: Optional[int] = None,
+        starting_after: Optional[int] = None,
+        ending_at: Optional[int] = None,
+        ending_before: Optional[int] = None,
+        transform_topics: Optional[Iterable[str]] = TRANSFORM_TOPIC,
+        interpolation: str = "linear",
+        max_interval_ns: Optional[int] = None,
+        tolerance: float = 1e-6,
+        include_unresolved: bool = True,
+        on_error: str = "keep",
+    ) -> Iterator[ProjectedMessage]:
+        """Project the points of every matching JSON message into ``target_frame``.
+
+        Each message's own ``timestamp`` selects the transform samples; a message
+        without one falls back to its ``log_time``.  ``topics`` selects point
+        messages; transform topics are read separately and never yielded here.
+        ``on_error="keep"`` (default) yields a result carrying ``error`` for a
+        message that cannot be parsed, while ``"raise"`` propagates the error.
+
+        Transform history is collected from the whole file before points are
+        projected, so a sample time before the selected range can still use the
+        transforms that bracket it.
+        """
+        starting_at, ending_before = _resolve_time_range(
+            start_time, end_time, starting_at, starting_after, ending_at, ending_before
+        )
+        if isinstance(topics, str):
+            topics = [topics]
+        if on_error not in ("keep", "raise"):
+            raise ValueError("on_error must be 'keep' or 'raise'")
+        if not target_frame:
+            raise ValueError("target_frame must not be empty")
+        collector = _TransformCollector(transform_topics)
+        self.scan_transforms(collector)
+        timeline = TransformTimeline(
+            collector.samples,
+            interpolation=interpolation,
+            max_interval_ns=max_interval_ns,
+            tolerance=tolerance,
+            errors=collector.errors,
+        )
+        for schema, channel, message in self.iter_messages(
+            topics,
+            log_time_order=True,
+            starting_at=starting_at,
+            ending_before=ending_before,
+        ):
+            if collector.consume(channel, message, schema):
+                continue
+            yield from _project_message(
+                timeline,
+                target_frame,
+                schema,
+                channel,
+                message,
+                include_unresolved=include_unresolved,
+                on_error=on_error,
+            )
 
 
 def make_reader(
@@ -482,6 +754,40 @@ class SeekingReader(McapReader):
             else:
                 append((log_time, chunk_offset, index, (pair[0], pair[1], record)))
         return out, data
+
+    def scan_transforms(
+        self,
+        collector: "_TransformCollector",
+        starting_at: Optional[int] = None,
+        ending_before: Optional[int] = None,
+    ) -> None:
+        """Read only chunks that can hold transform messages.
+
+        When the summary is available, the candidate topic set is the configured
+        topics plus any channel whose schema names a known transform type.  Without
+        a summary (or under auto-detection), every message is considered.
+        """
+        scan_topics = collector.topics
+        if scan_topics is not None:
+            summary = self.get_summary()
+            if summary is not None:
+                candidates = set(scan_topics)
+                for channel in summary.channels.values():
+                    schema = summary.schemas.get(channel.schema_id)
+                    if (
+                        schema is not None
+                        and schema.name in collector.TRANSFORM_SCHEMA_NAMES
+                    ):
+                        candidates.add(channel.topic)
+                if candidates:
+                    scan_topics = candidates
+        for schema, channel, message in self.iter_messages(
+            scan_topics,
+            log_time_order=True,
+            starting_at=starting_at,
+            ending_before=ending_before,
+        ):
+            collector.consume(channel, message, schema)
 
     def get_header(self) -> Header:
         """Reads the Header record from the beginning of the MCAP file."""
@@ -694,6 +1000,94 @@ class NonSeekingReader(McapReader):
         """Returns a Summary object containing records from the (optional) summary section."""
         self._check_spent()
         return _read_summary_from_stream_reader(self._stream_reader)
+
+    def iter_projected_messages(
+        self,
+        target_frame: str,
+        topics: Union[Iterable[str], str, None] = None,
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
+        *,
+        starting_at: Optional[int] = None,
+        starting_after: Optional[int] = None,
+        ending_at: Optional[int] = None,
+        ending_before: Optional[int] = None,
+        transform_topics: Optional[Iterable[str]] = TRANSFORM_TOPIC,
+        interpolation: str = "linear",
+        max_interval_ns: Optional[int] = None,
+        tolerance: float = 1e-6,
+        include_unresolved: bool = True,
+        on_error: str = "keep",
+    ) -> Iterator[ProjectedMessage]:
+        """Project points on a non-seekable stream in a single pass.
+
+        A stream cannot be rewound to collect transforms before reading points, so
+        point messages are buffered while the transform history is built.  Memory
+        therefore grows with the number of point messages, the same as
+        ``iter_messages(log_time_order=True)`` on a non-seekable source.
+
+        See :py:meth:`McapReader.iter_projected_messages` for the arguments.
+        """
+        starting_at, ending_before = _resolve_time_range(
+            start_time, end_time, starting_at, starting_after, ending_at, ending_before
+        )
+        if isinstance(topics, str):
+            topics = [topics]
+        if on_error not in ("keep", "raise"):
+            raise ValueError("on_error must be 'keep' or 'raise'")
+        if not target_frame:
+            raise ValueError("target_frame must not be empty")
+        collector = _TransformCollector(transform_topics)
+        point_topics = None if topics is None else set(topics)
+        self._check_spent()
+        channels = self._channels
+        schemas = self._schemas
+        buffered: List[Tuple[Optional[Schema], Channel, Message]] = []
+        for record in self._stream_reader.records:
+            if isinstance(record, Schema):
+                schemas[record.id] = record
+                continue
+            if isinstance(record, Channel):
+                if record.schema_id != 0 and record.schema_id not in schemas:
+                    raise McapError(
+                        f"no schema record found with id {record.schema_id}"
+                    )
+                channels[record.id] = record
+                continue
+            if not isinstance(record, Message):
+                continue
+            channel = channels.get(record.channel_id)
+            if channel is None:
+                raise McapError(f"no channel record found with id {record.channel_id}")
+            schema = None if channel.schema_id == 0 else schemas[channel.schema_id]
+            if collector.consume(channel, record, schema):
+                continue
+            if point_topics is not None and channel.topic not in point_topics:
+                continue
+            if starting_at is not None and record.log_time < starting_at:
+                continue
+            if ending_before is not None and record.log_time >= ending_before:
+                continue
+            buffered.append((schema, channel, record))
+
+        timeline = TransformTimeline(
+            collector.samples,
+            interpolation=interpolation,
+            max_interval_ns=max_interval_ns,
+            tolerance=tolerance,
+            errors=collector.errors,
+        )
+        buffered.sort(key=lambda item: item[2].log_time)
+        for schema, channel, message in buffered:
+            yield from _project_message(
+                timeline,
+                target_frame,
+                schema,
+                channel,
+                message,
+                include_unresolved=include_unresolved,
+                on_error=on_error,
+            )
 
     def iter_attachments(self) -> Iterator[Attachment]:
         """Iterates through attachment records in the MCAP."""

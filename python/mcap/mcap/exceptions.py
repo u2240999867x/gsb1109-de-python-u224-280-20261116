@@ -36,3 +36,7 @@ class RecordLengthLimitExceeded(McapError):
 class UnsupportedCompressionError(McapError):
     def __init__(self, compression: str):
         super().__init__(f"unsupported compression type {compression}")
+
+
+class McapTransformError(McapError):
+    """Raised when frame transform records cannot be interpreted."""
