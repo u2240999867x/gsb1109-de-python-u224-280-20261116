@@ -114,6 +114,70 @@ a :class:`CBORTag` object like so::
 
 This will be ignored on decode and the original data content will be returned.
 
+Deferred label interpretation
+------------------------------
+
+Some instrument messages carry numeric or coded labels whose meaning lives in an external
+dictionary that may not have arrived yet.  The :class:`InterpretationSession` keeps such labeled
+objects pending instead of producing half-finished values, and publishes queryable results once
+the required dictionaries (or dictionary versions) have been supplied::
+
+    from cbor2 import (
+        CBORTag,
+        InterpretationSession,
+        LabelDictionary,
+        LabelRule,
+        MissingDictionaryError,
+        dumps,
+    )
+
+    # Tag 40000 objects carry a label resolved through the versioned
+    # "sensors" dictionary (minimum version 2).
+    rule = LabelRule(
+        tag=40000,
+        dictionary_id="sensors",
+        label_key="label",
+        required_version=2,
+    )
+    session = InterpretationSession([rule])
+
+    # Shared references (CBOR tags 28/29) and cyclic structures are preserved.
+    tagged = CBORTag(40000, {"label": "T-17", "unit": "C"})
+    session.add_batch(dumps([tagged, tagged], value_sharing=True))
+
+    # Before the dictionary is available the object stays pending.  No
+    # half-interpreted value is exposed.
+    outcome = session.process()[0]
+    assert not outcome.is_complete
+    try:
+        outcome.get(0)
+    except MissingDictionaryError:
+        pass
+
+    # Supply the dictionary, then re-run.  Each shared object is interpreted
+    # once and every reference points at the same InterpretedObject.
+    session.add_dictionary(
+        LabelDictionary("sensors", 2, {"T-17": "exhaust temperature"})
+    )
+    outcome = session.process()[0]
+    assert outcome.get(0) is outcome.get(1)
+    assert outcome.get(0).name == "exhaust temperature"
+
+Failures are isolated and reported separately from successful values:
+
+* :class:`MissingDictionaryError` is non-terminal -- the object stays pending and is retried once
+  a suitable dictionary or a newer dictionary version defining the label arrives;
+* :class:`LabelRuleRejected` is terminal (a malformed payload or a failing ``validator``), and the
+  object is never re-interpreted on retry;
+* :class:`CorruptEncodingError` applies to a whole batch whose raw CBOR cannot be decoded, while
+  other batches and independent top-level objects are unaffected;
+* :class:`CyclicInterpretationError` is raised when labeled objects depend on each other with no
+  legal interpretation ordering; the blocking references are listed explicitly rather than being
+  decided by traversal order.
+
+Each :class:`InterpretationSession` keeps its own dictionaries, pending objects and confirmed
+interpretations, so two batches that rely on different dictionaries should use two sessions.
+
 Use Cases
 ---------
 

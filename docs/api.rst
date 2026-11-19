@@ -34,3 +34,26 @@ Exceptions
 .. autoexception:: cbor2.CBORDecodeError
 .. autoexception:: cbor2.CBORDecodeValueError
 .. autoexception:: cbor2.CBORDecodeEOF
+
+Deferred label interpretation
+------------------------------
+
+.. autoclass:: cbor2.LabelRule
+.. autoclass:: cbor2.LabelDictionary
+.. autoclass:: cbor2.InterpretationSession
+    :members:
+.. autoclass:: cbor2.BatchOutcome
+    :members:
+.. autoclass:: cbor2.PendingObject
+    :members:
+.. autoclass:: cbor2.PendingStatus
+    :members:
+.. autoclass:: cbor2.InterpretedObject
+    :members:
+.. autoclass:: cbor2.InterpretationFailure
+    :members:
+.. autoexception:: cbor2.InterpretationError
+.. autoexception:: cbor2.MissingDictionaryError
+.. autoexception:: cbor2.LabelRuleRejected
+.. autoexception:: cbor2.CorruptEncodingError
+.. autoexception:: cbor2.CyclicInterpretationError

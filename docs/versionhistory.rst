@@ -5,6 +5,14 @@ Version history
 
 This library adheres to `Semantic Versioning <http://semver.org/>`_.
 
+**UNRELEASED**
+
+- Added a deferred label interpretation layer (``cbor2.interpreter``) that keeps objects pending
+  until the required external dictionaries or dictionary versions are supplied, publishes
+  queryable results on demand, interprets each shared object once, isolates per-object and
+  per-batch failures, keeps separate state per session and reports un-orderable labeled
+  dependency cycles explicitly via :class:`~cbor2.CyclicInterpretationError`
+
 **5.6.5** (2024-10-09)
 
 - Published binary wheels for Python 3.13

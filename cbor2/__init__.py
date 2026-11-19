@@ -18,6 +18,19 @@ from ._types import CBORSimpleValue as CBORSimpleValue
 from ._types import CBORTag as CBORTag
 from ._types import FrozenDict as FrozenDict
 from ._types import undefined as undefined
+from .interpreter import BatchOutcome as BatchOutcome
+from .interpreter import CorruptEncodingError as CorruptEncodingError
+from .interpreter import CyclicInterpretationError as CyclicInterpretationError
+from .interpreter import InterpretationError as InterpretationError
+from .interpreter import InterpretationFailure as InterpretationFailure
+from .interpreter import InterpretationSession as InterpretationSession
+from .interpreter import InterpretedObject as InterpretedObject
+from .interpreter import LabelDictionary as LabelDictionary
+from .interpreter import LabelRule as LabelRule
+from .interpreter import LabelRuleRejected as LabelRuleRejected
+from .interpreter import MissingDictionaryError as MissingDictionaryError
+from .interpreter import PendingObject as PendingObject
+from .interpreter import PendingStatus as PendingStatus
 
 try:
     from _cbor2 import *  # noqa: F403
