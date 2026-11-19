@@ -156,6 +156,32 @@ singular or missing dimension (slice, time, or vector). By default the inputs
 will be merged in the order they are provided on the command line. To instead 
 sort the inputs using some meta data key use the *--sort* (*-s*) option.
 
+Building a Timeline
+^^^^^^^^^^^^^^^^^^^
+
+The *merge* command joins arrays but has no notion of acquisition identity or
+coverage. For separate acquisitions, use the *timeline* command with a JSON
+batch declaration:
+
+.. code-block:: console
+
+    $ cat batches.json
+    [
+      {"path": "session1.nii.gz", "acquisition_id": "series-UID-1",
+       "coverage": [0.0, 300.0], "source": "session1.nii.gz"},
+      {"path": "session2.nii.gz", "acquisition_id": "series-UID-2",
+       "coverage": [360.0, 660.0], "source": "session2.nii.gz"}
+    ]
+    $ nitool timeline batches.json timeline.nii.gz --report timeline.json
+
+Every entry requires *path*, a unique *acquisition_id*, and *coverage*. An
+optional *time_key* names a per-sample metadata key; *resampled* and
+*resample_note* must be set together if the inputs were resampled upstream.
+The command exits non-zero instead of producing output when identities are
+ambiguous, geometries differ, or a spatial shift is undeclared. The embedded
+``dcmstack.timeline`` record, also written by *--report*, lists every source and
+the gaps and overlaps that were declared.
+
 Dumping and Embedding
 ^^^^^^^^^^^^^^^^^^^^^
 

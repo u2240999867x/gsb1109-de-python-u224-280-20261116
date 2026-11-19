@@ -80,6 +80,61 @@ private health information.  This filtering can be controlled with the
 **IT IS YOUR RESPONSIBILITY TO KNOW IF THERE IS PRIVATE HEALTH INFORMATION 
 IN THE RESULTING FILE AND TREAT SUCH FILES APPROPRIATELY.**
 
+Building a Timeline from Separate Acquisitions
+----------------------------------------------
+
+``NiftiWrapper.from_sequence`` concatenates arrays without knowing where the
+inputs came from. When the inputs are separate acquisitions, use
+``dcmstack.timeline.build_timeline`` instead. It requires an explicit identity
+and coverage for every batch, checks the geometry before copying data, and
+records the result.
+
+.. code-block:: python
+
+    >>> from dcmstack import nifti_wrapper, timeline
+    >>> first = nifti_wrapper.NiftiWrapper.from_filename('session1.nii.gz')
+    >>> second = nifti_wrapper.NiftiWrapper.from_filename('session2.nii.gz')
+    >>> result = timeline.build_timeline([
+    ...     (first, timeline.BatchSpec(
+    ...         acquisition_id='series-UID-1',
+    ...         coverage=(0.0, 300.0),
+    ...         source='session1.nii.gz')),
+    ...     (second, timeline.BatchSpec(
+    ...         acquisition_id='series-UID-2',
+    ...         coverage=(360.0, 660.0),
+    ...         source='session2.nii.gz')),
+    ... ])
+    >>> result.wrapper.to_filename('timeline.nii.gz')
+    >>> result.gaps
+    [{'after': 'series-UID-1', 'before': 'series-UID-2', 'start': 300.0,
+      'end': 360.0, 'duration': 60.0, 'status': 'declared-gap'}]
+
+The rules are deliberately conservative:
+
+* Each batch must have a unique ``acquisition_id``. A repeated series UID is not
+  sufficient identity for two acquisitions; use a distinct scan or project ID.
+* Each batch must declare ``coverage`` in seconds (or another explicit unit).
+  The gap or overlap between declarations is recorded in the output. A gap is
+  never filled with synthetic data.
+* Overlapping coverage is retained. Samples are concatenated, not deduplicated,
+  and every pairwise overlap is reported in ``result.overlaps``.
+* The spatial shape, affine, dimension definitions, slice dimension, and
+  metadata shape must match. A reacquisition at a different origin is refused.
+  This module never resamples. If data was resampled upstream, set
+  ``resampled=True`` and provide a ``resample_note``; even then the final grids
+  must already match.
+* The time axis is the declared per-sample ``time_key`` only when it is present
+  and strictly increasing across the whole result. Otherwise an ordinal
+  ``dcmstack.time_index`` is used and the source timestamps are preserved
+  unchanged as metadata. Overlaps are not silently sorted into a false order.
+* The per-batch record, including the original affine, geometry checks,
+  coverage, source paths, and free-form metadata, is stored under
+  ``dcmstack.timeline`` in the DcmMeta extension. Existing source provenance
+  (for example ``SeriesInstanceUID``) is left intact.
+
+The same operation is available from the command line with a JSON batch file
+(see :doc:`CLI_Tutorial`).
+
 Creating NiftiWrapper Objects
 -----------------------------
 

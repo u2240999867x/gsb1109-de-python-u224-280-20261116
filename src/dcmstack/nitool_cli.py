@@ -55,6 +55,23 @@ def main(argv=sys.argv):
                               help="Clear all per slice meta data")
     merge_parser.set_defaults(func=merge)
 
+    #Timeline Command
+    timeline_help = ("Concatenate independent acquisitions along a time axis "
+                     "using explicit batch identities and coverage.")
+    timeline_parser = sub_parsers.add_parser('timeline', help=timeline_help)
+    timeline_parser.add_argument('batch_spec', nargs=1,
+                                 help=("JSON file listing batches with 'path', "
+                                 "'acquisition_id', and 'coverage'."))
+    timeline_parser.add_argument('output', nargs=1,
+                                 help="Output Nifti path.")
+    timeline_parser.add_argument('--no-sort', action='store_true',
+                                 help=("Use the declared order; it must already "
+                                 "be chronological."))
+    timeline_parser.add_argument('--report', default=None,
+                                 help=("Write the timeline JSON record to this "
+                                 "path."))
+    timeline_parser.set_defaults(func=timeline)
+
     #Dump Command
     dump_help = "Dump the JSON meta data extension from the provided Nifti."
     dump_parser = sub_parsers.add_parser('dump', help=dump_help)
@@ -163,6 +180,24 @@ def merge(args):
     out_name = (args.output[0] %
                 result_wrp.meta_ext.get_class_dict(('global', 'const')))
     result_wrp.to_filename(out_name)
+    return 0
+
+def timeline(args):
+    import json
+    from .timeline import parse_batch_specs, timeline_from_files, TimelineError
+
+    try:
+        specs = parse_batch_specs(args.batch_spec[0])
+        result = timeline_from_files(specs, sort=not args.no_sort)
+    except TimelineError as exc:
+        print("Timeline refused: %s" % exc, file=sys.stderr)
+        return 2
+    if args.report:
+        with open(args.report, 'w') as handle:
+            json.dump(result.record, handle, indent=4)
+            handle.write('\n')
+    out_name = args.output[0] % result.wrapper.meta_ext.get_class_dict(('global', 'const'))
+    result.to_filename(out_name)
     return 0
 
 def dump(args):

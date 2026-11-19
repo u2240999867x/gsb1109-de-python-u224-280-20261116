@@ -654,6 +654,23 @@ class NiftiWrapper(object):
             input_nii = input_wrp.nii_img
             input_aff = input_nii.affine
             input_hdr = input_nii.header
+            #When joining along a non-spatial dimension the whole voxel grid
+            #must be in the same space. Otherwise the first input's affine
+            #would silently discard a translation (e.g. a reacquisition at a
+            #different position).
+            if dim >= 3:
+                if input_nii.shape[:3] != shape[:3]:
+                    raise ValueError(
+                        "Cannot join images with different spatial shapes: "
+                        "%s vs %s" % (input_nii.shape[:3], shape[:3])
+                    )
+                if not np.allclose(input_aff[:3, 3], trans, atol=5e-4):
+                    raise ValueError(
+                        "Cannot join images with different spatial origins "
+                        "along a non-spatial dimension (translation differs "
+                        "by %s); resample explicitly first"
+                        % (input_aff[:3, 3] - trans)
+                    )
             #Check that the affines match appropriately
             for axis_idx, axis_vec in enumerate(axes):
                 in_vec = input_aff[:3, axis_idx]

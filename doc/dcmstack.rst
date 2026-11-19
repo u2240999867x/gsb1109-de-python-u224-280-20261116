@@ -29,3 +29,10 @@ dcmstack Package
     :members:
     :show-inheritance:
 
+:mod:`timeline` Module
+----------------------
+
+.. automodule:: dcmstack.timeline
+    :members:
+    :show-inheritance:
+

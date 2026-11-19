@@ -53,6 +53,32 @@ point).
 If there is a vector dimension there will be a 'vector' dictionary, handled in 
 the same manner as the 'time' dictionary.
 
+Timeline Provenance
+-------------------
+
+When files are concatenated with ``dcmstack.timeline``, the extension's
+``global/const`` dictionary contains a single ``dcmstack.timeline`` entry. It is a
+nested JSON record, not a summary over the source DICOMs:
+
+* ``schema`` and ``version`` identify the record format.
+* ``geometry`` stores the reference affine, tolerances, and whether upstream
+  resampling was declared. ``resampling_performed`` is always false: this code
+  never resamples.
+* ``coverage`` stores the overall interval plus ``gaps`` (declared gaps that were
+  not filled) and ``overlaps`` (retained, not deduplicated). Both lists name the
+  batches involved and give the interval and duration.
+* ``batches`` has one entry per input, in timeline order, with the
+  ``acquisition_id``, source label and paths, declared coverage, original shape
+  and affine, geometry checks, the ``[start, stop)`` time slice, and the source
+  times when available.
+* ``time_key`` and ``time_axis`` state which metadata key defines the time
+  dimension and why. If a declared source time key is absent or not strictly
+  increasing after concatenation, ``time_key`` is the ordinal
+  ``dcmstack.time_index`` and the source timestamps are preserved unchanged.
+
+The record is additive. Existing provenance such as ``SeriesInstanceUID``,
+``StudyInstanceUID``, and extracted DICOM metadata is not removed or rewritten.
+
 Encoding
 --------
 
