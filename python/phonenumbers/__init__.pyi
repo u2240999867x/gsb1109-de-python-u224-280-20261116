@@ -64,6 +64,12 @@ from .phonenumberutil import supported_types_for_region as supported_types_for_r
 from .phonenumberutil import truncate_too_long_number as truncate_too_long_number
 from .phonenumberutil import UNKNOWN_REGION as UNKNOWN_REGION
 from .phonenumberutil import ValidationResult as ValidationResult
+from .numberclassification import NumberCategory as NumberCategory
+from .numberclassification import NumberClassification as NumberClassification
+from .numberclassification import NumberConclusion as NumberConclusion
+from .numberclassification import NumberReach as NumberReach
+from .numberclassification import classify_number as classify_number
+from .numberclassification import classify_numbers as classify_numbers
 from .re_util import enable_pattern_cache as enable_pattern_cache
 from .shortnumberinfo import connects_to_emergency_number as connects_to_emergency_number
 from .shortnumberinfo import expected_cost as expected_cost

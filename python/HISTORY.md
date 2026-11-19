@@ -12,6 +12,17 @@ This file does not generally include descriptions of patch releases (vX.Y.Z
 changes.  (Metadata updates are best checked
 [upstream](https://github.com/google/libphonenumber/blob/master/release_notes.txt).)
 
+Unreleased
+----------
+
+Added an offline number-classification exit point in the new `phonenumbers.numberclassification`
+module (`classify_number()` and `classify_numbers()`).  Given a terminal region, roaming flag
+and optional enterprise domain, it separates ordinary numbers, regional short codes and
+enterprise extensions, and only emits categories and dialling ranges backed by the bundled
+metadata: short-number length alone never proves local validity, emergency matching never
+implies ordinary-service reachability, regionless input keeps its candidate conclusions
+without inventing an area code, and identical digits remain distinct across regions/domains.
+
 What's new in 9.0.43
 --------------------
 
